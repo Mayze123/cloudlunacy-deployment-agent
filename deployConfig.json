@@ -1,0 +1,18 @@
+{
+    "react": {
+      "dockerfileTemplate": "templates/dockerfiles/react.Dockerfile.hbs",
+      "dockerComposeTemplate": "templates/docker-compose/react.yml.hbs",
+      "defaultPort": 80
+    },
+    "vue": {
+      "dockerfileTemplate": "templates/dockerfiles/vue.Dockerfile.hbs",
+      "dockerComposeTemplate": "templates/docker-compose/vue.yml.hbs",
+      "defaultPort": 8080
+    },
+    "next": {
+      "dockerfileTemplate": "templates/dockerfiles/next.Dockerfile.hbs",
+      "dockerComposeTemplate": "templates/docker-compose/next.yml.hbs",
+      "defaultPort": 3000
+    }
+  }
+  

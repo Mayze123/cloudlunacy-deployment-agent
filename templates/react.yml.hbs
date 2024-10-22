@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  {{appName}}:
+    build: .
+    ports:
+      - "{{dockerPort}}:80"
+    environment:
+{{#each envVars}}
+      - "{{@key}}={{this}}"
+{{/each}}
+    restart: always
+    networks:
+      - cloudlunacy_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80"]
+      interval: 1m30s
+      timeout: 10s
+      retries: 3
+
+networks:
+  cloudlunacy_network:
+    driver: bridge
