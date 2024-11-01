@@ -281,7 +281,7 @@ setup_user_directories() {
     if id "$USERNAME" &>/dev/null; then
         log "User '$USERNAME' already exists."
     else
-        useradd -r -s /bin/false "$USERNAME"
+        useradd -m -d /home/$USERNAME -r -s /bin/bash "$USERNAME"
         log "User '$USERNAME' created."
     fi
 
@@ -323,12 +323,12 @@ install_agent_dependencies() {
     cd "$BASE_DIR"
     # Check if package.json exists
     if [ -f "package.json" ]; then
-        sudo -u "$USERNAME" npm install
+        sudo -H -u "$USERNAME" npm install
     else
         # Initialize package.json and install dependencies
-        sudo -u "$USERNAME" npm init -y
-        sudo -u "$USERNAME" npm install axios
-        # Add other dependencies as needed
+        sudo -H -u "$USERNAME" npm init -y
+        sudo -H -u "$USERNAME" npm install axios
+        # Add other dependencies if required
     fi
     log "Agent dependencies installed."
 }
