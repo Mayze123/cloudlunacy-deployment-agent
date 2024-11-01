@@ -32,7 +32,8 @@ jobs:
 
       - name: Generate SHA256 Checksum
         run: |
-          sha256sum scripts/install-agent.sh > scripts/install-agent.sh.sha256
+          cd scripts
+          sha256sum install-agent.sh > ../install-agent.sh.sha256
 
       - name: Upload Release Assets
         uses: ncipollo/release-action@v1
