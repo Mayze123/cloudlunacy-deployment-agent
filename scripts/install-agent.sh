@@ -18,11 +18,12 @@
 #   - Provides post-installation verification and feedback
 #
 # Usage:
-#   curl -sSL https://github.com/Mayze123/cloudlunacy-deployment-agent/releases/latest/download/install-agent.sh | sudo bash -s -- <AGENT_TOKEN> <SERVER_ID>
+#   sudo ./install-agent.sh <AGENT_TOKEN> <SERVER_ID> [BACKEND_URL]
 #
 # Arguments:
 #   AGENT_TOKEN - Unique token for agent authentication
 #   SERVER_ID   - Unique identifier for the server
+#   BACKEND_URL - (Optional) Backend URL; defaults to https://cd62-142-113-7-32.ngrok-free.app/api/agent
 # ------------------------------------------------------------------------------
 
 set -euo pipefail
@@ -71,18 +72,6 @@ check_root() {
         exit 1
     fi
 }
-
-# In main function
-AGENT_TOKEN="$1"
-SERVER_ID="$2"
-BACKEND_URL="${3:-https://cd62-142-113-7-32.ngrok-free.app/api/agent}"
-
-# In configure_env function
-cat <<EOF > "$ENV_FILE"
-BACKEND_URL=$BACKEND_URL
-AGENT_API_TOKEN=$AGENT_TOKEN
-SERVER_ID=$SERVER_ID
-EOF
 
 # Function to detect OS and version
 detect_os() {
@@ -388,13 +377,13 @@ verify_installation() {
 # Function to display completion message
 completion_message() {
     echo -e "\033[0;35m
-       ____                            _         _       _   _                 _
-      / ___|___  _ __   __ _ _ __ __ _| |_ _   _| | __ _| |_(_) ___  _ __  ___| |
-     | |   / _ \| '_ \ / _\` | '__/ _\` | __| | | | |/ _\` | __| |/ _ \| '_ \/ __| |
-     | |__| (_) | | | | (_| | | | (_| | |_| |_| | | (_| | |_| | (_) | | | \__ \_|
-      \____\___/|_| |_|\__, |_|  \__,_|\__|\__,_|_|\__,_|\__|_|\___/|_| |_|___(_)
+   ____                            _         _       _   _                 _
+  / ___|___  _ __   __ _ _ __ __ _| |_ _   _| | __ _| |_(_) ___  _ __  ___| |
+ | |   / _ \| '_ \ / _\` | '__/ _\` | __| | | | |/ _\` | __| |/ _ \| '_ \/ __| |
+ | |__| (_) | | | | (_| | | | (_| | |_| |_| | | (_| | |_| | (_) | | | \__ \_|
+  \____\___/|_| |_|\__, |_|  \__,_|\__|\__,_|_|\__,_|\__|_|\___/|_| |_|___(_)
                        |___/
-    \033[0m"
+\033[0m"
     echo -e "\nYour CloudLunacy Deployment Agent is ready to use."
     echo -e "Access it by visiting: http://$(curl -4s https://ifconfig.io):8000"
     echo -e "Logs are located at: $BASE_DIR/logs/agent.log"
@@ -423,6 +412,7 @@ main() {
 
     AGENT_TOKEN="$1"
     SERVER_ID="$2"
+    BACKEND_URL="${3:-https://cd62-142-113-7-32.ngrok-free.app/api/agent}"
 
     read OS_TYPE OS_VERSION < <(detect_os)
 
