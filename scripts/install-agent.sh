@@ -1,7 +1,7 @@
 #!/bin/bash
 # ------------------------------------------------------------------------------
 # Installation Script for CloudLunacy Deployment Agent
-# Version: 1.2.0
+# Version: 1.4.0
 # Author: Mahamadou Taibou
 # Date: 2024-11-01
 #
@@ -28,7 +28,8 @@
 # ------------------------------------------------------------------------------
 
 set -euo pipefail
-#set -x  # Uncomment to enable debugging mode
+# Uncomment the following line to enable debugging
+# set -x
 IFS=$'\n\t'
 
 # ----------------------------
@@ -39,7 +40,7 @@ IFS=$'\n\t'
 display_info() {
     echo "-------------------------------------------------"
     echo "CloudLunacy Deployment Agent Installation Script"
-    echo "Version: 1.2.0"
+    echo "Version: 1.4.0"
     echo "Author: Mahamadou Taibou"
     echo "Date: 2024-11-01"
     echo "-------------------------------------------------"
@@ -250,14 +251,21 @@ setup_user_directories() {
 
     if id "$USERNAME" &>/dev/null; then
         log "User '$USERNAME' already exists."
+        usermod -d "$BASE_DIR" "$USERNAME"
     else
-        useradd -m -d /home/$USERNAME -r -s /bin/bash "$USERNAME"
+        useradd -m -d "$BASE_DIR" -r -s /bin/bash "$USERNAME"
         log "User '$USERNAME' created."
     fi
 
-    mkdir -p "$BASE_DIR"/{logs,ssh,config,bin}
+    # Ensure base directory exists and has correct permissions
+    mkdir -p "$BASE_DIR"
     chown -R "$USERNAME":"$USERNAME" "$BASE_DIR"
     chmod -R 750 "$BASE_DIR"
+
+    # Create subdirectories
+    mkdir -p "$BASE_DIR"/{logs,ssh,config,bin}
+    chown -R "$USERNAME":"$USERNAME" "$BASE_DIR"/{logs,ssh,config,bin}
+
     log "Directories created at $BASE_DIR."
 }
 
@@ -265,7 +273,7 @@ setup_user_directories() {
 download_agent() {
     log "Cloning the CloudLunacy Deployment Agent repository..."
     if [ -d "$BASE_DIR" ]; then
-        rm -rf "$BASE_DIR"
+        rm -rf "$BASE_DIR"/*
     fi
     git clone https://github.com/Mayze123/cloudlunacy-deployment-agent.git "$BASE_DIR"
     chown -R "$USERNAME":"$USERNAME" "$BASE_DIR"
@@ -277,14 +285,22 @@ install_agent_dependencies() {
     log "Installing agent dependencies..."
     cd "$BASE_DIR"
 
-    # Check if package.json exists
+    # Remove existing node_modules and package-lock.json
+    rm -rf node_modules package-lock.json
+
+    # Set NPM cache directory within base directory
+    NPM_CACHE_DIR="$BASE_DIR/.npm-cache"
+    mkdir -p "$NPM_CACHE_DIR"
+    chown -R "$USERNAME":"$USERNAME" "$NPM_CACHE_DIR"
+
+    # Run npm install as the cloudlunacy user
     if [ -f "package.json" ]; then
-        sudo -u "$USERNAME" HOME="/home/$USERNAME" npm install
+        sudo -u "$USERNAME" HOME="$BASE_DIR" npm install --cache "$NPM_CACHE_DIR" --no-fund --no-audit
     else
-        sudo -u "$USERNAME" HOME="/home/$USERNAME" npm init -y
-        sudo -u "$USERNAME" HOME="/home/$USERNAME" npm install axios dotenv winston ws handlebars
-        # Add other dependencies as required
+        sudo -u "$USERNAME" HOME="$BASE_DIR" npm init -y
+        sudo -u "$USERNAME" HOME="$BASE_DIR" npm install axios dotenv winston ws handlebars --cache "$NPM_CACHE_DIR" --no-fund --no-audit
     fi
+
     log "Agent dependencies installed."
 }
 
@@ -320,6 +336,7 @@ WorkingDirectory=$BASE_DIR
 Restart=always
 RestartSec=5
 User=$USERNAME
+Environment=HOME=$BASE_DIR
 EnvironmentFile=$ENV_FILE
 
 [Install]
