@@ -64,6 +64,14 @@ check_args() {
     fi
 }
 
+# Function to check for root privileges
+check_root() {
+    if [ "$(id -u)" -ne 0 ]; then
+        log_error "This script must be run as root. Please run it with sudo."
+        exit 1
+    fi
+}
+
 # In main function
 AGENT_TOKEN="$1"
 SERVER_ID="$2"
@@ -296,7 +304,7 @@ setup_user_directories() {
 
     mkdir -p "$BASE_DIR"/{logs,ssh,config,bin}
     chown -R "$USERNAME":"$USERNAME" "$BASE_DIR"
-    chmod -R 700 "$BASE_DIR"
+    chmod -R 750 "$BASE_DIR"
     log "Directories created at $BASE_DIR."
 }
 
@@ -329,7 +337,7 @@ configure_env() {
     ENV_FILE="$BASE_DIR/.env"
 
     cat <<EOF > "$ENV_FILE"
-BACKEND_URL=https://cd62-142-113-7-32.ngrok-free.app/api/agent
+BACKEND_URL=$BACKEND_URL
 AGENT_API_TOKEN=$AGENT_TOKEN
 SERVER_ID=$SERVER_ID
 EOF
@@ -409,6 +417,7 @@ cleanup_on_error() {
 trap cleanup_on_error ERR
 
 main() {
+    check_root
     display_info
     check_args "$@"
 
