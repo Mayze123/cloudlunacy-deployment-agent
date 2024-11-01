@@ -22,9 +22,10 @@ const logger = require('./utils/logger');
 const { executeCommand } = require('./utils/executor');
 
 // Import deployment modules
-const deployReactAppDocker = require('./modules/deployReactAppDocker');
-const deployNodeApp = require('./modules/deployNodeApp');
-const manageDatabase = require('./modules/manageDatabase');
+const deployApp = require('./modules/deployApp');
+// const deployReactAppDocker = require('./modules/deployReactAppDocker');
+// const deployNodeApp = require('./modules/deployNodeApp');
+// const manageDatabase = require('./modules/manageDatabase');
 
 // Load environment variables
 dotenv.config();
@@ -89,9 +90,21 @@ async function authenticateAndConnect() {
             }
         });
 
+        const MAX_RETRIES = 5;
+        let retryCount = 0;
+        let retryDelay = 5000; // Start with 5 seconds
+        
         ws.on('close', () => {
-            logger.warn('WebSocket connection closed. Attempting to reconnect in 5 seconds...');
-            setTimeout(authenticateAndConnect, 5000);
+            if (retryCount < MAX_RETRIES) {
+                logger.warn(`WebSocket connection closed. Attempting to reconnect in ${retryDelay/1000} seconds...`);
+                setTimeout(() => {
+                    retryCount++;
+                    retryDelay *= 2; // Exponential backoff
+                    authenticateAndConnect();
+                }, retryDelay);
+            } else {
+                logger.error('Maximum retry attempts reached. Please check the connection.');
+            }
         });
 
         ws.on('error', (error) => {
@@ -112,14 +125,8 @@ async function authenticateAndConnect() {
  */
 function handleMessage(message) {
     switch (message.type) {
-        case 'deploy_react_app_docker':
-            deployReactAppDocker(message.payload, ws);
-            break;
-        case 'deploy_node_app':
-            deployNodeApp(message.payload, ws);
-            break;
-        case 'manage_database':
-            manageDatabase(message.payload, ws);
+        case 'deploy_app':
+            deployApp(message.payload, ws);
             break;
         default:
             logger.warn('Unknown message type:', message.type);

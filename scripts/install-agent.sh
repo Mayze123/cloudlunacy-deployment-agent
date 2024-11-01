@@ -57,12 +57,24 @@ log_error() {
 
 # Function to check for required arguments
 check_args() {
-    if [ "$#" -ne 2 ]; then
+    if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then
         log_error "Invalid number of arguments."
-        echo "Usage: $0 <AGENT_TOKEN> <SERVER_ID>"
+        echo "Usage: $0 <AGENT_TOKEN> <SERVER_ID> [BACKEND_URL]"
         exit 1
     fi
 }
+
+# In main function
+AGENT_TOKEN="$1"
+SERVER_ID="$2"
+BACKEND_URL="${3:-https://cd62-142-113-7-32.ngrok-free.app/api/agent}"
+
+# In configure_env function
+cat <<EOF > "$ENV_FILE"
+BACKEND_URL=$BACKEND_URL
+AGENT_API_TOKEN=$AGENT_TOKEN
+SERVER_ID=$SERVER_ID
+EOF
 
 # Function to detect OS and version
 detect_os() {
@@ -236,8 +248,36 @@ install_node() {
     fi
 
     log "Node.js not found. Installing Node.js..."
-    curl -fsSL https://deb.nodesource.com/setup_18.x | bash -
-    apt-get install -y nodejs
+    case "$OS_TYPE" in
+        ubuntu | debian | raspbian)
+            curl -fsSL https://deb.nodesource.com/setup_18.x | bash -
+            apt-get install -y nodejs
+            ;;
+        centos | rhel | ol | rocky | almalinux)
+            curl -fsSL https://rpm.nodesource.com/setup_18.x | bash -
+            yum install -y nodejs
+            ;;
+        fedora)
+            dnf module install -y nodejs:18
+            ;;
+        amzn)
+            curl -fsSL https://rpm.nodesource.com/setup_18.x | bash -
+            yum install -y nodejs
+            ;;
+        arch)
+            pacman -S --noconfirm nodejs npm
+            ;;
+        alpine)
+            apk add --no-cache nodejs npm
+            ;;
+        sles | opensuse-leap | opensuse-tumbleweed)
+            zypper install -y nodejs18
+            ;;
+        *)
+            log_error "Unsupported OS for Node.js installation: $OS_TYPE"
+            exit 1
+            ;;
+    esac
     log "Node.js installed successfully."
 }
 
@@ -289,7 +329,7 @@ configure_env() {
     ENV_FILE="$BASE_DIR/.env"
 
     cat <<EOF > "$ENV_FILE"
-BACKEND_URL=https://your-saas-platform.com/api/agent
+BACKEND_URL=https://cd62-142-113-7-32.ngrok-free.app/api/agent
 AGENT_API_TOKEN=$AGENT_TOKEN
 SERVER_ID=$SERVER_ID
 EOF

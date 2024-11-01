@@ -49,11 +49,66 @@ remove_agent_user() {
     echo "User 'cloudlunacy' removed."
 }
 
+# Detect OS and version
+detect_os() {
+    OS_TYPE=$(grep -w "ID" /etc/os-release | cut -d "=" -f 2 | tr -d '"')
+    OS_VERSION=$(grep -w "VERSION_ID" /etc/os-release | cut -d "=" -f 2 | tr -d '"')
+
+    # Normalize OS names
+    case "$OS_TYPE" in
+        manjaro | manjaro-arm)
+            OS_TYPE="arch"
+            OS_VERSION="rolling"
+            ;;
+        fedora-asahi-remix)
+            OS_TYPE="fedora"
+            ;;
+        pop)
+            OS_TYPE="ubuntu"
+            ;;
+        linuxmint)
+            OS_TYPE="ubuntu"
+            ;;
+        zorin)
+            OS_TYPE="ubuntu"
+            ;;
+        *)
+            ;;
+    esac
+
+    echo "$OS_TYPE" "$OS_VERSION"
+}
+
+read OS_TYPE OS_VERSION < <(detect_os)
+
 # Function to uninstall Docker and Docker Compose (optional)
 uninstall_docker() {
     echo "Uninstalling Docker and Docker Compose..."
-    sudo apt-get remove -y docker.io docker-compose
-    sudo apt-get autoremove -y
+    case "$OS_TYPE" in
+        ubuntu | debian | raspbian)
+            apt-get remove -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+            apt-get purge -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+            apt-get autoremove -y --purge
+            ;;
+        centos | rhel | ol | rocky | almalinux | amzn)
+            yum remove -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+            ;;
+        fedora)
+            dnf remove -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+            ;;
+        arch)
+            pacman -Rns --noconfirm docker
+            ;;
+        alpine)
+            apk del docker
+            ;;
+        sles | opensuse-leap | opensuse-tumbleweed)
+            zypper remove -y docker
+            ;;
+        *)
+            echo "Unsupported OS for Docker uninstallation: $OS_TYPE"
+            ;;
+    esac
     echo "Docker and Docker Compose uninstalled."
 }
 

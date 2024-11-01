@@ -5,6 +5,7 @@ const logger = require('../utils/logger');
 const fs = require('fs').promises;
 const path = require('path');
 const Handlebars = require('handlebars');
+const WebSocket = require('ws');
 
 const deployConfig = require('../deployConfig.json');
 
@@ -45,7 +46,7 @@ async function deployApp(payload, ws) {
         await cloneRepositoryWithRetry(repoUrl, appDir, 3, 2000);
 
         // Checkout the specified branch
-        await executeCommand(`git checkout ${branch}`, appDir);
+        await executeCommand('git', ['checkout', branch], appDir);
 
         // Read and compile Dockerfile template
         const dockerfileTemplate = await fs.readFile(dockerfileTemplatePath, 'utf-8');
@@ -64,7 +65,7 @@ async function deployApp(payload, ws) {
         logger.info(`Docker Compose file created at ${dockerComposePath}`);
 
         // Deploy the container using Docker Compose
-        await executeCommand(`docker-compose up -d`, appDir);
+        await executeCommand('docker-compose', ['up', '-d'], appDir);
         logger.info(`${appType} app ${appName} deployed successfully using Docker Compose.`);
 
         // Send success status to backend
@@ -76,7 +77,7 @@ async function deployApp(payload, ws) {
         sendStatus(ws, 'deploy_app', 'failure', `Error deploying ${appType} app ${appName}: ${error.message}`);
 
         // Optional: Cleanup resources
-        // await executeCommand(`rm -rf ${appDir}`, '/opt/cloudlunacy');
+        // await executeCommand('rm', ['-rf', appDir], '/opt/cloudlunacy');
     }
 }
 
@@ -90,7 +91,7 @@ async function deployApp(payload, ws) {
 async function cloneRepositoryWithRetry(repoUrl, appDir, retries, delay) {
     for (let attempt = 1; attempt <= retries; attempt++) {
         try {
-            await executeCommand(`git clone ${repoUrl} ${appDir}`, '/opt/cloudlunacy');
+            await executeCommand('git', ['clone', repoUrl, appDir], '/opt/cloudlunacy');
             logger.info(`Repository cloned to ${appDir}`);
             return;
         } catch (error) {

@@ -7,27 +7,47 @@
  * Ensures consistent execution of commands across different modules.
  */
 
-const { exec } = require('child_process');
+const { spawn } = require('child_process');
 const logger = require('./logger');
 
 /**
  * Executes a shell command asynchronously.
- * @param {String} cmd - The command to execute
+ * @param {String} command - The command to execute
+ * @param {Array} args - The list of string arguments
  * @param {String} cwd - (Optional) The working directory to execute the command in
  * @returns {Promise} - Resolves on successful execution, rejects on error
  */
-function executeCommand(cmd, cwd = process.cwd()) {
+function executeCommand(command, args = [], cwd = process.cwd()) {
     return new Promise((resolve, reject) => {
-        exec(cmd, { cwd }, (error, stdout, stderr) => {
-            if (error) {
-                logger.error(`Command failed: ${cmd}`);
-                logger.error(`Error: ${error.message}`);
+        const cmd = spawn(command, args, { cwd });
+
+        let stdout = '';
+        let stderr = '';
+
+        cmd.stdout.on('data', (data) => {
+            stdout += data.toString();
+        });
+
+        cmd.stderr.on('data', (data) => {
+            stderr += data.toString();
+        });
+
+        cmd.on('close', (code) => {
+            if (code !== 0) {
+                logger.error(`Command failed: ${command} ${args.join(' ')}`);
                 logger.error(`Stderr: ${stderr}`);
-                return reject(error);
+                return reject(new Error(`Command failed with exit code ${code}`));
+            } else {
+                logger.debug(`Command succeeded: ${command} ${args.join(' ')}`);
+                logger.debug(`Stdout: ${stdout}`);
+                resolve(stdout);
             }
-            logger.debug(`Command succeeded: ${cmd}`);
-            logger.debug(`Stdout: ${stdout}`);
-            resolve(stdout);
+        });
+
+        cmd.on('error', (error) => {
+            logger.error(`Failed to start command: ${command} ${args.join(' ')}`);
+            logger.error(`Error: ${error.message}`);
+            reject(error);
         });
     });
 }

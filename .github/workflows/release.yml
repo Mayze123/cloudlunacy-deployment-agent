@@ -1,0 +1,47 @@
+# .github/workflows/release.yml
+
+name: Create Release
+
+on:
+  push:
+    tags:
+      - 'v*'  # Triggers on tags starting with 'v'
+
+jobs:
+  build-and-release:
+    name: Build and Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18.x'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Build Project
+        run: npm run build
+
+      - name: Generate SHA256 Checksum
+        run: |
+          sha256sum scripts/install-agent.sh > scripts/install-agent.sh.sha256
+
+      - name: Upload Release Assets
+        uses: ncipollo/release-action@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
+          body: |
+            ## Changes in this release
+            - Describe your changes here.
+          artifacts: |
+            scripts/install-agent.sh
+            scripts/install-agent.sh.sha256
+          draft: false
+          prerelease: false
