@@ -10,9 +10,10 @@
 # It performs the following tasks:
 #   - Detects the operating system and version
 #   - Updates system packages
-#   - Installs necessary dependencies (Docker, Docker Compose, Git, jq)
+#   - Installs necessary dependencies (Docker, Node.js, Git, jq)
 #   - Creates a dedicated user and directory for the agent
-#   - Downloads the latest version of the Deployment Agent from GitHub Releases
+#   - Downloads the latest version of the Deployment Agent from GitHub
+#   - Installs Node.js dependencies
 #   - Configures environment variables
 #   - Sets up the Deployment Agent as a systemd service
 #   - Provides post-installation verification and feedback
@@ -170,7 +171,7 @@ install_docker() {
     fi
 
     log "Docker not found. Installing Docker..."
-    case "$OS_TYPE" in
+  case "$OS_TYPE" in
         ubuntu | debian | raspbian)
             apt-get install -y \
                 ca-certificates \
@@ -292,7 +293,7 @@ setup_user_directories() {
 
 # Function to download and verify the latest agent
 download_agent() {
-    log "Downloading the latest CloudLunacy Deployment Agent..."
+       log "Downloading the latest CloudLunacy Deployment Agent..."
     LATEST_RELEASE=$(curl -s https://api.github.com/repos/Mayze123/cloudlunacy-deployment-agent/releases/latest | grep tag_name | cut -d '"' -f 4)
     
     if [ -z "$LATEST_RELEASE" ]; then
@@ -314,6 +315,22 @@ download_agent() {
     rm -rf "$TEMP_DIR"
     chown -R "$USERNAME":"$USERNAME" "$BASE_DIR"
     log "Agent downloaded and extracted to $BASE_DIR."
+}
+
+# Function to install agent dependencies
+install_agent_dependencies() {
+    log "Installing agent dependencies..."
+    cd "$BASE_DIR"
+    # Check if package.json exists
+    if [ -f "package.json" ]; then
+        sudo -u "$USERNAME" npm install
+    else
+        # Initialize package.json and install dependencies
+        sudo -u "$USERNAME" npm init -y
+        sudo -u "$USERNAME" npm install axios
+        # Add other dependencies as needed
+    fi
+    log "Agent dependencies installed."
 }
 
 # Function to configure environment variables
@@ -374,16 +391,15 @@ verify_installation() {
 # Function to display completion message
 completion_message() {
     echo -e "\033[0;35m
-       ____                            _         _       _   _                 _
-      / ___|___  _ __   __ _ _ __ __ _| |_ _   _| | __ _| |_(_) ___  _ __  ___| |
-     | |   / _ \| '_ \ / _\` | '__/ _\` | __| | | | |/ _\` | __| |/ _ \| '_ \/ __| |
-     | |__| (_) | | | | (_| | | | (_| | |_| |_| | | (_| | |_| | (_) | | | \__ \_|
-      \____\___/|_| |_|\__, |_|  \__,_|\__|\__,_|_|\__,_|\__|_|\___/|_| |_|___(_)
-                           |___/
-    \033[0m"
+   ____                            _         _       _   _                 _
+  / ___|___  _ __   __ _ _ __ __ _| |_ _   _| | __ _| |_(_) ___  _ __  ___| |
+ | |   / _ \| '_ \ / _\` | '__/ _\` | __| | | | |/ _\` | __| |/ _ \| '_ \/ __| |
+ | |__| (_) | | | | (_| | | | (_| | |_| |_| | | (_| | |_| | (_) | | | \__ \_|
+  \____\___/|_| |_|\__, |_|  \__,_|\__|\__,_|_|\__,_|\__|_|\___/|_| |_|___(_)
+                       |___/
+\033[0m"
     echo -e "\nYour CloudLunacy Deployment Agent is ready to use."
 
-    # Use an alternative service to get the public IP
     PUBLIC_IP=$(curl -s https://api.ipify.org)
     if [ -z "$PUBLIC_IP" ]; then
         PUBLIC_IP="your_server_ip"
@@ -428,6 +444,7 @@ main() {
     install_node
     setup_user_directories
     download_agent
+    install_agent_dependencies  # Added function call
     configure_env
     setup_service
     verify_installation
