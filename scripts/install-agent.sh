@@ -1,7 +1,7 @@
 #!/bin/bash
 # ------------------------------------------------------------------------------
 # Installation Script for CloudLunacy Deployment Agent
-# Version: 1.4.0
+# Version: 1.5.0
 # Author: Mahamadou Taibou
 # Date: 2024-11-01
 #
@@ -40,7 +40,7 @@ IFS=$'\n\t'
 display_info() {
     echo "-------------------------------------------------"
     echo "CloudLunacy Deployment Agent Installation Script"
-    echo "Version: 1.4.0"
+    echo "Version: 1.5.0"
     echo "Author: Mahamadou Taibou"
     echo "Date: 2024-11-01"
     echo "-------------------------------------------------"
@@ -273,9 +273,13 @@ setup_user_directories() {
 download_agent() {
     log "Cloning the CloudLunacy Deployment Agent repository..."
     if [ -d "$BASE_DIR" ]; then
-        rm -rf "$BASE_DIR"/*
+        rm -rf "$BASE_DIR"
     fi
-    git clone https://github.com/Mayze123/cloudlunacy-deployment-agent.git "$BASE_DIR"
+    # Recreate the base directory and set ownership
+    mkdir -p "$BASE_DIR"
+    chown "$USERNAME":"$USERNAME" "$BASE_DIR"
+
+    sudo -u "$USERNAME" git clone https://github.com/Mayze123/cloudlunacy-deployment-agent.git "$BASE_DIR"
     chown -R "$USERNAME":"$USERNAME" "$BASE_DIR"
     log "Agent cloned to $BASE_DIR."
 }
