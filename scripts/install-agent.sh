@@ -294,36 +294,23 @@ setup_user_directories() {
 download_agent() {
     log "Downloading the latest CloudLunacy Deployment Agent..."
     LATEST_RELEASE=$(curl -s https://api.github.com/repos/Mayze123/cloudlunacy-deployment-agent/releases/latest | grep tag_name | cut -d '"' -f 4)
-
+    
     if [ -z "$LATEST_RELEASE" ]; then
         log_error "Failed to retrieve the latest release information from GitHub."
         exit 1
     fi
 
-    DOWNLOAD_URL="https://github.com/Mayze123/cloudlunacy-deployment-agent/releases/download/${LATEST_RELEASE}/cloudlunacy-deployment-agent-${LATEST_RELEASE}.tar.gz"
-    CHECKSUM_URL="https://github.com/Mayze123/cloudlunacy-deployment-agent/releases/download/${LATEST_RELEASE}/sha256sum.txt"
-
+    DOWNLOAD_URL="https://github.com/Mayze123/cloudlunacy-deployment-agent/archive/refs/tags/${LATEST_RELEASE}.tar.gz"
     TEMP_DIR=$(mktemp -d)
+
+    # Download the agent tarball
     if ! wget "$DOWNLOAD_URL" -O "$TEMP_DIR/agent.tar.gz"; then
         log_error "Failed to download the agent tarball from $DOWNLOAD_URL."
         exit 1
     fi
 
-    if ! wget "$CHECKSUM_URL" -O "$TEMP_DIR/sha256sum.txt"; then
-        log_error "Failed to download the checksum file from $CHECKSUM_URL."
-        exit 1
-    fi
-
-    log "Verifying download integrity..."
-    cd "$TEMP_DIR"
-    if ! sha256sum -c sha256sum.txt; then
-        log_error "Checksum verification failed."
-        exit 1
-    fi
-    cd -
-
     log "Extracting the agent..."
-    tar -xzf "$TEMP_DIR/agent.tar.gz" -C "$BASE_DIR"
+    tar -xzf "$TEMP_DIR/agent.tar.gz" -C "$BASE_DIR" --strip-components=1
     rm -rf "$TEMP_DIR"
     chown -R "$USERNAME":"$USERNAME" "$BASE_DIR"
     log "Agent downloaded and extracted to $BASE_DIR."
