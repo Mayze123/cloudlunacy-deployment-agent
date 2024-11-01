@@ -100,7 +100,6 @@ detect_os() {
             ;;
     esac
 
-    echo "$OS_TYPE" "$OS_VERSION"
 }
 
 # Function to update system packages
@@ -414,9 +413,9 @@ main() {
     SERVER_ID="$2"
     BACKEND_URL="${3:-https://cd62-142-113-7-32.ngrok-free.app/api/agent}"
 
-    read OS_TYPE OS_VERSION < <(detect_os)
+    detect_os
+    log "Detected OS: $OS_TYPE $OS_VERSION"
 
-    update_system
     install_dependencies
     install_docker
     install_node
