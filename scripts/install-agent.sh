@@ -23,10 +23,11 @@
 # Arguments:
 #   AGENT_TOKEN - Unique token for agent authentication
 #   SERVER_ID   - Unique identifier for the server
-#   BACKEND_URL - (Optional) Backend URL; defaults to https://cd62-142-113-7-32.ngrok-free.app/api/agent
+#   BACKEND_URL - (Optional) Backend URL; defaults to https://your-default-backend-url/api/agent
 # ------------------------------------------------------------------------------
 
 set -euo pipefail
+set -x  # Enable debugging mode
 IFS=$'\n\t'
 
 # ----------------------------
@@ -87,19 +88,12 @@ detect_os() {
         fedora-asahi-remix)
             OS_TYPE="fedora"
             ;;
-        pop)
-            OS_TYPE="ubuntu"
-            ;;
-        linuxmint)
-            OS_TYPE="ubuntu"
-            ;;
-        zorin)
+        pop | linuxmint | zorin)
             OS_TYPE="ubuntu"
             ;;
         *)
             ;;
     esac
-
 }
 
 # Function to update system packages
@@ -126,7 +120,7 @@ update_system() {
             zypper refresh && zypper update -y
             ;;
         *)
-            log_error "Unsupported OS: $OS_TYPE"
+            log_error "Unsupported OS: $OS_TYPE $OS_VERSION"
             exit 1
             ;;
     esac
@@ -138,29 +132,29 @@ install_dependencies() {
     log "Installing dependencies (curl, wget, git, jq)..."
     case "$OS_TYPE" in
         ubuntu | debian | raspbian)
-            apt-get install -y curl wget git jq
+            apt-get install -y curl wget git jq coreutils
             ;;
         arch)
-            pacman -S --noconfirm curl wget git jq
+            pacman -S --noconfirm curl wget git jq coreutils
             ;;
         alpine)
-            apk add --no-cache curl wget git jq
+            apk add --no-cache curl wget git jq coreutils
             ;;
         centos | fedora | rhel | ol | rocky | almalinux | amzn)
             if [ "$OS_TYPE" = "amzn" ]; then
-                dnf install -y curl wget git jq
+                dnf install -y curl wget git jq coreutils
             else
                 if ! command -v dnf >/dev/null 2>&1; then
                     yum install -y dnf
                 fi
-                dnf install -y curl wget git jq
+                dnf install -y curl wget git jq coreutils
             fi
             ;;
         sles | opensuse-leap | opensuse-tumbleweed)
-            zypper install -y curl wget git jq
+            zypper install -y curl wget git jq coreutils
             ;;
         *)
-            log_error "Unsupported OS: $OS_TYPE"
+            log_error "Unsupported OS: $OS_TYPE $OS_VERSION"
             exit 1
             ;;
     esac
@@ -227,7 +221,7 @@ install_docker() {
             systemctl start docker
             ;;
         *)
-            log_error "Unsupported OS for Docker installation: $OS_TYPE"
+            log_error "Unsupported OS for Docker installation: $OS_TYPE $OS_VERSION"
             exit 1
             ;;
     esac
@@ -270,7 +264,7 @@ install_node() {
             zypper install -y nodejs18
             ;;
         *)
-            log_error "Unsupported OS for Node.js installation: $OS_TYPE"
+            log_error "Unsupported OS for Node.js installation: $OS_TYPE $OS_VERSION"
             exit 1
             ;;
     esac
@@ -300,16 +294,32 @@ setup_user_directories() {
 download_agent() {
     log "Downloading the latest CloudLunacy Deployment Agent..."
     LATEST_RELEASE=$(curl -s https://api.github.com/repos/Mayze123/cloudlunacy-deployment-agent/releases/latest | grep tag_name | cut -d '"' -f 4)
+
+    if [ -z "$LATEST_RELEASE" ]; then
+        log_error "Failed to retrieve the latest release information from GitHub."
+        exit 1
+    fi
+
     DOWNLOAD_URL="https://github.com/Mayze123/cloudlunacy-deployment-agent/releases/download/${LATEST_RELEASE}/cloudlunacy-deployment-agent-${LATEST_RELEASE}.tar.gz"
     CHECKSUM_URL="https://github.com/Mayze123/cloudlunacy-deployment-agent/releases/download/${LATEST_RELEASE}/sha256sum.txt"
 
     TEMP_DIR=$(mktemp -d)
-    wget -q "$DOWNLOAD_URL" -O "$TEMP_DIR/agent.tar.gz"
-    wget -q "$CHECKSUM_URL" -O "$TEMP_DIR/sha256sum.txt"
+    if ! wget "$DOWNLOAD_URL" -O "$TEMP_DIR/agent.tar.gz"; then
+        log_error "Failed to download the agent tarball from $DOWNLOAD_URL."
+        exit 1
+    fi
+
+    if ! wget "$CHECKSUM_URL" -O "$TEMP_DIR/sha256sum.txt"; then
+        log_error "Failed to download the checksum file from $CHECKSUM_URL."
+        exit 1
+    fi
 
     log "Verifying download integrity..."
     cd "$TEMP_DIR"
-    sha256sum -c sha256sum.txt
+    if ! sha256sum -c sha256sum.txt; then
+        log_error "Checksum verification failed."
+        exit 1
+    fi
     cd -
 
     log "Extracting the agent..."
@@ -347,10 +357,11 @@ After=network.target
 
 [Service]
 ExecStart=/usr/bin/node $BASE_DIR/agent.js
+WorkingDirectory=$BASE_DIR
 Restart=always
 RestartSec=5
-User=cloudlunacy
-EnvironmentFile=$BASE_DIR/.env
+User=$USERNAME
+EnvironmentFile=$ENV_FILE
 
 [Install]
 WantedBy=multi-user.target
@@ -384,7 +395,7 @@ completion_message() {
                        |___/
 \033[0m"
     echo -e "\nYour CloudLunacy Deployment Agent is ready to use."
-    echo -e "Access it by visiting: http://$(curl -4s https://ifconfig.io):8000"
+    echo -e "Access it by visiting: http://$(curl -4s https://ifconfig.me):8000"
     echo -e "Logs are located at: $BASE_DIR/logs/agent.log"
     echo -e "It's recommended to back up your environment file:"
     echo -e "cp $BASE_DIR/.env $BASE_DIR/.env.backup"
@@ -411,11 +422,12 @@ main() {
 
     AGENT_TOKEN="$1"
     SERVER_ID="$2"
-    BACKEND_URL="${3:-https://cd62-142-113-7-32.ngrok-free.app/api/agent}"
+    BACKEND_URL="${3:-https://your-default-backend-url/api/agent}"
 
     detect_os
     log "Detected OS: $OS_TYPE $OS_VERSION"
 
+    update_system
     install_dependencies
     install_docker
     install_node
