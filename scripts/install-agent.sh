@@ -1,9 +1,9 @@
 #!/bin/bash
 # ------------------------------------------------------------------------------
 # Installation Script for CloudLunacy Deployment Agent
-# Version: 1.1.0
+# Version: 1.2.0
 # Author: Mahamadou Taibou
-# Date: 2024-10-22
+# Date: 2024-11-01
 #
 # Description:
 # This script installs and configures the CloudLunacy Deployment Agent on a VPS.
@@ -11,7 +11,7 @@
 #   - Detects the operating system and version
 #   - Updates system packages
 #   - Installs necessary dependencies (Docker, Node.js, Git, jq)
-#   - Creates a dedicated user and directory for the agent
+#   - Creates a dedicated user with a home directory and correct permissions
 #   - Downloads the latest version of the Deployment Agent from GitHub
 #   - Installs Node.js dependencies
 #   - Configures environment variables
@@ -28,7 +28,7 @@
 # ------------------------------------------------------------------------------
 
 set -euo pipefail
-set -x  # Enable debugging mode
+#set -x  # Uncomment to enable debugging mode
 IFS=$'\n\t'
 
 # ----------------------------
@@ -39,9 +39,9 @@ IFS=$'\n\t'
 display_info() {
     echo "-------------------------------------------------"
     echo "CloudLunacy Deployment Agent Installation Script"
-    echo "Version: 1.1.0"
+    echo "Version: 1.2.0"
     echo "Author: Mahamadou Taibou"
-    echo "Date: 2024-10-22"
+    echo "Date: 2024-11-01"
     echo "-------------------------------------------------"
 }
 
@@ -105,7 +105,7 @@ update_system() {
             apt-get update -y && apt-get upgrade -y
             ;;
         arch)
-            pacman -Sy --noconfirm
+            pacman -Syu --noconfirm
             ;;
         alpine)
             apk update && apk upgrade
@@ -143,7 +143,7 @@ install_dependencies() {
             ;;
         centos | fedora | rhel | ol | rocky | almalinux | amzn)
             if [ "$OS_TYPE" = "amzn" ]; then
-                dnf install -y curl wget git jq coreutils
+                yum install -y curl wget git jq coreutils
             else
                 if ! command -v dnf >/dev/null 2>&1; then
                     yum install -y dnf
@@ -171,61 +171,39 @@ install_docker() {
     fi
 
     log "Docker not found. Installing Docker..."
-  case "$OS_TYPE" in
-        ubuntu | debian | raspbian)
+
+    case "$OS_TYPE" in
+        ubuntu | debian)
+            apt-get remove -y docker docker-engine docker.io containerd runc || true
+            apt-get update -y
             apt-get install -y \
                 ca-certificates \
                 curl \
                 gnupg \
                 lsb-release
-
             mkdir -p /etc/apt/keyrings
-            curl -fsSL https://download.docker.com/linux/ubuntu/gpg | \
-                gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-
+            curl -fsSL https://download.docker.com/linux/$OS_TYPE/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
             echo \
-                "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
-                $(lsb_release -cs) stable" | \
-                tee /etc/apt/sources.list.d/docker.list > /dev/null
-
+                "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/$OS_TYPE \
+                $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
             apt-get update -y
-            apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+            apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
             ;;
-        arch)
-            pacman -S --noconfirm docker
-            ;;
-        alpine)
-            apk add --no-cache docker
-            rc-update add docker default
-            service docker start
-            ;;
-        centos | fedora | rhel | ol | rocky | almalinux | amzn)
-            if [ "$OS_TYPE" = "amzn" ]; then
-                dnf config-manager --add-repo=https://download.docker.com/linux/centos/docker-ce.repo
-                dnf install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-            else
-                if command -v dnf >/dev/null 2>&1; then
-                    dnf config-manager --add-repo=https://download.docker.com/linux/centos/docker-ce.repo
-                    dnf install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-                else
-                    yum install -y yum-utils
-                    yum-config-manager \
-                        --add-repo \
-                        https://download.docker.com/linux/centos/docker-ce.repo
-                    yum install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-                fi
-            fi
-            ;;
-        sles | opensuse-leap | opensuse-tumbleweed)
-            zypper install -y docker
-            systemctl enable docker
+        centos | rhel | fedora | rocky | almalinux)
+            yum remove -y docker docker-client docker-client-latest docker-common docker-latest docker-latest-logrotate docker-logrotate docker-engine || true
+            yum install -y yum-utils
+            yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+            yum install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
             systemctl start docker
             ;;
         *)
-            log_error "Unsupported OS for Docker installation: $OS_TYPE $OS_VERSION"
+            log_error "Docker installation not supported on this OS."
             exit 1
             ;;
     esac
+
+    systemctl enable docker
+    systemctl start docker
 
     log "Docker installed successfully."
 }
@@ -239,36 +217,28 @@ install_node() {
     fi
 
     log "Node.js not found. Installing Node.js..."
+
+    NODE_VERSION="18.x"
+
     case "$OS_TYPE" in
         ubuntu | debian | raspbian)
-            curl -fsSL https://deb.nodesource.com/setup_18.x | bash -
+            curl -fsSL https://deb.nodesource.com/setup_$NODE_VERSION | bash -
             apt-get install -y nodejs
             ;;
-        centos | rhel | ol | rocky | almalinux)
-            curl -fsSL https://rpm.nodesource.com/setup_18.x | bash -
+        centos | rhel | fedora | rocky | almalinux)
+            curl -fsSL https://rpm.nodesource.com/setup_$NODE_VERSION | bash -
             yum install -y nodejs
-            ;;
-        fedora)
-            dnf module install -y nodejs:18
-            ;;
-        amzn)
-            curl -fsSL https://rpm.nodesource.com/setup_18.x | bash -
-            yum install -y nodejs
-            ;;
-        arch)
-            pacman -S --noconfirm nodejs npm
-            ;;
-        alpine)
-            apk add --no-cache nodejs npm
             ;;
         sles | opensuse-leap | opensuse-tumbleweed)
-            zypper install -y nodejs18
+            curl -fsSL https://rpm.nodesource.com/setup_$NODE_VERSION | bash -
+            zypper install -y nodejs
             ;;
         *)
-            log_error "Unsupported OS for Node.js installation: $OS_TYPE $OS_VERSION"
+            log_error "Node.js installation not supported on this OS."
             exit 1
             ;;
     esac
+
     log "Node.js installed successfully."
 }
 
@@ -293,42 +263,27 @@ setup_user_directories() {
 
 # Function to download and verify the latest agent
 download_agent() {
-       log "Downloading the latest CloudLunacy Deployment Agent..."
-    LATEST_RELEASE=$(curl -s https://api.github.com/repos/Mayze123/cloudlunacy-deployment-agent/releases/latest | grep tag_name | cut -d '"' -f 4)
-    
-    if [ -z "$LATEST_RELEASE" ]; then
-        log_error "Failed to retrieve the latest release information from GitHub."
-        exit 1
+    log "Cloning the CloudLunacy Deployment Agent repository..."
+    if [ -d "$BASE_DIR" ]; then
+        rm -rf "$BASE_DIR"
     fi
-
-    DOWNLOAD_URL="https://github.com/Mayze123/cloudlunacy-deployment-agent/archive/refs/tags/${LATEST_RELEASE}.tar.gz"
-    TEMP_DIR=$(mktemp -d)
-
-    # Download the agent tarball
-    if ! wget "$DOWNLOAD_URL" -O "$TEMP_DIR/agent.tar.gz"; then
-        log_error "Failed to download the agent tarball from $DOWNLOAD_URL."
-        exit 1
-    fi
-
-    log "Extracting the agent..."
-    tar -xzf "$TEMP_DIR/agent.tar.gz" -C "$BASE_DIR" --strip-components=1
-    rm -rf "$TEMP_DIR"
+    git clone https://github.com/Mayze123/cloudlunacy-deployment-agent.git "$BASE_DIR"
     chown -R "$USERNAME":"$USERNAME" "$BASE_DIR"
-    log "Agent downloaded and extracted to $BASE_DIR."
+    log "Agent cloned to $BASE_DIR."
 }
 
 # Function to install agent dependencies
 install_agent_dependencies() {
     log "Installing agent dependencies..."
     cd "$BASE_DIR"
+
     # Check if package.json exists
     if [ -f "package.json" ]; then
-        sudo -H -u "$USERNAME" npm install
+        sudo -u "$USERNAME" HOME="/home/$USERNAME" npm install
     else
-        # Initialize package.json and install dependencies
-        sudo -H -u "$USERNAME" npm init -y
-        sudo -H -u "$USERNAME" npm install axios
-        # Add other dependencies if required
+        sudo -u "$USERNAME" HOME="/home/$USERNAME" npm init -y
+        sudo -u "$USERNAME" HOME="/home/$USERNAME" npm install axios dotenv winston ws handlebars
+        # Add other dependencies as required
     fi
     log "Agent dependencies installed."
 }
@@ -393,9 +348,9 @@ completion_message() {
     echo -e "\033[0;35m
    ____                            _         _       _   _                 _
   / ___|___  _ __   __ _ _ __ __ _| |_ _   _| | __ _| |_(_) ___  _ __  ___| |
- | |   / _ \| '_ \ / _\` | '__/ _\` | __| | | | |/ _\` | __| |/ _ \| '_ \/ __| |
- | |__| (_) | | | | (_| | | | (_| | |_| |_| | | (_| | |_| | (_) | | | \__ \_|
-  \____\___/|_| |_|\__, |_|  \__,_|\__|\__,_|_|\__,_|\__|_|\___/|_| |_|___(_)
+ | |   / _ \\| '_ \\ / _\` | '__/ _\` | __| | | | |/ _\` | __| |/ _ \\| '_ \\/ __| |
+ | |__| (_) | | | | (_| | | | (_| | |_| |_| | | (_| | |_| | (_) | | | \\__ \\_|
+  \\____\\___/|_| |_|\\__, |_|  \\__,_|\\__|\\__,_|_|\\__,_|\\__|_|\\___/|_| |_|___(_)
                        |___/
 \033[0m"
     echo -e "\nYour CloudLunacy Deployment Agent is ready to use."
@@ -444,7 +399,7 @@ main() {
     install_node
     setup_user_directories
     download_agent
-    install_agent_dependencies  # Added function call
+    install_agent_dependencies
     configure_env
     setup_service
     verify_installation
