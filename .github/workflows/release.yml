@@ -8,24 +8,27 @@ on:
       - 'v*'  # Triggers on tags starting with 'v'
 
 jobs:
-  build-and-release:
+  release:
     name: Build and Release
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v3
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v3
+        uses: actions/checkout@v4
         with:
-          node-version: '18.x'
+          fetch-depth: 0  # Fetch all history for all branches and tags
+          path: '.'       # Check out into the current directory
 
-      - name: Install Dependencies
-        run: npm ci
+      - name: Set up Git user
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Build Project
-        run: npm run build
+      - name: Verify Scripts Directory
+        run: ls -la scripts/
+
+      - name: Set Execute Permissions
+        run: chmod +x scripts/install-agent.sh
 
       - name: Generate SHA256 Checksum
         run: |
