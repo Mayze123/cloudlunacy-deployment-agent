@@ -374,15 +374,23 @@ verify_installation() {
 # Function to display completion message
 completion_message() {
     echo -e "\033[0;35m
-   ____                            _         _       _   _                 _
-  / ___|___  _ __   __ _ _ __ __ _| |_ _   _| | __ _| |_(_) ___  _ __  ___| |
- | |   / _ \| '_ \ / _\` | '__/ _\` | __| | | | |/ _\` | __| |/ _ \| '_ \/ __| |
- | |__| (_) | | | | (_| | | | (_| | |_| |_| | | (_| | |_| | (_) | | | \__ \_|
-  \____\___/|_| |_|\__, |_|  \__,_|\__|\__,_|_|\__,_|\__|_|\___/|_| |_|___(_)
-                       |___/
-\033[0m"
+       ____                            _         _       _   _                 _
+      / ___|___  _ __   __ _ _ __ __ _| |_ _   _| | __ _| |_(_) ___  _ __  ___| |
+     | |   / _ \| '_ \ / _\` | '__/ _\` | __| | | | |/ _\` | __| |/ _ \| '_ \/ __| |
+     | |__| (_) | | | | (_| | | | (_| | |_| |_| | | (_| | |_| | (_) | | | \__ \_|
+      \____\___/|_| |_|\__, |_|  \__,_|\__|\__,_|_|\__,_|\__|_|\___/|_| |_|___(_)
+                           |___/
+    \033[0m"
     echo -e "\nYour CloudLunacy Deployment Agent is ready to use."
-    echo -e "Access it by visiting: http://$(curl -4s https://ifconfig.me):8000"
+
+    # Use an alternative service to get the public IP
+    PUBLIC_IP=$(curl -s https://api.ipify.org)
+    if [ -z "$PUBLIC_IP" ]; then
+        PUBLIC_IP="your_server_ip"
+        echo -e "Could not retrieve public IP address. Please replace 'your_server_ip' with your actual IP."
+    fi
+
+    echo -e "Access it by visiting: http://$PUBLIC_IP:8000"
     echo -e "Logs are located at: $BASE_DIR/logs/agent.log"
     echo -e "It's recommended to back up your environment file:"
     echo -e "cp $BASE_DIR/.env $BASE_DIR/.env.backup"
