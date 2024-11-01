@@ -1,7 +1,7 @@
 #!/bin/bash
 # ------------------------------------------------------------------------------
 # Installation Script for CloudLunacy Deployment Agent
-# Version: 1.5.0
+# Version: 1.5.1
 # Author: Mahamadou Taibou
 # Date: 2024-11-01
 #
@@ -19,12 +19,12 @@
 #   - Provides post-installation verification and feedback
 #
 # Usage:
-#   sudo ./install-agent.sh <AGENT_TOKEN> <SERVER_ID> [BACKEND_URL]
+#   sudo ./install-agent.sh <AGENT_TOKEN> <SERVER_ID> [BACKEND_BASE_URL]
 #
 # Arguments:
-#   AGENT_TOKEN - Unique token for agent authentication
-#   SERVER_ID   - Unique identifier for the server
-#   BACKEND_URL - (Optional) Backend URL; defaults to https://your-default-backend-url/api/agent
+#   AGENT_TOKEN      - Unique token for agent authentication
+#   SERVER_ID        - Unique identifier for the server
+#   BACKEND_BASE_URL - (Optional) Backend base URL; defaults to https://your-default-backend-url
 # ------------------------------------------------------------------------------
 
 set -euo pipefail
@@ -40,7 +40,7 @@ IFS=$'\n\t'
 display_info() {
     echo "-------------------------------------------------"
     echo "CloudLunacy Deployment Agent Installation Script"
-    echo "Version: 1.5.0"
+    echo "Version: 1.5.1"
     echo "Author: Mahamadou Taibou"
     echo "Date: 2024-11-01"
     echo "-------------------------------------------------"
@@ -63,7 +63,7 @@ log_error() {
 check_args() {
     if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then
         log_error "Invalid number of arguments."
-        echo "Usage: $0 <AGENT_TOKEN> <SERVER_ID> [BACKEND_URL]"
+        echo "Usage: $0 <AGENT_TOKEN> <SERVER_ID> [BACKEND_BASE_URL]"
         exit 1
     fi
 }
@@ -409,7 +409,8 @@ main() {
 
     AGENT_TOKEN="$1"
     SERVER_ID="$2"
-    BACKEND_URL="${3:-https://your-default-backend-url/api/agent}"
+    BACKEND_BASE_URL="${3:-https://your-default-backend-url}"
+    BACKEND_URL="${BACKEND_BASE_URL%/}/api/agent"
 
     detect_os
     log "Detected OS: $OS_TYPE $OS_VERSION"
