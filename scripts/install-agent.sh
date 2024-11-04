@@ -1,9 +1,9 @@
 #!/bin/bash
 # ------------------------------------------------------------------------------
 # Installation Script for CloudLunacy Deployment Agent
-# Version: 1.5.1
+# Version: 1.5.2
 # Author: Mahamadou Taibou
-# Date: 2024-11-01
+# Date: 2024-11-02
 #
 # Description:
 # This script installs and configures the CloudLunacy Deployment Agent on a VPS.
@@ -16,15 +16,17 @@
 #   - Installs Node.js dependencies
 #   - Configures environment variables
 #   - Sets up the Deployment Agent as a systemd service
+#   - Generates SSH keys for private repository access
 #   - Provides post-installation verification and feedback
 #
 # Usage:
-#   sudo ./install-agent.sh <AGENT_TOKEN> <SERVER_ID> [BACKEND_BASE_URL]
+#   sudo ./install-agent.sh <AGENT_TOKEN> <SERVER_ID> [BACKEND_BASE_URL] [GITHUB_SSH_KEY]
 #
 # Arguments:
 #   AGENT_TOKEN      - Unique token for agent authentication
 #   SERVER_ID        - Unique identifier for the server
 #   BACKEND_BASE_URL - (Optional) Backend base URL; defaults to https://your-default-backend-url
+#   GITHUB_SSH_KEY   - (Optional) Path to existing SSH private key for accessing private repos
 # ------------------------------------------------------------------------------
 
 set -euo pipefail
@@ -40,9 +42,9 @@ IFS=$'\n\t'
 display_info() {
     echo "-------------------------------------------------"
     echo "CloudLunacy Deployment Agent Installation Script"
-    echo "Version: 1.5.1"
+    echo "Version: 1.5.2"
     echo "Author: Mahamadou Taibou"
-    echo "Date: 2024-11-01"
+    echo "Date: 2024-11-02"
     echo "-------------------------------------------------"
 }
 
@@ -61,9 +63,9 @@ log_error() {
 
 # Function to check for required arguments
 check_args() {
-    if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then
+    if [ "$#" -lt 2 ] || [ "$#" -gt 4 ]; then
         log_error "Invalid number of arguments."
-        echo "Usage: $0 <AGENT_TOKEN> <SERVER_ID> [BACKEND_BASE_URL]"
+        echo "Usage: $0 <AGENT_TOKEN> <SERVER_ID> [BACKEND_BASE_URL] [GITHUB_SSH_KEY]"
         exit 1
     fi
 }
@@ -324,6 +326,37 @@ EOF
     log "Environment variables configured."
 }
 
+# Function to set up SSH for private repositories
+setup_ssh() {
+    log "Setting up SSH for accessing private repositories..."
+
+    SSH_DIR="$BASE_DIR/.ssh"
+    sudo -u "$USERNAME" mkdir -p "$SSH_DIR"
+    sudo -u "$USERNAME" chmod 700 "$SSH_DIR"
+
+    # Check if a custom SSH key was provided
+    if [ -n "${GITHUB_SSH_KEY:-}" ] && [ -f "$GITHUB_SSH_KEY" ]; then
+        log "Using provided SSH key."
+        sudo -u "$USERNAME" cp "$GITHUB_SSH_KEY" "$SSH_DIR/id_ed25519"
+    else
+        log "Generating new SSH key for agent..."
+        sudo -u "$USERNAME" ssh-keygen -t ed25519 -f "$SSH_DIR/id_ed25519" -N ""
+    fi
+
+    sudo -u "$USERNAME" chmod 600 "$SSH_DIR/id_ed25519"
+    sudo -u "$USERNAME" touch "$SSH_DIR/config"
+    sudo -u "$USERNAME" bash -c 'cat <<EOF > /opt/cloudlunacy/.ssh/config
+Host github.com
+    HostName github.com
+    User git
+    IdentityFile /opt/cloudlunacy/.ssh/id_ed25519
+    StrictHostKeyChecking no
+EOF'
+
+    sudo -u "$USERNAME" chmod 600 "$SSH_DIR/config"
+    log "SSH setup completed."
+}
+
 # Function to set up systemd service
 setup_service() {
     log "Setting up CloudLunacy Deployment Agent as a systemd service..."
@@ -395,6 +428,23 @@ cleanup_on_error() {
     exit 1
 }
 
+# Function to display SSH key instructions
+display_ssh_instructions() {
+    SSH_DIR="$BASE_DIR/.ssh"
+    PUBLIC_KEY_FILE="$SSH_DIR/id_ed25519.pub"
+    log "SSH Key Setup Instructions:"
+    log "----------------------------------------"
+    log "1. Add the following SSH public key to your Git repository's deploy keys:"
+    echo "----------------------------------------"
+    if [ -f "$PUBLIC_KEY_FILE" ]; then
+        cat "$PUBLIC_KEY_FILE"
+    else
+        log_error "Public SSH key not found at $PUBLIC_KEY_FILE."
+    fi
+    echo "----------------------------------------"
+    log "2. Ensure that the deploy key has read access to the repository."
+}
+
 # ----------------------------
 # Main Execution Flow
 # ----------------------------
@@ -410,6 +460,8 @@ main() {
     AGENT_TOKEN="$1"
     SERVER_ID="$2"
     BACKEND_BASE_URL="${3:-https://your-default-backend-url}"
+    GITHUB_SSH_KEY="${4:-}"
+
     BACKEND_URL="${BACKEND_BASE_URL%/}/api/agent"
 
     detect_os
@@ -420,11 +472,13 @@ main() {
     install_docker
     install_node
     setup_user_directories
+    setup_ssh "$GITHUB_SSH_KEY"
     download_agent
     install_agent_dependencies
     configure_env
     setup_service
     verify_installation
+    display_ssh_instructions
     completion_message
 }
 
