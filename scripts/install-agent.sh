@@ -133,7 +133,7 @@ update_system() {
 
 # Function to install dependencies
 install_dependencies() {
-    log "Installing dependencies (curl, wget, git, jq, docker, nodejs)..."
+    log "Installing dependencies (curl, wget, git, jq)..."
     case "$OS_TYPE" in
         ubuntu | debian | raspbian)
             apt-get install -y curl wget git jq coreutils
@@ -317,10 +317,8 @@ configure_env() {
 
     cat <<EOF > "$ENV_FILE"
 BACKEND_URL=$BACKEND_URL
-AGENT_API_TOKEN=$AGENT_API_TOKEN
+AGENT_API_TOKEN=$AGENT_TOKEN
 SERVER_ID=$SERVER_ID
-BASE_DIR=$BASE_DIR
-LOG_DIR=${LOG_DIR:-/var/log/cloudlunacy}
 EOF
 
     chown "$USERNAME":"$USERNAME" "$ENV_FILE"
@@ -374,7 +372,7 @@ ExecStart=/usr/bin/node $BASE_DIR/agent.js
 WorkingDirectory=$BASE_DIR
 Restart=always
 RestartSec=5
-User=cloudlunacy
+User=$USERNAME
 Environment=HOME=$BASE_DIR
 EnvironmentFile=$ENV_FILE
 
