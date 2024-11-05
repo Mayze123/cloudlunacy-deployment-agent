@@ -2,9 +2,9 @@
 
 /**
  * CloudLunacy Deployment Agent
- * Version: 1.0.0
+ * Version: 1.5.2
  * Author: Mahamadou Taibou
- * Date: 2024-04-27
+ * Date: 2024-11-02
  *
  * Description:
  * This script serves as the core of the CloudLunacy Deployment Agent installed on a user's VPS.
@@ -20,12 +20,9 @@ const path = require('path');
 const dotenv = require('dotenv');
 const logger = require('./utils/logger');
 const { executeCommand } = require('./utils/executor');
-
-// Import deployment modules
 const deployApp = require('./modules/deployApp');
-// const deployReactAppDocker = require('./modules/deployReactAppDocker');
-// const deployNodeApp = require('./modules/deployNodeApp');
-// const manageDatabase = require('./modules/manageDatabase');
+const manageSSHKeys = require('./modules/manageSSHKeys');
+const isDeployKeyAdded = require('./modules/checkDeployKey');
 
 // Load environment variables
 dotenv.config();
@@ -34,6 +31,8 @@ dotenv.config();
 const BACKEND_URL = process.env.BACKEND_URL; // e.g., https://your-saas-platform.com/api/agent
 const AGENT_API_TOKEN = process.env.AGENT_API_TOKEN;
 const SERVER_ID = process.env.SERVER_ID;
+const BASE_DIR = process.env.BASE_DIR || '/opt/cloudlunacy';
+const ENV_FILE = path.join(BASE_DIR, '.env');
 
 // Validate environment variables
 if (!BACKEND_URL || !AGENT_API_TOKEN || !SERVER_ID) {
@@ -41,7 +40,64 @@ if (!BACKEND_URL || !AGENT_API_TOKEN || !SERVER_ID) {
     process.exit(1);
 }
 
-// Initialize WebSocket connection
+// Ensure base directory exists
+if (!fs.existsSync(BASE_DIR)) {
+    fs.mkdirSync(BASE_DIR, { recursive: true });
+    logger.info(`Created base directory at ${BASE_DIR}`);
+}
+
+// Initialize agent operations
+async function init() {
+    try {
+        // Manage SSH keys
+        await manageSSHKeys({
+            baseDir: BASE_DIR,
+            serverId: SERVER_ID,
+            backendUrl: BACKEND_URL,
+            agentToken: AGENT_API_TOKEN
+        });
+
+        // Wait for deploy key to be added
+        let deployKeyAdded = false;
+        const MAX_CHECKS = 12; // e.g., 1 minute (12 checks with 5 seconds interval)
+        let checks = 0;
+
+        while (!deployKeyAdded && checks < MAX_CHECKS) {
+            deployKeyAdded = await isDeployKeyAdded({
+                backendUrl: BACKEND_URL,
+                agentToken: AGENT_API_TOKEN,
+                serverId: SERVER_ID
+            });
+            if (!deployKeyAdded) {
+                logger.info('Waiting for deploy key to be added to GitHub...');
+                await sleep(5000); // Wait 5 seconds before next check
+                checks++;
+            }
+        }
+
+        if (!deployKeyAdded) {
+            logger.error('Deploy key was not added within the expected time. Exiting.');
+            process.exit(1);
+        }
+
+        // Connect to backend via WebSocket
+        await authenticateAndConnect();
+
+    } catch (error) {
+        logger.error(`Initialization failed: ${error.message}`);
+        process.exit(1);
+    }
+}
+
+/**
+ * Sleeps for the specified duration.
+ * @param {Number} ms - Milliseconds to sleep
+ * @returns {Promise}
+ */
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 let ws;
 
 /**
@@ -50,6 +106,7 @@ let ws;
 async function authenticateAndConnect() {
     try {
         logger.info('Authenticating with backend...');
+
         // Authenticate with the backend to receive WebSocket URL
         const response = await axios.post(`${BACKEND_URL}/authenticate`, {
             agentToken: AGENT_API_TOKEN,
@@ -60,11 +117,11 @@ async function authenticateAndConnect() {
             }
         });
 
-        const { wsUrl } = response.data;
-
-        if (!wsUrl) {
-            throw new Error('WebSocket URL not provided by backend.');
+        if (response.status !== 200 || !response.data.wsUrl) {
+            throw new Error('Authentication failed: WebSocket URL not provided.');
         }
+
+        const { wsUrl } = response.data;
 
         logger.info(`WebSocket URL received: ${wsUrl}`);
 
@@ -77,7 +134,7 @@ async function authenticateAndConnect() {
 
         ws.on('open', () => {
             logger.info('WebSocket connection established.');
-            // Optionally, send a registration message
+            // Send a registration message
             ws.send(JSON.stringify({ type: 'register', serverId: SERVER_ID }));
         });
 
@@ -93,10 +150,10 @@ async function authenticateAndConnect() {
         const MAX_RETRIES = 5;
         let retryCount = 0;
         let retryDelay = 5000; // Start with 5 seconds
-        
+
         ws.on('close', () => {
             if (retryCount < MAX_RETRIES) {
-                logger.warn(`WebSocket connection closed. Attempting to reconnect in ${retryDelay/1000} seconds...`);
+                logger.warn(`WebSocket connection closed. Attempting to reconnect in ${retryDelay / 1000} seconds...`);
                 setTimeout(() => {
                     retryCount++;
                     retryDelay *= 2; // Exponential backoff
@@ -104,6 +161,7 @@ async function authenticateAndConnect() {
                 }, retryDelay);
             } else {
                 logger.error('Maximum retry attempts reached. Please check the connection.');
+                process.exit(1);
             }
         });
 
@@ -113,19 +171,18 @@ async function authenticateAndConnect() {
         });
 
     } catch (error) {
-        // logger.error('Authentication failed:', error.message);
-        // logger.info('Retrying authentication in 5 seconds...');
-        // setTimeout(authenticateAndConnect, 5000);
         if (error.response) {
             // The request was made and the server responded with a status code outside the range of 2xx
             logger.error(`Authentication failed with status ${error.response.status}: ${JSON.stringify(error.response.data)}`);
-          } else if (error.request) {
+        } else if (error.request) {
             // The request was made but no response was received
             logger.error('No response received from backend:', error.request);
-          } else {
+        } else {
             // Something happened in setting up the request that triggered an Error
             logger.error('Error in authentication request:', error.message);
-          }
+        }
+        // Retry authentication after delay
+        setTimeout(authenticateAndConnect, 5000);
     }
 }
 
@@ -138,6 +195,7 @@ function handleMessage(message) {
         case 'deploy_app':
             deployApp(message.payload, ws);
             break;
+        // Handle other command types here
         default:
             logger.warn('Unknown message type:', message.type);
     }
@@ -198,8 +256,8 @@ function getDiskUsage() {
     // Requires 'df' command
     try {
         const { execSync } = require('child_process');
-        const output = execSync('df / --output=pcent | tail -1').toString().trim();
-        const usage = parseInt(output.replace('%', ''), 10);
+        const output = execSync('df / --output=pcent').toString().trim().split('\n')[1];
+        const usage = parseInt(output.replace('%', '').trim(), 10);
         return usage;
     } catch (error) {
         logger.error('Error fetching disk usage:', error.message);
@@ -226,13 +284,16 @@ function sendMetrics(metrics) {
 /**
  * Initialize agent operations
  */
-function init() {
-    // Authenticate and connect to backend
-    authenticateAndConnect();
-
+function startAgent() {
     // Collect and send metrics every minute
     setInterval(collectMetrics, 60000);
+
+    // Initial metrics collection
+    collectMetrics();
 }
 
 // Start the agent
-init();
+init().then(startAgent).catch(error => {
+    logger.error(`Agent initialization failed: ${error.message}`);
+    process.exit(1);
+});

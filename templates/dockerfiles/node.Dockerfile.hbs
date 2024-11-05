@@ -1,0 +1,23 @@
+# Stage 1: Build
+FROM node:20-alpine as build
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci --only=production
+COPY . .
+RUN npm run build
+
+# Stage 2: Run
+FROM node:20-alpine
+WORKDIR /app
+COPY --from=build /app .
+ENV NODE_ENV=production
+ENV PORT={{dockerPort}}
+EXPOSE {{dockerPort}}
+CMD ["node", "server.js"]
+
+# Healthcheck
+HEALTHCHECK --interval=30s --timeout=5s \
+    CMD wget --quiet --tries=1 --spider http://localhost:{{dockerPort}}/health || exit 1
+
+# Security Headers (if applicable)
+# You can add any necessary security configurations here

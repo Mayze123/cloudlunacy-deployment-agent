@@ -13,6 +13,11 @@
       "dockerfileTemplate": "templates/dockerfiles/next.Dockerfile.hbs",
       "dockerComposeTemplate": "templates/docker-compose/next.yml.hbs",
       "defaultPort": 3000
+    },
+    "node": {
+      "dockerfileTemplate": "templates/dockerfiles/node.Dockerfile.hbs",
+      "dockerComposeTemplate": "templates/docker-compose/node.yml.hbs",
+      "defaultPort": 3000
     }
   }
   
