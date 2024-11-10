@@ -20,25 +20,8 @@
       "nodeVersion": "18",
       "startCommand": "npm start",
       "healthCheckEndpoint": "/health",
-      "volumes": [
-        "./logs:/app/logs"
-      ],
+      "volumes": [],
       "dependencies": []
-    }
-  },
-  "express": {
-    "extends": "node",
-    "defaults": {
-      "startCommand": "node server.js",
-      "healthCheckEndpoint": "/api/health"
-    }
-  },
-  "nextjs": {
-    "extends": "node",
-    "defaults": {
-      "buildCommand": "npm run build",
-      "startCommand": "npm run start",
-      "healthCheckEndpoint": "/api/health"
     }
   }
 }

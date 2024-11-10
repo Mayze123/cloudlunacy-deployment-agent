@@ -94,6 +94,14 @@ class TemplateHandler {
       api
     } = appConfig;
 
+    logger.info('Generating deployment files with config:', {
+      appType,
+      appName,
+      environment,
+      port,
+      buildConfig
+    });
+
     if (!this.deployConfig[appType]) {
       throw new Error(`Unsupported application type: ${appType}`);
     }
@@ -106,7 +114,7 @@ class TemplateHandler {
       
       // Generate Dockerfile
       const dockerfileTemplate = await this.loadTemplate(typeConfig.dockerfileTemplate);
-      files.dockerfile = dockerfileTemplate({
+      const dockerfileContext = {
         nodeVersion: config.nodeVersion,
         usePnpm: config.usePnpm,
         useYarn: config.useYarn,
@@ -115,11 +123,14 @@ class TemplateHandler {
         buildOutputDir: config.buildOutputDir,
         port,
         environment
-      });
+      };
+      
+      logger.info('Generating Dockerfile with context:', dockerfileContext);
+      files.dockerfile = dockerfileTemplate(dockerfileContext);
 
       // Generate docker-compose.yml
       const dockerComposeTemplate = await this.loadTemplate(typeConfig.dockerComposeTemplate);
-      files.dockerCompose = dockerComposeTemplate({
+      const dockerComposeContext = {
         appName,
         environment,
         port,
@@ -127,34 +138,23 @@ class TemplateHandler {
         volumes: config.volumes,
         dependencies: config.dependencies,
         healthCheckEndpoint: config.healthCheckEndpoint
-      });
-
-      // Generate nginx.conf for React apps
-      if (appType === 'react') {
-        const nginxTemplate = await this.loadTemplate(typeConfig.nginxTemplate);
-        files.nginxConf = nginxTemplate({
-          domain,
-          port,
-          ssl,
-          api,
-          cacheControl: config.cacheControl,
-          securityHeaders: config.securityHeaders,
-          customLocations: config.nginxLocations
-        });
-      }
-
-      // Log success
-      logger.info(`Generated deployment files for ${appName} (${environment})`);
+      };
       
-      // Validate generated files
-      await this.validateGeneratedFiles(files);
-      
+      logger.info('Generating docker-compose.yml with context:', dockerComposeContext);
+      files.dockerCompose = dockerComposeTemplate(dockerComposeContext);
+
+      // Log the generated files for debugging
+      logger.info('Generated Dockerfile:', files.dockerfile);
+      logger.info('Generated docker-compose.yml:', files.dockerCompose);
+
       return files;
     } catch (error) {
       logger.error('Error generating deployment files:', error);
+      // Log the full error stack trace
+      logger.error(error.stack);
       throw new Error(`Failed to generate deployment files: ${error.message}`);
     }
-  }
+}
 
   async validateGeneratedFiles(files) {
     // Basic validation of generated files
