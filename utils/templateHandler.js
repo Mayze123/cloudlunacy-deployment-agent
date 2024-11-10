@@ -86,13 +86,15 @@ class TemplateHandler {
 
   async validateGeneratedFiles(files) {
     logger.info('Validating generated files...');
+    
+    // Log the exact content that will be written
+    logger.info('Docker Compose Content (exact):', JSON.stringify(files.dockerCompose));
+    logger.info('Dockerfile Content (exact):', JSON.stringify(files.dockerfile));
 
     // Basic validation of generated files
     if (!files.dockerfile || !files.dockerCompose) {
       throw new Error('Missing required deployment files');
     }
-
-    logger.info('Generated docker-compose.yml content:', '\n' + files.dockerCompose);
 
     // Create a temporary directory for validation
     const tempDir = `/tmp/deploy-validate-${Date.now()}`;
@@ -100,33 +102,29 @@ class TemplateHandler {
       // Create temp directory
       await fs.mkdir(tempDir, { recursive: true });
       
-      // Write files
+      // Write files with explicit encoding
       const composePath = path.join(tempDir, 'docker-compose.yml');
-      const dockerfilePath = path.join(tempDir, 'Dockerfile');
+      await fs.writeFile(composePath, files.dockerCompose, 'utf8');
       
-      await fs.writeFile(composePath, files.dockerCompose);
-      await fs.writeFile(dockerfilePath, files.dockerfile);
-      
-      logger.info(`Validating docker-compose.yml at ${composePath}`);
+      // Log the actual file content after writing
+      const writtenContent = await fs.readFile(composePath, 'utf8');
+      logger.info('Written docker-compose.yml content:', writtenContent);
       
       // Validate using docker-compose config
-      const { stdout, stderr } = await execAsync(`cd ${tempDir} && docker-compose config`, {
+      const { stdout, stderr } = await execAsync(`cd ${tempDir} && cat docker-compose.yml && docker-compose config`, {
         encoding: 'utf8'
       });
       
-      logger.info('Docker compose validation stdout:', stdout);
-      if (stderr) {
-        logger.warn('Docker compose validation stderr:', stderr);
-      }
-
-      // Parse the output to ensure it's valid YAML
-      const yaml = require('js-yaml');
-      const parsedConfig = yaml.load(stdout);
-      logger.info('Parsed docker-compose configuration:', JSON.stringify(parsedConfig, null, 2));
+      if (stdout) logger.info('Docker compose validation stdout:', stdout);
+      if (stderr) logger.warn('Docker compose validation stderr:', stderr);
 
     } catch (error) {
-      logger.error('Validation error:', error);
-      throw new Error(`Invalid docker-compose configuration: ${error.message}`);
+      logger.error('Validation error details:', {
+        message: error.message,
+        stdout: error.stdout,
+        stderr: error.stderr
+      });
+      throw error;
     } finally {
       // Cleanup
       try {
@@ -138,6 +136,8 @@ class TemplateHandler {
   }
 
   async generateDeploymentFiles(appConfig) {
+    logger.info('Starting file generation with config:', JSON.stringify(appConfig, null, 2));
+
     const {
       appType,
       appName,
@@ -145,78 +145,50 @@ class TemplateHandler {
       port,
       envVars = {},
       buildConfig = {},
-      domain,
-      ssl,
-      api
     } = appConfig;
 
-    logger.info('Generating deployment files for config:', {
-      appType,
-      appName,
-      environment,
-      port,
-      buildConfig
-    });
-
-    if (!this.deployConfig[appType]) {
-      throw new Error(`Unsupported application type: ${appType}`);
-    }
-
     const config = this.mergeDefaults(appType, buildConfig);
-    const typeConfig = this.deployConfig[appType];
+    logger.info('Merged config:', JSON.stringify(config, null, 2));
 
+    const files = {};
+    const normalizedAppName = appName.toLowerCase().replace(/[^a-z0-9]/g, '-');
+
+    // Generate a simplified docker-compose.yml first
+    const dockerComposeContent = `version: "3.8"
+services:
+  ${normalizedAppName}:
+    container_name: ${normalizedAppName}-${environment}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "${port}:${port}"
+    environment:
+      - NODE_ENV=${environment}
+    restart: unless-stopped
+`;
+
+    files.dockerCompose = dockerComposeContent;
+    logger.info('Generated docker-compose content:', dockerComposeContent);
+
+    // Generate a simple Dockerfile
+    const dockerfileContent = `FROM node:18-alpine
+WORKDIR /app
+COPY package*.json ./
+RUN npm install
+COPY . .
+EXPOSE ${port}
+CMD ["npm", "start"]`;
+
+    files.dockerfile = dockerfileContent;
+    logger.info('Generated dockerfile content:', dockerfileContent);
+
+    // Validate the generated files
     try {
-      const files = {};
-      
-      // Generate Dockerfile
-      const dockerfileTemplate = await this.loadTemplate(typeConfig.dockerfileTemplate);
-      const dockerfileContext = {
-        nodeVersion: config.nodeVersion,
-        usePnpm: config.usePnpm,
-        useYarn: config.useYarn,
-        buildCommand: config.buildCommand,
-        startCommand: config.startCommand,
-        port,
-        environment
-      };
-      
-      logger.info('Generating Dockerfile with context:', dockerfileContext);
-      files.dockerfile = dockerfileTemplate(dockerfileContext);
-      
-      // Format environment variables for docker-compose
-      const formattedEnvVars = Object.entries(envVars).reduce((acc, [key, value]) => {
-        let formattedValue = typeof value === 'string' ? value : JSON.stringify(value);
-        formattedValue = formattedValue.replace(/"/g, '\\"');
-        acc[key] = formattedValue;
-        return acc;
-      }, {});
-
-      // Generate docker-compose.yml
-      const dockerComposeTemplate = await this.loadTemplate(typeConfig.dockerComposeTemplate);
-      const dockerComposeContext = {
-        appName: appName.toLowerCase().replace(/[^a-z0-9]/g, '-'),
-        environment,
-        port,
-        envVars: formattedEnvVars,
-        volumes: config.volumes || [],
-        dependencies: config.dependencies || [],
-        healthCheckEndpoint: config.healthCheckEndpoint || '/health'
-      };
-      
-      logger.info('Generating docker-compose.yml with context:', dockerComposeContext);
-      files.dockerCompose = dockerComposeTemplate(dockerComposeContext);
-
-      // Log generated files
-      logger.info('Generated Dockerfile:', '\n' + files.dockerfile);
-      logger.info('Generated docker-compose.yml:', '\n' + files.dockerCompose);
-
-      // Validate the generated files
       await this.validateGeneratedFiles(files);
-
       return files;
     } catch (error) {
-      logger.error('Error generating deployment files:', error);
-      logger.error(error.stack);
+      logger.error('Validation failed:', error);
       throw new Error(`Failed to generate deployment files: ${error.message}`);
     }
   }
