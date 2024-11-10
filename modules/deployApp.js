@@ -16,27 +16,31 @@ async function deployApp(payload, ws) {
         repositoryOwner,
         repositoryName,
         branch,
-        githubToken,
+        githubToken, 
         environment,
         port,
         envVars = {}
     } = payload;
 
+
     logger.info(`Starting deployment ${deploymentId} for ${appType} app: ${appName}`);
     
+    const deployDir = path.join('/opt/cloudlunacy/deployments', deploymentId);
+    const currentDir = process.cwd();
+    const containerName = `${appName}-${environment}`;
+    
     try {
-          // Check permissions before deployment
-          const permissionsOk = await ensureDeploymentPermissions();
-          if (!permissionsOk) {
-              throw new Error('Deployment failed: Permission check failed');
-          }
+        // Check permissions before deployment
+        const permissionsOk = await ensureDeploymentPermissions();
+        if (!permissionsOk) {
+            throw new Error('Deployment failed: Permission check failed');
+        }
 
         // Check for required tools
         await executeCommand('which', ['docker']);
         await executeCommand('which', ['docker-compose']);
         
         // Set up deployment directory
-        const deployDir = path.join('/opt/cloudlunacy/deployments', deploymentId);
         await fs.mkdir(deployDir, { recursive: true });
         process.chdir(deployDir);
 
@@ -46,9 +50,24 @@ async function deployApp(payload, ws) {
             status: 'in_progress',
             message: 'Starting deployment...'
         });
-        sendLogs(ws, deploymentId, 'Setting up deployment environment...');
+
+        // Cleanup existing containers and networks
+        try {
+            sendLogs(ws, deploymentId, `Cleaning up existing container: ${containerName}`);
+            await executeCommand('docker', ['stop', containerName]).catch(() => {});
+            await executeCommand('docker', ['rm', containerName]).catch(() => {});
+            
+            // Remove existing networks
+            const networkName = `${deploymentId}_default`;
+            await executeCommand('docker', ['network', 'rm', networkName]).catch(() => {});
+            
+            sendLogs(ws, deploymentId, 'Previous deployment cleaned up');
+        } catch (error) {
+            logger.warn('Cleanup warning:', error);
+        }
 
         // Clone repository
+        sendLogs(ws, deploymentId, 'Cloning repository...');
         const repoUrl = `https://x-access-token:${githubToken}@github.com/${repositoryOwner}/${repositoryName}.git`;
         await executeCommand('git', ['clone', '-b', branch, repoUrl, '.']);
         sendLogs(ws, deploymentId, 'Repository cloned successfully');
@@ -90,27 +109,18 @@ async function deployApp(payload, ws) {
             throw new Error(`Invalid docker-compose configuration: ${error.message}`);
         }
 
-        // Clean up existing containers
-        try {
-            await executeCommand('docker-compose', ['down', '--remove-orphans']);
-            sendLogs(ws, deploymentId, 'Cleaned up existing containers');
-        } catch (error) {
-            sendLogs(ws, deploymentId, 'No existing containers to clean up');
-        }
-
         // Build and start containers
         sendLogs(ws, deploymentId, 'Building application...');
         await executeCommand('docker-compose', ['build', '--no-cache']);
         sendLogs(ws, deploymentId, 'Application built successfully');
 
         sendLogs(ws, deploymentId, 'Starting application...');
-        await executeCommand('docker-compose', ['up', '-d']);
+        await executeCommand('docker-compose', ['up', '-d', '--force-recreate']);
         sendLogs(ws, deploymentId, 'Application started successfully');
 
         // Verify deployment
         sendLogs(ws, deploymentId, 'Verifying deployment...');
-        await new Promise(resolve => setTimeout(resolve, 5000));
-        const health = await checkDeploymentHealth(port);
+        const health = await checkDeploymentHealth(port, containerName);
         
         if (!health.healthy) {
             throw new Error(`Deployment health check failed: ${health.message}`);
@@ -135,11 +145,22 @@ async function deployApp(payload, ws) {
 
         // Cleanup on failure
         try {
-            await executeCommand('docker-compose', ['down', '--remove-orphans']);
-            await fs.rmdir(deployDir, { recursive: true });
+            // Stop and remove containers
+            await executeCommand('docker', ['stop', containerName]).catch(() => {});
+            await executeCommand('docker', ['rm', containerName]).catch(() => {});
+            
+            // Remove network
+            const networkName = `${deploymentId}_default`;
+            await executeCommand('docker', ['network', 'rm', networkName]).catch(() => {});
+            
+            // Remove deployment directory
+            await fs.rm(deployDir, { recursive: true, force: true });
         } catch (cleanupError) {
             logger.error('Cleanup failed:', cleanupError);
         }
+    } finally {
+        // Always return to original directory
+        process.chdir(currentDir);
     }
 }
 
@@ -165,20 +186,32 @@ function sendLogs(ws, deploymentId, log) {
     }
 }
 
-async function checkDeploymentHealth(port) {
+async function checkDeploymentHealth(port, containerName) {
     try {
+        // Wait for container to start
+        await new Promise(resolve => setTimeout(resolve, 10000));
+
+        // Check container status
+        const { stdout: containerStatus } = await executeCommand('docker', ['inspect', '-f', '{{.State.Status}}', containerName]);
+        if (!containerStatus.includes('running')) {
+            throw new Error('Container is not running');
+        }
+
+        // Check container logs for errors
+        const { stdout: containerLogs } = await executeCommand('docker', ['logs', '--tail', '50', containerName]);
+        if (containerLogs.toLowerCase().includes('error:')) {
+            logger.warn('Found errors in container logs:', containerLogs);
+        }
+
+        // Check port availability
         const { execSync } = require('child_process');
-        // Wait for the port to be available
-        await new Promise(resolve => setTimeout(resolve, 5000));
-        
-        // Check if port is listening
         execSync(`nc -z localhost ${port}`);
         
         return { healthy: true };
     } catch (error) {
         return { 
             healthy: false, 
-            message: `Service not responding on port ${port}`
+            message: `Service health check failed: ${error.message}`
         };
     }
 }
