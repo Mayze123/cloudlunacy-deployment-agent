@@ -24,6 +24,14 @@ async function deployApp(payload, ws) {
     logger.info(`Starting deployment ${deploymentId} for ${appType} app: ${appName}`);
     
     try {
+        // Check if docker and docker-compose are installed
+        try {
+            await executeCommand('which', ['docker']);
+            await executeCommand('which', ['docker-compose']);
+        } catch (error) {
+            throw new Error('Docker or Docker Compose not found. Please ensure both are installed.');
+        }
+
         // Set up deployment directory
         const deployDir = path.join('/opt/cloudlunacy/deployments', deploymentId);
         await fs.mkdir(deployDir, { recursive: true });
@@ -37,6 +45,7 @@ async function deployApp(payload, ws) {
         });
 
         // Clone repository
+        sendLogs(ws, deploymentId, 'Cloning repository...');
         const repoUrl = `https://x-access-token:${githubToken}@github.com/${repositoryOwner}/${repositoryName}.git`;
         await executeCommand('git', ['clone', '-b', branch, repoUrl, '.']);
         sendLogs(ws, deploymentId, 'Repository cloned successfully');
@@ -48,6 +57,7 @@ async function deployApp(payload, ws) {
         );
 
         // Generate deployment files
+        sendLogs(ws, deploymentId, 'Generating deployment files...');
         const files = await templateHandler.generateDeploymentFiles({
             appType,
             appName,
@@ -66,11 +76,11 @@ async function deployApp(payload, ws) {
         });
 
         // Write deployment files
-        await fs.writeFile('Dockerfile', files.dockerfile);
-        await fs.writeFile('docker-compose.yml', files.dockerCompose);
-        if (files.nginxConf) {
-            await fs.writeFile('nginx.conf', files.nginxConf);
-        }
+        await Promise.all([
+            fs.writeFile('Dockerfile', files.dockerfile),
+            fs.writeFile('docker-compose.yml', files.dockerCompose),
+            files.nginxConf ? fs.writeFile('nginx.conf', files.nginxConf) : Promise.resolve()
+        ]);
         sendLogs(ws, deploymentId, 'Deployment files generated');
 
         // Stop existing containers if any
@@ -78,7 +88,7 @@ async function deployApp(payload, ws) {
             await executeCommand('docker-compose', ['down', '--remove-orphans']);
             sendLogs(ws, deploymentId, 'Cleaned up existing containers');
         } catch (error) {
-            logger.warn('No existing containers to clean up');
+            sendLogs(ws, deploymentId, 'No existing containers to clean up');
         }
 
         // Build and start containers
@@ -115,7 +125,7 @@ async function deployApp(payload, ws) {
         sendStatus(ws, {
             deploymentId,
             status: 'failed',
-            message: error.message
+            message: error.message || 'Deployment failed'
         });
 
         // Cleanup on failure

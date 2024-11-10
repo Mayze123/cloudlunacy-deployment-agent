@@ -170,45 +170,61 @@ install_docker() {
     log "Checking Docker installation..."
     if command -v docker >/dev/null 2>&1; then
         log "Docker is already installed."
-        return
+    else
+        log "Docker not found. Installing Docker..."
+
+        case "$OS_TYPE" in
+            ubuntu | debian)
+                apt-get remove -y docker docker-engine docker.io containerd runc || true
+                apt-get update -y
+                apt-get install -y \
+                    ca-certificates \
+                    curl \
+                    gnupg \
+                    lsb-release
+                mkdir -p /etc/apt/keyrings
+                curl -fsSL https://download.docker.com/linux/$OS_TYPE/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+                echo \
+                    "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/$OS_TYPE \
+                    $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+                apt-get update -y
+                apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+                ;;
+            centos | rhel | fedora | rocky | almalinux)
+                yum remove -y docker docker-client docker-client-latest docker-common docker-latest docker-latest-logrotate docker-logrotate docker-engine || true
+                yum install -y yum-utils
+                yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+                yum install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+                systemctl start docker
+                ;;
+            *)
+                log_error "Docker installation not supported on this OS."
+                exit 1
+                ;;
+        esac
+
+        systemctl enable docker
+        systemctl start docker
+        log "Docker installed successfully."
     fi
 
-    log "Docker not found. Installing Docker..."
-
-    case "$OS_TYPE" in
-        ubuntu | debian)
-            apt-get remove -y docker docker-engine docker.io containerd runc || true
-            apt-get update -y
-            apt-get install -y \
-                ca-certificates \
-                curl \
-                gnupg \
-                lsb-release
-            mkdir -p /etc/apt/keyrings
-            curl -fsSL https://download.docker.com/linux/$OS_TYPE/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-            echo \
-                "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/$OS_TYPE \
-                $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
-            apt-get update -y
-            apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
-            ;;
-        centos | rhel | fedora | rocky | almalinux)
-            yum remove -y docker docker-client docker-client-latest docker-common docker-latest docker-latest-logrotate docker-logrotate docker-engine || true
-            yum install -y yum-utils
-            yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
-            yum install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
-            systemctl start docker
-            ;;
-        *)
-            log_error "Docker installation not supported on this OS."
-            exit 1
-            ;;
-    esac
-
-    systemctl enable docker
-    systemctl start docker
-
-    log "Docker installed successfully."
+    # Install Docker Compose
+    log "Checking Docker Compose installation..."
+    if command -v docker-compose >/dev/null 2>&1; then
+        log "Docker Compose is already installed."
+    else
+        log "Installing Docker Compose..."
+        DOCKER_COMPOSE_VERSION="2.24.1"  # Update this version as needed
+        
+        # Download and install docker-compose binary
+        curl -L "https://github.com/docker/compose/releases/download/v${DOCKER_COMPOSE_VERSION}/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+        chmod +x /usr/local/bin/docker-compose
+        
+        # Create symlink
+        ln -sf /usr/local/bin/docker-compose /usr/bin/docker-compose
+        
+        log "Docker Compose installed successfully."
+    fi
 }
 
 # Function to install Node.js
