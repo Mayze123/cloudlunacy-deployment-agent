@@ -373,6 +373,28 @@ EOF'
     log "SSH setup completed."
 }
 
+setup_docker_permissions() {
+    log "Setting up Docker permissions..."
+    
+    # Add cloudlunacy user to docker group
+    usermod -aG docker cloudlunacy
+    
+    # Create deployment directories with correct permissions
+    mkdir -p /opt/cloudlunacy/deployments
+    mkdir -p /tmp/cloudlunacy-deployments
+    
+    # Set permissions
+    chown -R cloudlunacy:docker /opt/cloudlunacy
+    chown cloudlunacy:docker /opt/cloudlunacy/deployments
+    chown cloudlunacy:docker /tmp/cloudlunacy-deployments
+    
+    chmod 775 /opt/cloudlunacy/deployments
+    chmod 775 /tmp/cloudlunacy-deployments
+    chmod 666 /var/run/docker.sock
+    
+    log "Docker permissions configured successfully."
+}
+
 # Function to set up systemd service
 setup_service() {
     log "Setting up CloudLunacy Deployment Agent as a systemd service..."
@@ -381,14 +403,16 @@ setup_service() {
     cat <<EOF > "$SERVICE_FILE"
 [Unit]
 Description=CloudLunacy Deployment Agent
-After=network.target
+After=network.target docker.service
+Requires=docker.service
 
 [Service]
 ExecStart=/usr/bin/node $BASE_DIR/agent.js
 WorkingDirectory=$BASE_DIR
 Restart=always
 RestartSec=5
-User=$USERNAME
+User=cloudlunacy
+Group=docker
 Environment=HOME=$BASE_DIR
 EnvironmentFile=$ENV_FILE
 
@@ -399,6 +423,10 @@ EOF
     systemctl daemon-reload
     systemctl enable cloudlunacy
     systemctl start cloudlunacy
+    
+    # Restart Docker to ensure group changes take effect
+    systemctl restart docker
+    
     log "CloudLunacy service set up and started."
 }
 
@@ -488,6 +516,7 @@ main() {
     install_docker
     install_node
     setup_user_directories
+    setup_docker_permissions
     setup_ssh "$GITHUB_SSH_KEY"
     download_agent
     install_agent_dependencies

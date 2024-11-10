@@ -6,6 +6,7 @@ const fs = require('fs').promises;
 const path = require('path');
 const TemplateHandler = require('../utils/templateHandler');
 const deployConfig = require('../deployConfig.json');
+const { ensureDeploymentPermissions } = require('../utils/permissionCheck');
 
 async function deployApp(payload, ws) {
     const {
@@ -24,6 +25,12 @@ async function deployApp(payload, ws) {
     logger.info(`Starting deployment ${deploymentId} for ${appType} app: ${appName}`);
     
     try {
+          // Check permissions before deployment
+          const permissionsOk = await ensureDeploymentPermissions();
+          if (!permissionsOk) {
+              throw new Error('Deployment failed: Permission check failed');
+          }
+
         // Check for required tools
         await executeCommand('which', ['docker']);
         await executeCommand('which', ['docker-compose']);

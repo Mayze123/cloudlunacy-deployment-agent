@@ -20,12 +20,11 @@ const path = require('path');
 const dotenv = require('dotenv');
 const logger = require('./utils/logger');
 const { executeCommand } = require('./utils/executor');
+const { ensureDeploymentPermissions } = require('./utils/permissionCheck');
 
-// Import deployment modules
+
 const deployApp = require('./modules/deployApp');
-// const deployReactAppDocker = require('./modules/deployReactAppDocker');
-// const deployNodeApp = require('./modules/deployNodeApp');
-// const manageDatabase = require('./modules/manageDatabase');
+;
 
 // Load environment variables
 dotenv.config();
@@ -245,12 +244,22 @@ function sendMetrics(metrics) {
 /**
  * Initialize agent operations
  */
-function init() {
-    // Authenticate and connect to backend
-    authenticateAndConnect();
+async function init() {
+    try {
+        // Check permissions first
+        const permissionsOk = await ensureDeploymentPermissions();
+        if (!permissionsOk) {
+            logger.error('Critical: Permission check failed. Agent may not function correctly.');
+        }
 
-    // Collect and send metrics every minute
-    setInterval(collectMetrics, 60000);
+        // Continue with normal initialization
+        await authenticateAndConnect();
+        setInterval(collectMetrics, 60000);
+
+    } catch (error) {
+        logger.error('Initialization failed:', error);
+        process.exit(1);
+    }
 }
 
 // Start the agent
