@@ -95,10 +95,18 @@ async function deployApp(payload, ws) {
         await executeCommand('git', ['clone', '-b', branch, repoUrl, '.']);
         sendLogs(ws, deploymentId, 'Repository cloned successfully');
 
-        // Initialize environment manager and write env file
+        // Initialize environment manager and write env files
         const envManager = new EnvironmentManager(deployDir);
         envFilePath = await envManager.writeEnvFile(envVars, environment);
+        
+        // Also create a regular .env file
+        await fs.copyFile(envFilePath, path.join(deployDir, '.env'));
+        
         sendLogs(ws, deploymentId, 'Environment variables configured successfully');
+
+        // Verify environment files
+        const envFiles = await fs.readdir(deployDir);
+        sendLogs(ws, deploymentId, `Environment files in directory: ${envFiles.filter(f => f.startsWith('.env')).join(', ')}`);
 
         // Initialize template handler
         const templateHandler = new TemplateHandler(
@@ -129,10 +137,32 @@ async function deployApp(payload, ws) {
             files.nginxConf ? fs.writeFile('nginx.conf', files.nginxConf) : Promise.resolve()
         ]);
 
+        // Create env loading script
+        const envLoaderContent = `
+        const dotenv = require('dotenv');
+        const path = require('path');
+        
+        // Load environment specific variables
+        const envFile = path.join(process.cwd(), '.env.${environment}');
+        const result = dotenv.config({ path: envFile });
+        
+        if (result.error) {
+            console.error('Error loading environment variables:', result.error);
+            process.exit(1);
+        }
+        
+        console.log('Environment variables loaded successfully');
+        `;
+        
+        await fs.writeFile('load-env.js', envLoaderContent);
+        sendLogs(ws, deploymentId, 'Environment loader script created');
+
         // Validate docker-compose file
         try {
             sendLogs(ws, deploymentId, 'Validating deployment configuration...');
-            await executeCommand('docker-compose', ['config']);
+            const { stdout: configOutput } = await executeCommand('docker-compose', ['config']);
+            sendLogs(ws, deploymentId, 'Docker Compose configuration:');
+            sendLogs(ws, deploymentId, configOutput);
             sendLogs(ws, deploymentId, 'Deployment configuration validated');
         } catch (error) {
             throw new Error(`Invalid docker-compose configuration: ${error.message}`);
@@ -145,7 +175,11 @@ async function deployApp(payload, ws) {
 
         sendLogs(ws, deploymentId, 'Starting application...');
         await executeCommand('docker-compose', ['up', '-d', '--force-recreate']);
-        sendLogs(ws, deploymentId, 'Application started successfully');
+        
+        // Log container status
+        const { stdout: containerLogs } = await executeCommand('docker', ['logs', serviceName]);
+        sendLogs(ws, deploymentId, 'Container logs:');
+        sendLogs(ws, deploymentId, containerLogs);
 
         // Verify deployment
         sendLogs(ws, deploymentId, 'Verifying deployment...');
@@ -154,6 +188,11 @@ async function deployApp(payload, ws) {
         if (!health.healthy) {
             throw new Error(`Deployment health check failed: ${health.message}`);
         }
+
+        // Verify environment variables in container
+        const { stdout: envVarsOutput } = await executeCommand('docker', ['exec', serviceName, 'printenv']);
+        sendLogs(ws, deploymentId, 'Container environment variables:');
+        sendLogs(ws, deploymentId, envVarsOutput);
 
         // Send success status
         sendStatus(ws, {
@@ -174,6 +213,14 @@ async function deployApp(payload, ws) {
 
         // Cleanup on failure
         try {
+            // Get container logs before cleanup if possible
+            try {
+                const { stdout: failureLogs } = await executeCommand('docker', ['logs', serviceName]);
+                logger.error('Container logs before cleanup:', failureLogs);
+            } catch (logError) {
+                logger.warn('Could not retrieve container logs:', logError);
+            }
+
             // Stop and remove containers
             await executeCommand('docker', ['stop', serviceName]).catch(() => {});
             await executeCommand('docker', ['rm', serviceName]).catch(() => {});

@@ -164,7 +164,7 @@ class TemplateHandler {
     // Normalize service name to be consistent across all uses
     const serviceName = `${appName}-${environment}`.toLowerCase().replace(/[^a-z0-9-]/g, '-');
 
-    // Generate docker-compose.yml with consistent service naming and without env_file
+    // Generate docker-compose.yml with explicit env_file configuration
     const dockerComposeContent = `version: "3.8"
 services:
   ${serviceName}:
@@ -176,6 +176,8 @@ services:
       - "${port}:${port}"
     environment:
       - NODE_ENV=${environment}
+    env_file:
+      - .env.${environment}
     restart: unless-stopped
     networks:
       - app-network
@@ -184,20 +186,25 @@ networks:
   app-network:
     driver: bridge`;
 
-    files.dockerCompose = dockerComposeContent;
-    logger.info('Generated docker-compose content:', dockerComposeContent);
-
-    // Generate Dockerfile with consistent configuration
+    // Generate Dockerfile with explicit dotenv loading
     const dockerfileContent = `FROM node:18-alpine
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci --only=production
 COPY . .
+COPY .env.${environment} .env
 ENV NODE_ENV=${environment}
 EXPOSE ${port}
-CMD ["npm", "start"]`;
 
+# Add explicit dotenv loading
+RUN echo "require('dotenv').config();" > load-env.js
+
+CMD ["sh", "-c", "node load-env.js && npm start"]`;
+
+    files.dockerCompose = dockerComposeContent;
     files.dockerfile = dockerfileContent;
+
+    logger.info('Generated docker-compose content:', dockerComposeContent);
     logger.info('Generated dockerfile content:', dockerfileContent);
 
     // Validate the generated files
