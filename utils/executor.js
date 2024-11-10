@@ -14,42 +14,93 @@ const logger = require('./logger');
  * Executes a shell command asynchronously.
  * @param {String} command - The command to execute
  * @param {Array} args - The list of string arguments
- * @param {String} cwd - (Optional) The working directory to execute the command in
- * @returns {Promise} - Resolves on successful execution, rejects on error
+ * @param {Object} options - Command execution options
+ * @param {String} options.cwd - Working directory
+ * @param {Boolean} options.ignoreError - Whether to ignore command errors
+ * @param {Boolean} options.silent - Whether to suppress logging
+ * @returns {Promise} - Resolves with command output object
  */
-function executeCommand(command, args = [], cwd = process.cwd()) {
+function executeCommand(command, args = [], options = {}) {
+    const {
+        cwd = process.cwd(),
+        ignoreError = false,
+        silent = false
+    } = options;
+
+    if (!silent) {
+        logger.debug(`Executing command: ${command} ${args.join(' ')}`);
+    }
+
     return new Promise((resolve, reject) => {
-        const cmd = spawn(command, args, { cwd });
+        const cmd = spawn(command, args, { 
+            cwd,
+            stdio: ['inherit', 'pipe', 'pipe']
+        });
 
         let stdout = '';
         let stderr = '';
 
         cmd.stdout.on('data', (data) => {
             stdout += data.toString();
+            if (!silent) {
+                logger.debug(`stdout: ${data.toString().trim()}`);
+            }
         });
 
         cmd.stderr.on('data', (data) => {
             stderr += data.toString();
+            if (!silent) {
+                logger.debug(`stderr: ${data.toString().trim()}`);
+            }
         });
 
         cmd.on('close', (code) => {
-            if (code !== 0) {
-                logger.error(`Command failed: ${command} ${args.join(' ')}`);
-                logger.error(`Stderr: ${stderr}`);
-                return reject(new Error(`Command failed with exit code ${code}`));
+            const output = {
+                code,
+                stdout: stdout.trim(),
+                stderr: stderr.trim(),
+                success: code === 0
+            };
+
+            if (code !== 0 && !ignoreError) {
+                if (!silent) {
+                    logger.error(`Command failed: ${command} ${args.join(' ')}`);
+                    logger.error(`Exit code: ${code}`);
+                    if (stderr) logger.error(`stderr: ${stderr}`);
+                }
+                reject(new Error(`Command failed with exit code ${code}\nStderr: ${stderr}`));
             } else {
-                logger.debug(`Command succeeded: ${command} ${args.join(' ')}`);
-                logger.debug(`Stdout: ${stdout}`);
-                resolve(stdout);
+                if (!silent && !ignoreError) {
+                    logger.debug(`Command succeeded: ${command} ${args.join(' ')}`);
+                    if (stdout) logger.debug(`stdout: ${stdout}`);
+                }
+                resolve(output);
             }
         });
 
         cmd.on('error', (error) => {
-            logger.error(`Failed to start command: ${command} ${args.join(' ')}`);
-            logger.error(`Error: ${error.message}`);
-            reject(error);
+            if (!silent) {
+                logger.error(`Failed to start command: ${command} ${args.join(' ')}`);
+                logger.error(`Error: ${error.message}`);
+            }
+            reject(new Error(`Failed to execute command: ${error.message}`));
         });
     });
 }
 
-module.exports = { executeCommand };
+/**
+ * Executes a command and returns only the stdout if successful
+ * @param {String} command - The command to execute
+ * @param {Array} args - The list of string arguments
+ * @param {Object} options - Command execution options
+ * @returns {Promise<String>} - Resolves with stdout string
+ */
+async function getCommandOutput(command, args = [], options = {}) {
+    const result = await executeCommand(command, args, { ...options, silent: true });
+    return result.stdout;
+}
+
+module.exports = { 
+    executeCommand,
+    getCommandOutput
+};

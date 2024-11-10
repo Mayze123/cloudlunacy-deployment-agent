@@ -192,26 +192,67 @@ async function checkDeploymentHealth(port, containerName) {
         await new Promise(resolve => setTimeout(resolve, 10000));
 
         // Check container status
-        const { stdout: containerStatus } = await executeCommand('docker', ['inspect', '-f', '{{.State.Status}}', containerName]);
-        if (!containerStatus.includes('running')) {
+        const { stdout: status } = await executeCommand('docker', [
+            'inspect',
+            '--format',
+            '{{.State.Status}}',
+            containerName
+        ], { silent: true });
+
+        if (!status || !status.includes('running')) {
+            // Get container logs for debugging
+            const { stdout: logs } = await executeCommand('docker', ['logs', containerName], { 
+                silent: true,
+                ignoreError: true 
+            });
+            
+            logger.error('Container logs:', logs);
             throw new Error('Container is not running');
         }
 
-        // Check container logs for errors
-        const { stdout: containerLogs } = await executeCommand('docker', ['logs', '--tail', '50', containerName]);
-        if (containerLogs.toLowerCase().includes('error:')) {
-            logger.warn('Found errors in container logs:', containerLogs);
+        // Check port availability
+        logger.info(`Checking port ${port} availability...`);
+        const portCheck = await new Promise((resolve) => {
+            const net = require('net');
+            const socket = net.createConnection(port);
+            
+            const timeout = setTimeout(() => {
+                socket.destroy();
+                resolve(false);
+            }, 5000);
+            
+            socket.on('connect', () => {
+                clearTimeout(timeout);
+                socket.end();
+                resolve(true);
+            });
+            
+            socket.on('error', () => {
+                clearTimeout(timeout);
+                resolve(false);
+            });
+        });
+
+        if (!portCheck) {
+            throw new Error(`Port ${port} is not accessible`);
         }
 
-        // Check port availability
-        const { execSync } = require('child_process');
-        execSync(`nc -z localhost ${port}`);
-        
+        // Check container logs for errors
+        const { stdout: containerLogs } = await executeCommand('docker', ['logs', '--tail', '50', containerName], {
+            silent: true,
+            ignoreError: true
+        });
+
+        if (containerLogs && containerLogs.toLowerCase().includes('error')) {
+            logger.warn('Found potential errors in container logs:', containerLogs);
+        }
+
         return { healthy: true };
     } catch (error) {
+        logger.error('Health check failed:', error);
         return { 
             healthy: false, 
-            message: `Service health check failed: ${error.message}`
+            message: error.message
         };
     }
 }
