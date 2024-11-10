@@ -261,6 +261,11 @@ install_node() {
     log "Node.js installed successfully."
 }
 
+# Add this at the beginning of the script, after the IFS declaration
+USERNAME="cloudlunacy"
+BASE_DIR="/opt/cloudlunacy"
+
+# Updated install_nginx function
 install_nginx() {
     log "Checking Nginx installation..."
     if command -v nginx >/dev/null 2>&1; then
@@ -298,8 +303,8 @@ install_nginx() {
     mkdir -p /etc/nginx/sites-enabled
     
     # Ubuntu-specific setup
-    log "Configuring Nginx permissions for Ubuntu..."
     if [ "$OS_TYPE" = "ubuntu" ] || [ "$OS_TYPE" = "debian" ] || [ "$OS_TYPE" = "raspbian" ]; then
+        log "Configuring Nginx permissions for Ubuntu..."
         # Add cloudlunacy user to www-data group
         usermod -aG www-data "$USERNAME"
         
@@ -313,6 +318,7 @@ install_nginx() {
         chmod 775 /etc/nginx/sites-available
         chmod 775 /etc/nginx/sites-enabled
     else
+        log "Configuring Nginx permissions for non-Ubuntu system..."
         # For other distributions that use the nginx user/group
         groupadd -f nginx
         usermod -aG nginx "$USERNAME"
@@ -326,6 +332,9 @@ install_nginx() {
 
     # Update nginx configuration
     NGINX_CONF="/etc/nginx/nginx.conf"
+    
+    # Backup original config
+    cp "$NGINX_CONF" "$NGINX_CONF.bak"
     
     # Add includes if they don't exist
     if ! grep -q "include /etc/nginx/sites-enabled/\*" "$NGINX_CONF"; then
@@ -358,10 +367,50 @@ EOF
     # Test and reload nginx
     if ! nginx -t; then
         log_error "Nginx configuration test failed"
+        cat "$NGINX_CONF"
         exit 1
     fi
     
     systemctl reload nginx
+    
+    # Create nginx template directory
+    NGINX_TEMPLATE_DIR="$BASE_DIR/templates/nginx"
+    mkdir -p "$NGINX_TEMPLATE_DIR"
+    
+    # Create virtual host template
+    cat > "$NGINX_TEMPLATE_DIR/virtual-host.template" << 'EOF'
+server {
+    listen 80;
+    server_name {{domain}};
+
+    location / {
+        proxy_pass http://127.0.0.1:{{port}};
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location /socket.io/ {
+        proxy_pass http://127.0.0.1:{{port}};
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+EOF
+
+    # Set template permissions
+    chown -R "$USERNAME:$USERNAME" "$NGINX_TEMPLATE_DIR"
+    chmod 750 "$NGINX_TEMPLATE_DIR"
+    chmod 640 "$NGINX_TEMPLATE_DIR/virtual-host.template"
     
     log "Nginx setup completed successfully"
 }
