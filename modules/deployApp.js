@@ -24,11 +24,12 @@ async function deployApp(payload, ws) {
         envVarsToken
     } = payload;
 
-    logger.info(`Starting deployment ${deploymentId} for ${appType} app: ${appName}`);
-    
+    // Create consistent container/service name
+    const serviceName = `${appName}-${environment}`.toLowerCase().replace(/[^a-z0-9-]/g, '-');
     const deployDir = path.join('/opt/cloudlunacy/deployments', deploymentId);
     const currentDir = process.cwd();
-    const containerName = `${appName}-${environment}`;
+    
+    logger.info(`Starting deployment ${deploymentId} for ${appType} app: ${appName}`);
     
     try {
         // Check permissions before deployment
@@ -54,12 +55,12 @@ async function deployApp(payload, ws) {
 
         // Cleanup existing containers and networks
         try {
-            sendLogs(ws, deploymentId, `Cleaning up existing container: ${containerName}`);
-            await executeCommand('docker', ['stop', containerName]).catch(() => {});
-            await executeCommand('docker', ['rm', containerName]).catch(() => {});
+            sendLogs(ws, deploymentId, `Cleaning up existing container: ${serviceName}`);
+            await executeCommand('docker', ['stop', serviceName]).catch(() => {});
+            await executeCommand('docker', ['rm', serviceName]).catch(() => {});
             
             // Remove existing networks
-            const networkName = `${deploymentId}_default`;
+            const networkName = 'app-network';
             await executeCommand('docker', ['network', 'rm', networkName]).catch(() => {});
             
             sendLogs(ws, deploymentId, 'Previous deployment cleaned up');
@@ -121,18 +122,16 @@ async function deployApp(payload, ws) {
             domain: `${appName}-${environment}.yourdomain.com`
         });
 
-        // Write and validate files
+        // Write deployment files
         await Promise.all([
             fs.writeFile('Dockerfile', files.dockerfile),
             fs.writeFile('docker-compose.yml', files.dockerCompose),
             files.nginxConf ? fs.writeFile('nginx.conf', files.nginxConf) : Promise.resolve()
         ]);
 
-        // Update docker-compose with env file reference
-        await envManager.updateDockerCompose(path.basename(envFilePath), containerName);
-
         // Validate docker-compose file
         try {
+            sendLogs(ws, deploymentId, 'Validating deployment configuration...');
             await executeCommand('docker-compose', ['config']);
             sendLogs(ws, deploymentId, 'Deployment configuration validated');
         } catch (error) {
@@ -150,7 +149,7 @@ async function deployApp(payload, ws) {
 
         // Verify deployment
         sendLogs(ws, deploymentId, 'Verifying deployment...');
-        const health = await checkDeploymentHealth(port, containerName);
+        const health = await checkDeploymentHealth(port, serviceName);
         
         if (!health.healthy) {
             throw new Error(`Deployment health check failed: ${health.message}`);
@@ -176,11 +175,11 @@ async function deployApp(payload, ws) {
         // Cleanup on failure
         try {
             // Stop and remove containers
-            await executeCommand('docker', ['stop', containerName]).catch(() => {});
-            await executeCommand('docker', ['rm', containerName]).catch(() => {});
+            await executeCommand('docker', ['stop', serviceName]).catch(() => {});
+            await executeCommand('docker', ['rm', serviceName]).catch(() => {});
             
             // Remove network
-            const networkName = `${deploymentId}_default`;
+            const networkName = 'app-network';
             await executeCommand('docker', ['network', 'rm', networkName]).catch(() => {});
             
             // Remove deployment directory

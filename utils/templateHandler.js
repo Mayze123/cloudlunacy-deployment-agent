@@ -143,7 +143,7 @@ class TemplateHandler {
       appName,
       environment,
       port,
-      envVars = {},
+      envFile,
       buildConfig = {},
     } = appConfig;
 
@@ -151,13 +151,14 @@ class TemplateHandler {
     logger.info('Merged config:', JSON.stringify(config, null, 2));
 
     const files = {};
-    const normalizedAppName = appName.toLowerCase().replace(/[^a-z0-9]/g, '-');
+    // Normalize service name to be consistent across all uses
+    const serviceName = `${appName}-${environment}`.toLowerCase().replace(/[^a-z0-9-]/g, '-');
 
-    // Generate a simplified docker-compose.yml first
+    // Generate docker-compose.yml with consistent service naming
     const dockerComposeContent = `version: "3.8"
 services:
-  ${normalizedAppName}:
-    container_name: ${normalizedAppName}-${environment}
+  ${serviceName}:
+    container_name: ${serviceName}
     build:
       context: .
       dockerfile: Dockerfile
@@ -165,18 +166,26 @@ services:
       - "${port}:${port}"
     environment:
       - NODE_ENV=${environment}
+    env_file:
+      - ${envFile || `.env.${environment}`}
     restart: unless-stopped
-`;
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge`;
 
     files.dockerCompose = dockerComposeContent;
     logger.info('Generated docker-compose content:', dockerComposeContent);
 
-    // Generate a simple Dockerfile
+    // Generate Dockerfile with consistent configuration
     const dockerfileContent = `FROM node:18-alpine
 WORKDIR /app
 COPY package*.json ./
-RUN npm install
+RUN npm ci --only=production
 COPY . .
+ENV NODE_ENV=${environment}
 EXPOSE ${port}
 CMD ["npm", "start"]`;
 
