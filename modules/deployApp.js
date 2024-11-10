@@ -1,13 +1,13 @@
 // src/modules/deployApp.js
-
 const { executeCommand } = require('../utils/executor');
 const logger = require('../utils/logger');
 const fs = require('fs').promises;
 const path = require('path');
 const TemplateHandler = require('../utils/templateHandler');
+const EnvironmentManager = require('../utils/environmentManager');
+const apiClient = require('../utils/apiClient');
 const deployConfig = require('../deployConfig.json');
 const { ensureDeploymentPermissions } = require('../utils/permissionCheck');
-const fetch = require('node-fetch');
 
 async function deployApp(payload, ws) {
     const {
@@ -31,13 +31,12 @@ async function deployApp(payload, ws) {
     const greenContainer = `${appName}-green`;
     
     try {
-        // Check permissions before deployment
+        // Check permissions and tools
         const permissionsOk = await ensureDeploymentPermissions();
         if (!permissionsOk) {
             throw new Error('Deployment failed: Permission check failed');
         }
 
-        // Check for required tools
         await executeCommand('which', ['docker']);
         await executeCommand('which', ['docker-compose']);
         
@@ -45,14 +44,13 @@ async function deployApp(payload, ws) {
         await fs.mkdir(deployDir, { recursive: true });
         process.chdir(deployDir);
 
-        // Send initial status
         sendStatus(ws, {
             deploymentId,
             status: 'in_progress',
             message: 'Starting deployment...'
         });
 
-        // Determine current active container (blue or green)
+        // Determine active container
         const activeContainer = await determineActiveContainer(blueContainer, greenContainer);
         const newContainer = activeContainer === blueContainer ? greenContainer : blueContainer;
         const newPort = parseInt(port) + (activeContainer === blueContainer ? 1 : 0);
@@ -60,28 +58,22 @@ async function deployApp(payload, ws) {
         sendLogs(ws, deploymentId, `Current active container: ${activeContainer || 'none'}`);
         sendLogs(ws, deploymentId, `Preparing new container: ${newContainer} on port ${newPort}`);
 
-        // Retrieve environment variables securely
+        // Retrieve and set up environment variables
         sendLogs(ws, deploymentId, 'Retrieving environment variables...');
         let envVars = {};
         try {
-            const response = await fetch(`${process.env.BACKEND_URL}/api/deploy/env-vars/${deploymentId}`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${process.env.AGENT_API_TOKEN}`
-                },
-                body: JSON.stringify({ token: envVarsToken })
+            const { data } = await apiClient.post(`/api/deploy/env-vars/${deploymentId}`, {
+                token: envVarsToken
             });
-
-            if (!response.ok) {
-                throw new Error(`Failed to retrieve environment variables: ${response.statusText}`);
-            }
-
-            const data = await response.json();
             envVars = data.variables;
-            sendLogs(ws, deploymentId, 'Environment variables retrieved successfully');
+            
+            // Initialize environment manager and write env file
+            const envManager = new EnvironmentManager(deployDir);
+            const envFilePath = await envManager.writeEnvFile(envVars, environment);
+            
+            sendLogs(ws, deploymentId, 'Environment variables configured successfully');
         } catch (error) {
-            throw new Error(`Environment variables retrieval failed: ${error.message}`);
+            throw new Error(`Environment variables setup failed: ${error.message}`);
         }
 
         // Clone repository
@@ -95,15 +87,15 @@ async function deployApp(payload, ws) {
             deployConfig
         );
 
-        // Generate deployment files with environment variables
+        // Generate deployment files
         sendLogs(ws, deploymentId, 'Generating deployment configuration...');
         const files = await templateHandler.generateDeploymentFiles({
             appType,
             appName,
             environment,
             port: newPort,
-            envVars,
             containerName: newContainer,
+            envFile: `.env.${environment}`, // Reference the env file
             buildConfig: {
                 nodeVersion: '18',
                 buildOutputDir: 'build',
@@ -119,7 +111,11 @@ async function deployApp(payload, ws) {
             files.nginxConf ? fs.writeFile('nginx.conf', files.nginxConf) : Promise.resolve()
         ]);
 
-        // Validate docker-compose file
+        // Update docker-compose with env file reference
+        const envManager = new EnvironmentManager(deployDir);
+        await envManager.updateDockerCompose(`.env.${environment}`, newContainer);
+
+        // Validate configuration
         try {
             await executeCommand('docker-compose', ['config']);
             sendLogs(ws, deploymentId, 'Deployment configuration validated');
@@ -133,7 +129,7 @@ async function deployApp(payload, ws) {
         await executeCommand('docker-compose', ['up', '-d', '--force-recreate']);
         sendLogs(ws, deploymentId, 'Application built and started');
 
-        // Verify new deployment health
+        // Verify deployment health
         sendLogs(ws, deploymentId, 'Verifying deployment health...');
         const health = await checkDeploymentHealth(newPort, newContainer);
         
@@ -141,20 +137,20 @@ async function deployApp(payload, ws) {
             throw new Error(`Deployment health check failed: ${health.message}`);
         }
 
-        // Update reverse proxy configuration
+        // Update proxy configuration
         sendLogs(ws, deploymentId, 'Updating reverse proxy configuration...');
         await updateReverseProxy(appName, environment, newPort);
 
-        // Wait for proxy configuration to take effect
+        // Wait for proxy configuration
         await new Promise(resolve => setTimeout(resolve, 5000));
 
-        // Verify application is accessible through reverse proxy
+        // Check proxy health
         const proxyHealth = await checkProxyHealth(appName, environment);
         if (!proxyHealth.healthy) {
-            throw new Error('Failed to verify application access through reverse proxy');
+            throw new Error('Failed to verify application access through proxy');
         }
 
-        // If everything is successful, remove old container
+        // Remove old container if successful
         if (activeContainer) {
             sendLogs(ws, deploymentId, `Removing old container: ${activeContainer}`);
             await executeCommand('docker', ['stop', activeContainer]).catch(() => {});
@@ -170,7 +166,6 @@ async function deployApp(payload, ws) {
     } catch (error) {
         logger.error(`Deployment ${deploymentId} failed:`, error);
         
-        // Send detailed error message
         sendStatus(ws, {
             deploymentId,
             status: 'failed',
@@ -179,12 +174,9 @@ async function deployApp(payload, ws) {
 
         // Cleanup on failure
         try {
-            // Only cleanup the new container on failure, leaving the old one running
             const failedContainer = activeContainer === blueContainer ? greenContainer : blueContainer;
             await executeCommand('docker', ['stop', failedContainer]).catch(() => {});
             await executeCommand('docker', ['rm', failedContainer]).catch(() => {});
-            
-            // Remove deployment directory
             await fs.rm(deployDir, { recursive: true, force: true });
         } catch (cleanupError) {
             logger.error('Cleanup failed:', cleanupError);
