@@ -292,48 +292,78 @@ install_nginx() {
 
     # Set up Nginx directories and permissions
     log "Setting up Nginx configuration directories..."
+    
+    # Ensure directories exist
     mkdir -p /etc/nginx/sites-available
     mkdir -p /etc/nginx/sites-enabled
     
-    # Use www-data group instead of nginx on Ubuntu/Debian
-    case "$OS_TYPE" in
-        ubuntu | debian | raspbian)
-            # Add cloudlunacy user to www-data group
-            usermod -aG www-data cloudlunacy
-            
-            # Set proper ownership
-            chown -R cloudlunacy:www-data /etc/nginx/sites-available
-            chown -R cloudlunacy:www-data /etc/nginx/sites-enabled
-            ;;
-        *)
-            # Create nginx group if it doesn't exist (for other distros)
-            groupadd -f nginx
-            usermod -aG nginx cloudlunacy
-            chown -R cloudlunacy:nginx /etc/nginx/sites-available
-            chown -R cloudlunacy:nginx /etc/nginx/sites-enabled
-            ;;
-    esac
+    # Ubuntu-specific setup
+    log "Configuring Nginx permissions for Ubuntu..."
+    if [ "$OS_TYPE" = "ubuntu" ] || [ "$OS_TYPE" = "debian" ] || [ "$OS_TYPE" = "raspbian" ]; then
+        # Add cloudlunacy user to www-data group
+        usermod -aG www-data "$USERNAME"
+        
+        # Set ownership
+        chown -R root:root /etc/nginx
+        chown -R "$USERNAME:www-data" /etc/nginx/sites-available
+        chown -R "$USERNAME:www-data" /etc/nginx/sites-enabled
+        
+        # Set directory permissions
+        chmod 755 /etc/nginx
+        chmod 775 /etc/nginx/sites-available
+        chmod 775 /etc/nginx/sites-enabled
+    else
+        # For other distributions that use the nginx user/group
+        groupadd -f nginx
+        usermod -aG nginx "$USERNAME"
+        chown -R root:root /etc/nginx
+        chown -R "$USERNAME:nginx" /etc/nginx/sites-available
+        chown -R "$USERNAME:nginx" /etc/nginx/sites-enabled
+        chmod 755 /etc/nginx
+        chmod 775 /etc/nginx/sites-available
+        chmod 775 /etc/nginx/sites-enabled
+    fi
+
+    # Update nginx configuration
+    NGINX_CONF="/etc/nginx/nginx.conf"
     
-    chmod 775 /etc/nginx/sites-available
-    chmod 775 /etc/nginx/sites-enabled
-    
-    # Update nginx configuration to include sites-enabled
-    if ! grep -q "include /etc/nginx/sites-enabled/\*" /etc/nginx/nginx.conf; then
-        sed -i '/http {/a \    include /etc/nginx/sites-enabled/*;' /etc/nginx/nginx.conf
+    # Add includes if they don't exist
+    if ! grep -q "include /etc/nginx/sites-enabled/\*" "$NGINX_CONF"; then
+        sed -i '/http {/a \    include /etc/nginx/sites-enabled/*;' "$NGINX_CONF"
+        log "Added sites-enabled include to nginx.conf"
     fi
     
-    # Add server_names_hash_bucket_size if not present
-    if ! grep -q "server_names_hash_bucket_size" /etc/nginx/nginx.conf; then
-        sed -i '/http {/a \    server_names_hash_bucket_size 128;' /etc/nginx/nginx.conf
+    if ! grep -q "server_names_hash_bucket_size" "$NGINX_CONF"; then
+        sed -i '/http {/a \    server_names_hash_bucket_size 128;' "$NGINX_CONF"
+        log "Added server_names_hash_bucket_size directive"
     fi
     
-    # Add cloudlunacy user to sudoers for specific nginx commands
-    echo "cloudlunacy ALL=(ALL) NOPASSWD: /usr/sbin/nginx, /bin/systemctl reload nginx, /bin/systemctl restart nginx, /usr/bin/tee /etc/nginx/sites-available/*, /usr/bin/tee /etc/nginx/sites-enabled/*, /bin/ln -sf /etc/nginx/sites-available/* /etc/nginx/sites-enabled/*, /bin/rm /etc/nginx/sites-available/*, /bin/rm /etc/nginx/sites-enabled/*" | EDITOR="tee -a" visudo
+    # Create sudoers entry
+    SUDOERS_FILE="/etc/sudoers.d/cloudlunacy-nginx"
+    cat > "$SUDOERS_FILE" << EOF
+# Allow cloudlunacy user to manage nginx
+$USERNAME ALL=(ALL) NOPASSWD: /usr/sbin/nginx
+$USERNAME ALL=(ALL) NOPASSWD: /bin/systemctl reload nginx
+$USERNAME ALL=(ALL) NOPASSWD: /bin/systemctl restart nginx
+$USERNAME ALL=(ALL) NOPASSWD: /usr/bin/tee /etc/nginx/sites-available/*
+$USERNAME ALL=(ALL) NOPASSWD: /usr/bin/tee /etc/nginx/sites-enabled/*
+$USERNAME ALL=(ALL) NOPASSWD: /bin/ln -sf /etc/nginx/sites-available/* /etc/nginx/sites-enabled/*
+$USERNAME ALL=(ALL) NOPASSWD: /bin/rm -f /etc/nginx/sites-available/*
+$USERNAME ALL=(ALL) NOPASSWD: /bin/rm -f /etc/nginx/sites-enabled/*
+EOF
+
+    # Set proper permissions on sudoers file
+    chmod 440 "$SUDOERS_FILE"
     
     # Test and reload nginx
-    nginx -t && systemctl reload nginx
+    if ! nginx -t; then
+        log_error "Nginx configuration test failed"
+        exit 1
+    fi
     
-    log "Nginx setup completed."
+    systemctl reload nginx
+    
+    log "Nginx setup completed successfully"
 }
 
 # Function to create dedicated user and directories
