@@ -24,69 +24,71 @@ async function deployApp(payload, ws) {
     } = payload;
 
     logger.info(`Starting blue-green deployment ${deploymentId} for ${appName}`);
-    
-    const deployDir = path.join('/opt/cloudlunacy/deployments', deploymentId);
+
+    const baseDeployDir = path.join('/opt/cloudlunacy/deployments', appName);
     const currentDir = process.cwd();
     const blueContainer = `${appName}-blue`;
     const greenContainer = `${appName}-green`;
-    
-    try {
-         // Check permissions and tools
-         const permissionsOk = await ensureDeploymentPermissions();
-         if (!permissionsOk) {
-             throw new Error('Deployment failed: Permission check failed');
-         }
- 
-         await executeCommand('which', ['docker']);
-         await executeCommand('which', ['docker-compose']);
-         
-         // Set up deployment directory
-         await fs.mkdir(deployDir, { recursive: true });
-         process.chdir(deployDir);
- 
-         sendStatus(ws, {
-             deploymentId,
-             status: 'in_progress',
-             message: 'Starting deployment...'
-         });
- 
-         // Determine active container
-         const blueContainer = `${appName}-blue`;
-         const greenContainer = `${appName}-green`;
-         activeContainer = await determineActiveContainer(blueContainer, greenContainer);
-         newContainer = activeContainer === blueContainer ? greenContainer : blueContainer;
-         const newPort = parseInt(port) + (activeContainer === blueContainer ? 1 : 0);
-         
-         sendLogs(ws, deploymentId, `Current active container: ${activeContainer || 'none'}`);
-         sendLogs(ws, deploymentId, `Preparing new container: ${newContainer} on port ${newPort}`);
- 
-         // Retrieve and set up environment variables
-         sendLogs(ws, deploymentId, 'Retrieving environment variables...');
-         let envVars = {};
-         try {
-             logger.info(`Fetching env vars for deployment ${deploymentId}`);
-             const { data } = await apiClient.post(`/api/deploy/env-vars/${deploymentId}`, {
-                 token: envVarsToken
-             });
-             
-             if (!data || !data.variables) {
-                 throw new Error('Invalid response format for environment variables');
-             }
-             
-             envVars = data.variables;
-             logger.info('Successfully retrieved environment variables');
-             
-             // Initialize environment manager and write env file
-             const envManager = new EnvironmentManager(deployDir);
-             const envFilePath = await envManager.writeEnvFile(envVars, environment);
-             
-             sendLogs(ws, deploymentId, 'Environment variables configured successfully');
-         } catch (error) {
-             logger.error('Environment variables setup failed:', error);
-             throw new Error(`Environment variables setup failed: ${error.message}`);
-         }
 
-        // Clone repository
+    let activeContainer, newContainer, deployDir;
+
+    try {
+        // Check permissions and tools
+        const permissionsOk = await ensureDeploymentPermissions();
+        if (!permissionsOk) {
+            throw new Error('Deployment failed: Permission check failed');
+        }
+
+        await executeCommand('which', ['docker']);
+        await executeCommand('which', ['docker-compose']);
+
+        // Determine active container
+        activeContainer = await determineActiveContainer(blueContainer, greenContainer);
+        newContainer = activeContainer === blueContainer ? greenContainer : blueContainer;
+        const newPort = parseInt(port) + (activeContainer === blueContainer ? 1 : 0);
+
+        sendLogs(ws, deploymentId, `Current active container: ${activeContainer || 'none'}`);
+        sendLogs(ws, deploymentId, `Preparing new container: ${newContainer} on port ${newPort}`);
+
+        // Set up deployment directory for the new container
+        deployDir = path.join(baseDeployDir, newContainer);
+        await fs.rm(deployDir, { recursive: true, force: true });
+        await fs.mkdir(deployDir, { recursive: true });
+        process.chdir(deployDir);
+
+        sendStatus(ws, {
+            deploymentId,
+            status: 'in_progress',
+            message: 'Starting deployment...'
+        });
+
+        // Retrieve and set up environment variables
+        sendLogs(ws, deploymentId, 'Retrieving environment variables...');
+        let envVars = {};
+        try {
+            logger.info(`Fetching env vars for deployment ${deploymentId}`);
+            const { data } = await apiClient.post(`/api/deploy/env-vars/${deploymentId}`, {
+                token: envVarsToken
+            });
+            
+            if (!data || !data.variables) {
+                throw new Error('Invalid response format for environment variables');
+            }
+            
+            envVars = data.variables;
+            logger.info('Successfully retrieved environment variables');
+            
+            // Initialize environment manager and write env file
+            const envManager = new EnvironmentManager(deployDir);
+            const envFilePath = await envManager.writeEnvFile(envVars, environment);
+            
+            sendLogs(ws, deploymentId, 'Environment variables configured successfully');
+        } catch (error) {
+            logger.error('Environment variables setup failed:', error);
+            throw new Error(`Environment variables setup failed: ${error.message}`);
+        }
+
+        // Clone repository into deployDir
         sendLogs(ws, deploymentId, 'Cloning repository...');
         const repoUrl = `https://x-access-token:${githubToken}@github.com/${repositoryOwner}/${repositoryName}.git`;
         await executeCommand('git', ['clone', '-b', branch, repoUrl, '.']);
@@ -165,6 +167,10 @@ async function deployApp(payload, ws) {
             sendLogs(ws, deploymentId, `Removing old container: ${activeContainer}`);
             await executeCommand('docker', ['stop', activeContainer]).catch(() => {});
             await executeCommand('docker', ['rm', activeContainer]).catch(() => {});
+
+            // Optionally, remove the old deployment directory
+            const oldDeployDir = path.join(baseDeployDir, activeContainer);
+            await fs.rm(oldDeployDir, { recursive: true, force: true }).catch(() => {});
         }
 
         sendStatus(ws, {
@@ -190,7 +196,7 @@ async function deployApp(payload, ws) {
             }
             
             if (deployDir) {
-                await fs.rm(deployDir, { recursive: true, force: true });
+                await fs.rm(deployDir, { recursive: true, force: true }).catch(() => {});
             }
         } catch (cleanupError) {
             logger.error('Cleanup failed:', cleanupError);
@@ -230,27 +236,27 @@ async function isContainerRunning(containerName) {
 
 async function updateReverseProxy(appName, environment, port) {
     const nginxConfig = `
-    upstream ${appName}_${environment} {
-        server localhost:${port};
-    }
+upstream ${appName}_${environment} {
+    server localhost:${port};
+}
+
+server {
+    listen 80;
+    server_name ${appName}-${environment}.yourdomain.com;
     
-    server {
-        listen 80;
-        server_name ${appName}-${environment}.yourdomain.com;
+    location / {
+        proxy_pass http://${appName}_${environment};
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
         
-        location / {
-            proxy_pass http://${appName}_${environment};
-            proxy_set_header Host $host;
-            proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-            proxy_set_header X-Forwarded-Proto $scheme;
-            
-            # WebSocket support
-            proxy_http_version 1.1;
-            proxy_set_header Upgrade $http_upgrade;
-            proxy_set_header Connection "upgrade";
-        }
-    }`;
+        # WebSocket support
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+}`;
 
     const configPath = `/etc/nginx/conf.d/${appName}-${environment}.conf`;
     
