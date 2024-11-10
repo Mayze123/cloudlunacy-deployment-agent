@@ -506,7 +506,7 @@ main() {
     BACKEND_BASE_URL="${3:-https://your-default-backend-url}"
     GITHUB_SSH_KEY="${4:-}"
 
-    BACKEND_URL="${BACKEND_BASE_URL%/}/api/agent"
+    BACKEND_URL="${BACKEND_BASE_URL}"
 
     detect_os
     log "Detected OS: $OS_TYPE $OS_VERSION"

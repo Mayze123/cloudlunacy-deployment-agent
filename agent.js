@@ -50,7 +50,7 @@ async function authenticateAndConnect() {
     try {
         logger.info('Authenticating with backend...');
         // Authenticate with the backend to receive WebSocket URL
-        const response = await axios.post(`${BACKEND_URL}/authenticate`, {
+        const response = await axios.post(`${BACKEND_URL}/api/agent/authenticate`, {
             agentToken: AGENT_API_TOKEN,
             serverId: SERVER_ID
         }, {
