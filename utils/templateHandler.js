@@ -104,26 +104,36 @@ class TemplateHandler {
       
       // Write files with explicit encoding
       const composePath = path.join(tempDir, 'docker-compose.yml');
-      await fs.writeFile(composePath, files.dockerCompose, 'utf8');
+      const dockerfilePath = path.join(tempDir, 'Dockerfile');
+      
+      // Create a dummy .env file for validation
+      const envPath = path.join(tempDir, '.env.production');
+      
+      await Promise.all([
+        fs.writeFile(composePath, files.dockerCompose, 'utf8'),
+        fs.writeFile(dockerfilePath, files.dockerfile, 'utf8'),
+        fs.writeFile(envPath, 'DUMMY_ENV=true\n', 'utf8')
+      ]);
       
       // Log the actual file content after writing
       const writtenContent = await fs.readFile(composePath, 'utf8');
       logger.info('Written docker-compose.yml content:', writtenContent);
       
-      // Validate using docker-compose config
-      const { stdout, stderr } = await execAsync(`cd ${tempDir} && cat docker-compose.yml && docker-compose config`, {
-        encoding: 'utf8'
+      // Modified docker-compose command to use --env-file
+      const { stdout, stderr } = await execAsync(`cd ${tempDir} && docker-compose config`, {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          COMPOSE_PROJECT_NAME: 'validation'
+        }
       });
       
       if (stdout) logger.info('Docker compose validation stdout:', stdout);
       if (stderr) logger.warn('Docker compose validation stderr:', stderr);
 
+      return true;
     } catch (error) {
-      logger.error('Validation error details:', {
-        message: error.message,
-        stdout: error.stdout,
-        stderr: error.stderr
-      });
+      logger.error('Validation error details:', error);
       throw error;
     } finally {
       // Cleanup
@@ -154,7 +164,7 @@ class TemplateHandler {
     // Normalize service name to be consistent across all uses
     const serviceName = `${appName}-${environment}`.toLowerCase().replace(/[^a-z0-9-]/g, '-');
 
-    // Generate docker-compose.yml with consistent service naming
+    // Generate docker-compose.yml with consistent service naming and without env_file
     const dockerComposeContent = `version: "3.8"
 services:
   ${serviceName}:
@@ -166,8 +176,6 @@ services:
       - "${port}:${port}"
     environment:
       - NODE_ENV=${environment}
-    env_file:
-      - ${envFile || `.env.${environment}`}
     restart: unless-stopped
     networks:
       - app-network

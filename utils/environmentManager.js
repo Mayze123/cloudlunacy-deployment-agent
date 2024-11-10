@@ -1,7 +1,6 @@
-
-// src/utils/environmentManager.js
 const fs = require('fs').promises;
 const path = require('path');
+const yaml = require('js-yaml');
 const { executeCommand } = require('./executor');
 const logger = require('./logger');
 
@@ -13,7 +12,13 @@ class EnvironmentManager {
   async writeEnvFile(variables, environment) {
     try {
       const envContent = Object.entries(variables)
-        .map(([key, value]) => `${key}=${value}`)
+        .map(([key, value]) => {
+          // Handle different types of values
+          if (typeof value === 'object') {
+            value = JSON.stringify(value);
+          }
+          return `${key}=${value}`;
+        })
         .join('\n');
 
       const envFilePath = path.join(this.deployDir, `.env.${environment}`);
@@ -30,40 +35,20 @@ class EnvironmentManager {
     }
   }
 
-  async loadEnvFile(environment) {
-    try {
-      const envFilePath = path.join(this.deployDir, `.env.${environment}`);
-      const content = await fs.readFile(envFilePath, 'utf-8');
-      
-      const variables = {};
-      content.split('\n').forEach(line => {
-        if (line && !line.startsWith('#')) {
-          const [key, ...valueParts] = line.split('=');
-          if (key) {
-            variables[key.trim()] = valueParts.join('=').trim();
-          }
-        }
-      });
-      
-      return variables;
-    } catch (error) {
-      logger.error('Error loading environment file:', error);
-      throw new Error(`Failed to load environment file: ${error.message}`);
-    }
-  }
-
   async updateDockerCompose(envFilePath, containerName) {
     try {
       const composeFilePath = path.join(this.deployDir, 'docker-compose.yml');
       const composeContent = await fs.readFile(composeFilePath, 'utf-8');
       
       // Parse YAML
-      const yaml = require('js-yaml');
       const compose = yaml.load(composeContent);
 
+      // Find the service
+      const serviceName = Object.keys(compose.services)[0];
+      
       // Update environment configuration
-      compose.services[containerName] = {
-        ...compose.services[containerName],
+      compose.services[serviceName] = {
+        ...compose.services[serviceName],
         env_file: [path.basename(envFilePath)]
       };
 
