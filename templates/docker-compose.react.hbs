@@ -1,0 +1,39 @@
+// templates/docker-compose.react.hbs
+version: '3.8'
+
+services:
+  {{appName}}:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        NODE_ENV: {{environment}}
+    container_name: {{appName}}-{{environment}}
+    restart: always
+    ports:
+      - "{{port}}:80"
+    environment:
+      {{#each envVars}}
+      - {{@key}}={{{this}}}
+      {{/each}}
+    {{#if volumes}}
+    volumes:
+      {{#each volumes}}
+      - {{this}}
+      {{/each}}
+    {{/if}}
+    networks:
+      - {{appName}}_network
+    labels:
+      - "app.name={{appName}}"
+      - "app.environment={{environment}}"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  {{appName}}_network:
+    name: {{appName}}_{{environment}}_network
+    driver: bridge

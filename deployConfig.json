@@ -1,23 +1,22 @@
 {
-    "react": {
-      "dockerfileTemplate": "templates/dockerfiles/react.Dockerfile.hbs",
-      "dockerComposeTemplate": "templates/docker-compose/react.yml.hbs",
-      "defaultPort": 80
-    },
-    "vue": {
-      "dockerfileTemplate": "templates/dockerfiles/vue.Dockerfile.hbs",
-      "dockerComposeTemplate": "templates/docker-compose/vue.yml.hbs",
-      "defaultPort": 8080
-    },
-    "next": {
-      "dockerfileTemplate": "templates/dockerfiles/next.Dockerfile.hbs",
-      "dockerComposeTemplate": "templates/docker-compose/next.yml.hbs",
-      "defaultPort": 3000
-    },
-    "node": {
-      "dockerfileTemplate": "templates/dockerfiles/node.Dockerfile.hbs",
-      "dockerComposeTemplate": "templates/docker-compose/node.yml.hbs",
-      "defaultPort": 3000
+  "react": {
+    "dockerfileTemplate": "Dockerfile.react.hbs",
+    "dockerComposeTemplate": "docker-compose.react.hbs",
+    "nginxTemplate": "nginx.conf.hbs",
+    "defaultPort": 3000,
+    "defaults": {
+      "nodeVersion": "18",
+      "buildOutputDir": "build",
+      "cacheControl": "public, max-age=31536000"
+    }
+  },
+  "node": {
+    "dockerfileTemplate": "Dockerfile.node.hbs",
+    "dockerComposeTemplate": "docker-compose.node.hbs",
+    "defaultPort": 3000,
+    "defaults": {
+      "nodeVersion": "18",
+      "healthCheckEndpoint": "/health"
     }
   }
-  
+}

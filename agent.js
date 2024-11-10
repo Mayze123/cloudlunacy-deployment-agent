@@ -136,8 +136,27 @@ async function authenticateAndConnect() {
 function handleMessage(message) {
     switch (message.type) {
         case 'deploy_app':
-            deployApp(message.payload, ws);
+            // Validate GitHub-specific fields if present
+            if (message.payload.githubToken) {
+                logger.info('Deploying with GitHub App authentication');
+                // Store token temporarily for this deployment
+                process.env.GITHUB_TOKEN = message.payload.githubToken;
+            }
+            
+            deployApp(message.payload, ws)
+                .finally(() => {
+                    // Clean up sensitive data
+                    if (process.env.GITHUB_TOKEN) {
+                        delete process.env.GITHUB_TOKEN;
+                    }
+                });
             break;
+            
+        case 'check_repository':
+            // New handler for repository checks
+            checkRepositoryAccess(message.payload, ws);
+            break;
+            
         default:
             logger.warn('Unknown message type:', message.type);
     }

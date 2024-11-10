@@ -1,0 +1,78 @@
+// templates/Dockerfile.react.hbs
+FROM node:{{nodeVersion}}-alpine as builder
+
+# Set working directory
+WORKDIR /app
+
+# Add dependencies
+COPY package*.json ./
+
+# Install dependencies
+{{#if usePnpm}}
+RUN npm install -g pnpm && pnpm install --frozen-lockfile
+{{else if useYarn}}
+RUN npm install -g yarn && yarn install --frozen-lockfile
+{{else}}
+RUN npm ci
+{{/if}}
+
+# Copy source
+COPY . .
+
+# Build application
+{{#if customBuildCommand}}
+RUN {{customBuildCommand}}
+{{else}}
+RUN npm run build
+{{/if}}
+
+# Production image
+FROM nginx:alpine
+
+# Copy built assets
+COPY --from=builder /app/{{buildOutputDir}} /usr/share/nginx/html
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+
+# Add health check
+HEALTHCHECK --interval=30s --timeout=3s \
+  CMD wget -q --spider http://localhost:80/ || exit 1
+
+EXPOSE 80
+CMD ["nginx", "-g", "daemon off;"]
+
+// templates/Dockerfile.node.hbs
+FROM node:{{nodeVersion}}-alpine
+
+# Add dependencies for common native modules
+RUN apk add --no-cache python3 make g++
+
+# Set working directory
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+
+# Install dependencies
+{{#if usePnpm}}
+RUN npm install -g pnpm && pnpm install --frozen-lockfile
+{{else if useYarn}}
+RUN npm install -g yarn && yarn install --frozen-lockfile
+{{else}}
+RUN npm ci
+{{/if}}
+
+# Copy source
+COPY . .
+
+{{#if buildCommand}}
+# Build application if needed
+RUN {{buildCommand}}
+{{/if}}
+
+# Add health check
+HEALTHCHECK --interval=30s --timeout=3s \
+  CMD wget -q --spider http://localhost:{{port}}/health || exit 1
+
+EXPOSE {{port}}
+CMD ["npm", "start"]
+

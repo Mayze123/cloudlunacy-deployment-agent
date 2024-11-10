@@ -1,130 +1,171 @@
-// modules/deployApp.js
+// src/modules/deployApp.js
 
 const { executeCommand } = require('../utils/executor');
 const logger = require('../utils/logger');
 const fs = require('fs').promises;
 const path = require('path');
-const Handlebars = require('handlebars');
-const WebSocket = require('ws');
-
+const TemplateHandler = require('../utils/templateHandler');
 const deployConfig = require('../deployConfig.json');
 
-/**
- * Deploys an application based on the provided payload using configuration.
- * @param {Object} payload - Deployment details
- * @param {WebSocket} ws - WebSocket connection to send status updates
- */
 async function deployApp(payload, ws) {
-    const { appType, appName, repoUrl, branch, envVars, dockerPort } = payload;
+    const {
+        deploymentId,
+        appType,
+        appName,
+        repositoryOwner,
+        repositoryName,
+        branch,
+        githubToken,
+        environment,
+        port,
+        envVars = {}
+    } = payload;
 
-    logger.info(`Starting deployment for ${appType} app: ${appName}`);
-
-    // Validate payload
-    const requiredFields = ['appType', 'appName', 'repoUrl', 'branch'];
-    for (const field of requiredFields) {
-        if (!payload[field]) {
-            logger.error(`Missing required field: ${field}`);
-            sendStatus(ws, 'deploy_app', 'failure', `Missing required field: ${field}`);
-            return;
-        }
-    }
-
+    logger.info(`Starting deployment ${deploymentId} for ${appType} app: ${appName}`);
+    
     try {
-        const config = deployConfig[appType.toLowerCase()];
-        if (!config) {
-            throw new Error(`Unsupported application type: ${appType}`);
-        }
+        // Set up deployment directory
+        const deployDir = path.join('/opt/cloudlunacy/deployments', deploymentId);
+        await fs.mkdir(deployDir, { recursive: true });
+        process.chdir(deployDir);
 
-        const BASE_DIR = process.env.BASE_DIR || '/opt/cloudlunacy';
-        const appDir = path.join(BASE_DIR, appName);
-        const dockerfileTemplatePath = path.join(__dirname, '..', config.dockerfileTemplate);
-        const dockerComposeTemplatePath = path.join(__dirname, '..', config.dockerComposeTemplate);
-        const dockerfilePath = path.join(appDir, 'Dockerfile');
-        const dockerComposePath = path.join(appDir, 'docker-compose.yml');
-
-        // Clone the repository with retry logic
-        await cloneRepositoryWithRetry(repoUrl, appDir, 3, 2000);
-
-        // Checkout the specified branch
-        await executeCommand('git', ['checkout', branch], appDir);
-
-        // Read and compile Dockerfile template
-        const dockerfileTemplate = await fs.readFile(dockerfileTemplatePath, 'utf-8');
-        const dockerfileContent = Handlebars.compile(dockerfileTemplate)({ appName, envVars });
-        await fs.writeFile(dockerfilePath, dockerfileContent);
-        logger.info(`Dockerfile created at ${dockerfilePath}`);
-
-        // Read and compile Docker Compose template
-        const dockerComposeTemplate = await fs.readFile(dockerComposeTemplatePath, 'utf-8');
-        const dockerComposeContent = Handlebars.compile(dockerComposeTemplate)({
-            appName,
-            dockerPort: dockerPort || config.defaultPort,
-            envVars
+        // Send initial status
+        sendStatus(ws, {
+            deploymentId,
+            status: 'in_progress',
+            message: 'Starting deployment...'
         });
-        await fs.writeFile(dockerComposePath, dockerComposeContent);
-        logger.info(`Docker Compose file created at ${dockerComposePath}`);
 
-        // Deploy the container using Docker Compose
-        await executeCommand('docker-compose', ['up', '-d'], appDir);
-        logger.info(`${appType} app ${appName} deployed successfully using Docker Compose.`);
+        // Clone repository
+        const repoUrl = `https://x-access-token:${githubToken}@github.com/${repositoryOwner}/${repositoryName}.git`;
+        await executeCommand('git', ['clone', '-b', branch, repoUrl, '.']);
+        sendLogs(ws, deploymentId, 'Repository cloned successfully');
 
-        // Send success status to backend
-        sendStatus(ws, 'deploy_app', 'success', `${appType} app ${appName} deployed successfully.`);
-    } catch (error) {
-        logger.error(`Error deploying ${appType} app ${appName}: ${error.message}`);
+        // Initialize template handler
+        const templateHandler = new TemplateHandler(
+            path.join('/opt/cloudlunacy/templates'),
+            deployConfig
+        );
 
-        // Send failure status to backend
-        sendStatus(ws, 'deploy_app', 'failure', `Error deploying ${appType} app ${appName}: ${error.message}`);
+        // Generate deployment files
+        const files = await templateHandler.generateDeploymentFiles({
+            appType,
+            appName,
+            environment,
+            port,
+            envVars,
+            buildConfig: {
+                nodeVersion: '18',
+                buildOutputDir: 'build',
+                cacheControl: 'public, max-age=31536000'
+            },
+            domain: `${appName}-${environment}.yourdomain.com`,
+            api: environment === 'production'
+                ? { url: 'https://api.yourdomain.com' }
+                : { url: 'https://staging-api.yourdomain.com' }
+        });
 
-        // Optional: Cleanup resources
-        // await executeCommand('rm', ['-rf', appDir], '/opt/cloudlunacy');
-    }
-}
+        // Write deployment files
+        await fs.writeFile('Dockerfile', files.dockerfile);
+        await fs.writeFile('docker-compose.yml', files.dockerCompose);
+        if (files.nginxConf) {
+            await fs.writeFile('nginx.conf', files.nginxConf);
+        }
+        sendLogs(ws, deploymentId, 'Deployment files generated');
 
-/**
- * Clones a Git repository with retry logic.
- * @param {String} repoUrl - Repository URL
- * @param {String} appDir - Directory to clone into
- * @param {Number} retries - Number of retry attempts
- * @param {Number} delay - Delay between retries in milliseconds
- */
-async function cloneRepositoryWithRetry(repoUrl, appDir, retries, delay) {
-    for (let attempt = 1; attempt <= retries; attempt++) {
+        // Stop existing containers if any
         try {
-            await executeCommand('git', ['clone', repoUrl, appDir], '/opt/cloudlunacy');
-            logger.info(`Repository cloned to ${appDir}`);
-            return;
+            await executeCommand('docker-compose', ['down', '--remove-orphans']);
+            sendLogs(ws, deploymentId, 'Cleaned up existing containers');
         } catch (error) {
-            if (attempt === retries) {
-                throw new Error(`Failed to clone repository after ${retries} attempts.`);
-            }
-            logger.warn(`Clone attempt ${attempt} failed. Retrying in ${delay}ms...`);
-            await new Promise(res => setTimeout(res, delay));
+            logger.warn('No existing containers to clean up');
+        }
+
+        // Build and start containers
+        sendLogs(ws, deploymentId, 'Building application...');
+        await executeCommand('docker-compose', ['build', '--no-cache']);
+        sendLogs(ws, deploymentId, 'Application built successfully');
+
+        sendLogs(ws, deploymentId, 'Starting application...');
+        await executeCommand('docker-compose', ['up', '-d']);
+        sendLogs(ws, deploymentId, 'Application started successfully');
+
+        // Verify deployment
+        sendLogs(ws, deploymentId, 'Verifying deployment...');
+        await new Promise(resolve => setTimeout(resolve, 5000)); // Wait for container to start
+        const health = await checkDeploymentHealth(port);
+        
+        if (!health.healthy) {
+            throw new Error(`Deployment health check failed: ${health.message}`);
+        }
+
+        // Send success status
+        sendStatus(ws, {
+            deploymentId,
+            status: 'success',
+            message: 'Deployment completed successfully'
+        });
+
+        logger.info(`Deployment ${deploymentId} completed successfully`);
+
+    } catch (error) {
+        logger.error(`Deployment ${deploymentId} failed:`, error);
+        
+        // Send failure status
+        sendStatus(ws, {
+            deploymentId,
+            status: 'failed',
+            message: error.message
+        });
+
+        // Cleanup on failure
+        try {
+            await executeCommand('docker-compose', ['down', '--remove-orphans']);
+            await fs.rmdir(deployDir, { recursive: true });
+        } catch (cleanupError) {
+            logger.error('Cleanup failed:', cleanupError);
         }
     }
 }
 
-/**
- * Sends status updates back to the backend via WebSocket.
- * @param {WebSocket} ws - WebSocket connection
- * @param {String} commandType - Type of command executed
- * @param {String} status - 'success' or 'failure'
- * @param {String} message - Detailed message
- */
-function sendStatus(ws, commandType, status, message) {
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-        logger.warn('WebSocket is not open. Cannot send status.');
-        return;
+function sendStatus(ws, data) {
+    if (ws.readyState === ws.OPEN) {
+        ws.send(JSON.stringify({
+            type: 'status',
+            payload: data
+        }));
     }
+}
 
-    ws.send(JSON.stringify({
-        type: 'status',
-        payload: {
-            commandType,
-            status,
-            message
-        }
-    }));
+function sendLogs(ws, deploymentId, log) {
+    if (ws.readyState === ws.OPEN) {
+        ws.send(JSON.stringify({
+            type: 'logs',
+            payload: {
+                deploymentId,
+                log,
+                timestamp: new Date().toISOString()
+            }
+        }));
+    }
+}
+
+async function checkDeploymentHealth(port) {
+    try {
+        const { execSync } = require('child_process');
+        // Wait for the port to be available
+        await new Promise(resolve => setTimeout(resolve, 5000));
+        
+        // Check if port is listening
+        execSync(`nc -z localhost ${port}`);
+        
+        return { healthy: true };
+    } catch (error) {
+        return { 
+            healthy: false, 
+            message: `Service not responding on port ${port}`
+        };
+    }
 }
 
 module.exports = deployApp;
