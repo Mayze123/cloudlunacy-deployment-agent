@@ -53,8 +53,7 @@ async function deployApp(payload, ws) {
         // Set up deployment directory for the new container
         deployDir = path.join(baseDeployDir, newContainer);
         await fs.rm(deployDir, { recursive: true, force: true });
-        await fs.mkdir(deployDir, { recursive: true });
-        process.chdir(deployDir);
+        // Do not create deployDir here; git will create it during cloning
 
         sendStatus(ws, {
             deploymentId,
@@ -65,6 +64,7 @@ async function deployApp(payload, ws) {
         // Retrieve and set up environment variables
         sendLogs(ws, deploymentId, 'Retrieving environment variables...');
         let envVars = {};
+        let envFilePath;
         try {
             logger.info(`Fetching env vars for deployment ${deploymentId}`);
             const { data } = await apiClient.post(`/api/deploy/env-vars/${deploymentId}`, {
@@ -78,11 +78,7 @@ async function deployApp(payload, ws) {
             envVars = data.variables;
             logger.info('Successfully retrieved environment variables');
             
-            // Initialize environment manager and write env file
-            const envManager = new EnvironmentManager(deployDir);
-            const envFilePath = await envManager.writeEnvFile(envVars, environment);
-            
-            sendLogs(ws, deploymentId, 'Environment variables configured successfully');
+            // Environment file will be written after cloning
         } catch (error) {
             logger.error('Environment variables setup failed:', error);
             throw new Error(`Environment variables setup failed: ${error.message}`);
@@ -91,7 +87,15 @@ async function deployApp(payload, ws) {
         // Clone repository into deployDir
         sendLogs(ws, deploymentId, 'Cloning repository...');
         const repoUrl = `https://x-access-token:${githubToken}@github.com/${repositoryOwner}/${repositoryName}.git`;
-        await executeCommand('git', ['clone', '-b', branch, repoUrl, '.']);
+        await executeCommand('git', ['clone', '-b', branch, repoUrl, deployDir]);
+
+        // Now change into deployDir
+        process.chdir(deployDir);
+
+        // Initialize environment manager and write env file inside deployDir
+        const envManager = new EnvironmentManager(deployDir);
+        envFilePath = await envManager.writeEnvFile(envVars, environment);
+        sendLogs(ws, deploymentId, 'Environment variables configured successfully');
 
         // Initialize template handler
         const templateHandler = new TemplateHandler(
@@ -107,7 +111,7 @@ async function deployApp(payload, ws) {
             environment,
             port: newPort,
             containerName: newContainer,
-            envFile: `.env.${environment}`, // Reference the env file
+            envFile: path.basename(envFilePath), // Use the actual env file name
             buildConfig: {
                 nodeVersion: '18',
                 buildOutputDir: 'build',
@@ -124,8 +128,7 @@ async function deployApp(payload, ws) {
         ]);
 
         // Update docker-compose with env file reference
-        const envManager = new EnvironmentManager(deployDir);
-        await envManager.updateDockerCompose(`.env.${environment}`, newContainer);
+        await envManager.updateDockerCompose(path.basename(envFilePath), newContainer);
 
         // Validate configuration
         try {
@@ -205,6 +208,7 @@ async function deployApp(payload, ws) {
         process.chdir(currentDir);
     }
 }
+
 
 async function determineActiveContainer(blueContainer, greenContainer) {
     try {
