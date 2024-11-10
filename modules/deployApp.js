@@ -17,54 +17,67 @@ async function deployApp(payload, ws) {
         repositoryOwner,
         repositoryName,
         branch,
-        githubToken, 
+        githubToken,
         environment,
         port,
-        envVarsToken 
+        envVarsToken
     } = payload;
 
-    logger.info(`Starting blue-green deployment ${deploymentId} for ${appName}`);
-
-    const baseDeployDir = path.join('/opt/cloudlunacy/deployments', appName);
+    logger.info(`Starting deployment ${deploymentId} for ${appType} app: ${appName}`);
+    
+    const deployDir = path.join('/opt/cloudlunacy/deployments', deploymentId);
     const currentDir = process.cwd();
-    const blueContainer = `${appName}-blue`;
-    const greenContainer = `${appName}-green`;
-
-    let activeContainer, newContainer, deployDir;
-
+    const containerName = `${appName}-${environment}`;
+    
     try {
-        // Check permissions and tools
+        // Check permissions before deployment
         const permissionsOk = await ensureDeploymentPermissions();
         if (!permissionsOk) {
             throw new Error('Deployment failed: Permission check failed');
         }
 
+        // Check for required tools
         await executeCommand('which', ['docker']);
         await executeCommand('which', ['docker-compose']);
+        
+        // Set up deployment directory
+        await fs.mkdir(deployDir, { recursive: true });
+        process.chdir(deployDir);
 
-        // Determine active container
-        activeContainer = await determineActiveContainer(blueContainer, greenContainer);
-        newContainer = activeContainer === blueContainer ? greenContainer : blueContainer;
-        const newPort = parseInt(port) + (activeContainer === blueContainer ? 1 : 0);
-
-        sendLogs(ws, deploymentId, `Current active container: ${activeContainer || 'none'}`);
-        sendLogs(ws, deploymentId, `Preparing new container: ${newContainer} on port ${newPort}`);
-
-        // Set up deployment directory for the new container
-        deployDir = path.join(baseDeployDir, newContainer);
-        await fs.rm(deployDir, { recursive: true, force: true });
-        // Do not create deployDir here; git will create it during cloning
-
+        // Send initial status and logs
         sendStatus(ws, {
             deploymentId,
             status: 'in_progress',
             message: 'Starting deployment...'
         });
 
+        // Cleanup existing containers and networks
+        try {
+            sendLogs(ws, deploymentId, `Cleaning up existing container: ${containerName}`);
+            await executeCommand('docker', ['stop', containerName]).catch(() => {});
+            await executeCommand('docker', ['rm', containerName]).catch(() => {});
+            
+            // Remove existing networks
+            const networkName = `${deploymentId}_default`;
+            await executeCommand('docker', ['network', 'rm', networkName]).catch(() => {});
+            
+            sendLogs(ws, deploymentId, 'Previous deployment cleaned up');
+        } catch (error) {
+            logger.warn('Cleanup warning:', error);
+        }
+
+        // Clone repository
+        sendLogs(ws, deploymentId, 'Cloning repository...');
+        const repoUrl = `https://x-access-token:${githubToken}@github.com/${repositoryOwner}/${repositoryName}.git`;
+        await executeCommand('git', ['clone', '-b', branch, repoUrl, '.']);
+        sendLogs(ws, deploymentId, 'Repository cloned successfully');
+
         // Retrieve and set up environment variables
         sendLogs(ws, deploymentId, 'Retrieving environment variables...');
         let envVars = {};
         let envFilePath;
+        // Initialize environment manager and write env file inside deployDir
+        const envManager = new EnvironmentManager(deployDir);
         try {
             logger.info(`Fetching env vars for deployment ${deploymentId}`);
             const { data } = await apiClient.post(`/api/deploy/env-vars/${deploymentId}`, {
@@ -78,24 +91,13 @@ async function deployApp(payload, ws) {
             envVars = data.variables;
             logger.info('Successfully retrieved environment variables');
             
-            // Environment file will be written after cloning
+
+            envFilePath = await envManager.writeEnvFile(envVars, environment);
+            sendLogs(ws, deploymentId, 'Environment variables configured successfully');
         } catch (error) {
             logger.error('Environment variables setup failed:', error);
             throw new Error(`Environment variables setup failed: ${error.message}`);
         }
-
-        // Clone repository into deployDir
-        sendLogs(ws, deploymentId, 'Cloning repository...');
-        const repoUrl = `https://x-access-token:${githubToken}@github.com/${repositoryOwner}/${repositoryName}.git`;
-        await executeCommand('git', ['clone', '-b', branch, repoUrl, deployDir]);
-
-        // Now change into deployDir
-        process.chdir(deployDir);
-
-        // Initialize environment manager and write env file inside deployDir
-        const envManager = new EnvironmentManager(deployDir);
-        envFilePath = await envManager.writeEnvFile(envVars, environment);
-        sendLogs(ws, deploymentId, 'Environment variables configured successfully');
 
         // Initialize template handler
         const templateHandler = new TemplateHandler(
@@ -109,8 +111,7 @@ async function deployApp(payload, ws) {
             appType,
             appName,
             environment,
-            port: newPort,
-            containerName: newContainer,
+            port,
             envFile: path.basename(envFilePath), // Use the actual env file name
             buildConfig: {
                 nodeVersion: '18',
@@ -120,7 +121,7 @@ async function deployApp(payload, ws) {
             domain: `${appName}-${environment}.yourdomain.com`
         });
 
-        // Write deployment files
+        // Write and validate files
         await Promise.all([
             fs.writeFile('Dockerfile', files.dockerfile),
             fs.writeFile('docker-compose.yml', files.dockerCompose),
@@ -128,9 +129,9 @@ async function deployApp(payload, ws) {
         ]);
 
         // Update docker-compose with env file reference
-        await envManager.updateDockerCompose(path.basename(envFilePath), newContainer);
+        await envManager.updateDockerCompose(path.basename(envFilePath), containerName);
 
-        // Validate configuration
+        // Validate docker-compose file
         try {
             await executeCommand('docker-compose', ['config']);
             sendLogs(ws, deploymentId, 'Deployment configuration validated');
@@ -138,44 +139,24 @@ async function deployApp(payload, ws) {
             throw new Error(`Invalid docker-compose configuration: ${error.message}`);
         }
 
-        // Build and start new container
+        // Build and start containers
         sendLogs(ws, deploymentId, 'Building application...');
         await executeCommand('docker-compose', ['build', '--no-cache']);
-        await executeCommand('docker-compose', ['up', '-d', '--force-recreate']);
-        sendLogs(ws, deploymentId, 'Application built and started');
+        sendLogs(ws, deploymentId, 'Application built successfully');
 
-        // Verify deployment health
-        sendLogs(ws, deploymentId, 'Verifying deployment health...');
-        const health = await checkDeploymentHealth(newPort, newContainer);
+        sendLogs(ws, deploymentId, 'Starting application...');
+        await executeCommand('docker-compose', ['up', '-d', '--force-recreate']);
+        sendLogs(ws, deploymentId, 'Application started successfully');
+
+        // Verify deployment
+        sendLogs(ws, deploymentId, 'Verifying deployment...');
+        const health = await checkDeploymentHealth(port, containerName);
         
         if (!health.healthy) {
             throw new Error(`Deployment health check failed: ${health.message}`);
         }
 
-        // Update proxy configuration
-        sendLogs(ws, deploymentId, 'Updating reverse proxy configuration...');
-        await updateReverseProxy(appName, environment, newPort);
-
-        // Wait for proxy configuration
-        await new Promise(resolve => setTimeout(resolve, 5000));
-
-        // Check proxy health
-        const proxyHealth = await checkProxyHealth(appName, environment);
-        if (!proxyHealth.healthy) {
-            throw new Error('Failed to verify application access through proxy');
-        }
-
-        // Remove old container if successful
-        if (activeContainer) {
-            sendLogs(ws, deploymentId, `Removing old container: ${activeContainer}`);
-            await executeCommand('docker', ['stop', activeContainer]).catch(() => {});
-            await executeCommand('docker', ['rm', activeContainer]).catch(() => {});
-
-            // Optionally, remove the old deployment directory
-            const oldDeployDir = path.join(baseDeployDir, activeContainer);
-            await fs.rm(oldDeployDir, { recursive: true, force: true }).catch(() => {});
-        }
-
+        // Send success status
         sendStatus(ws, {
             deploymentId,
             status: 'success',
@@ -185,6 +166,7 @@ async function deployApp(payload, ws) {
     } catch (error) {
         logger.error(`Deployment ${deploymentId} failed:`, error);
         
+        // Send detailed error message
         sendStatus(ws, {
             deploymentId,
             status: 'failed',
@@ -193,18 +175,21 @@ async function deployApp(payload, ws) {
 
         // Cleanup on failure
         try {
-            if (newContainer) {
-                await executeCommand('docker', ['stop', newContainer]).catch(() => {});
-                await executeCommand('docker', ['rm', newContainer]).catch(() => {});
-            }
+            // Stop and remove containers
+            await executeCommand('docker', ['stop', containerName]).catch(() => {});
+            await executeCommand('docker', ['rm', containerName]).catch(() => {});
             
-            if (deployDir) {
-                await fs.rm(deployDir, { recursive: true, force: true }).catch(() => {});
-            }
+            // Remove network
+            const networkName = `${deploymentId}_default`;
+            await executeCommand('docker', ['network', 'rm', networkName]).catch(() => {});
+            
+            // Remove deployment directory
+            await fs.rm(deployDir, { recursive: true, force: true });
         } catch (cleanupError) {
             logger.error('Cleanup failed:', cleanupError);
         }
     } finally {
+        // Always return to original directory
         process.chdir(currentDir);
     }
 }
