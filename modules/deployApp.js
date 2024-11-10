@@ -1,11 +1,10 @@
 // src/modules/deployApp.js
+
 const { executeCommand } = require('../utils/executor');
 const logger = require('../utils/logger');
 const fs = require('fs').promises;
 const path = require('path');
 const TemplateHandler = require('../utils/templateHandler');
-const EnvironmentManager = require('../utils/environmentManager');
-const apiClient = require('../utils/apiClient');
 const deployConfig = require('../deployConfig.json');
 const { ensureDeploymentPermissions } = require('../utils/permissionCheck');
 
@@ -17,11 +16,12 @@ async function deployApp(payload, ws) {
         repositoryOwner,
         repositoryName,
         branch,
-        githubToken,
+        githubToken, 
         environment,
         port,
-        envVarsToken
+        envVars = {}
     } = payload;
+
 
     logger.info(`Starting deployment ${deploymentId} for ${appType} app: ${appName}`);
     
@@ -72,33 +72,6 @@ async function deployApp(payload, ws) {
         await executeCommand('git', ['clone', '-b', branch, repoUrl, '.']);
         sendLogs(ws, deploymentId, 'Repository cloned successfully');
 
-        // Retrieve and set up environment variables
-        sendLogs(ws, deploymentId, 'Retrieving environment variables...');
-        let envVars = {};
-        let envFilePath;
-        // Initialize environment manager and write env file inside deployDir
-        const envManager = new EnvironmentManager(deployDir);
-        try {
-            logger.info(`Fetching env vars for deployment ${deploymentId}`);
-            const { data } = await apiClient.post(`/api/deploy/env-vars/${deploymentId}`, {
-                token: envVarsToken
-            });
-            
-            if (!data || !data.variables) {
-                throw new Error('Invalid response format for environment variables');
-            }
-            
-            envVars = data.variables;
-            logger.info('Successfully retrieved environment variables');
-            
-
-            envFilePath = await envManager.writeEnvFile(envVars, environment);
-            sendLogs(ws, deploymentId, 'Environment variables configured successfully');
-        } catch (error) {
-            logger.error('Environment variables setup failed:', error);
-            throw new Error(`Environment variables setup failed: ${error.message}`);
-        }
-
         // Initialize template handler
         const templateHandler = new TemplateHandler(
             path.join('/opt/cloudlunacy/templates'),
@@ -112,7 +85,7 @@ async function deployApp(payload, ws) {
             appName,
             environment,
             port,
-            envFile: path.basename(envFilePath), // Use the actual env file name
+            envVars,
             buildConfig: {
                 nodeVersion: '18',
                 buildOutputDir: 'build',
@@ -127,9 +100,6 @@ async function deployApp(payload, ws) {
             fs.writeFile('docker-compose.yml', files.dockerCompose),
             files.nginxConf ? fs.writeFile('nginx.conf', files.nginxConf) : Promise.resolve()
         ]);
-
-        // Update docker-compose with env file reference
-        await envManager.updateDockerCompose(path.basename(envFilePath), containerName);
 
         // Validate docker-compose file
         try {
@@ -194,64 +164,26 @@ async function deployApp(payload, ws) {
     }
 }
 
-
-async function determineActiveContainer(blueContainer, greenContainer) {
-    try {
-        const blueRunning = await isContainerRunning(blueContainer);
-        const greenRunning = await isContainerRunning(greenContainer);
-
-        if (blueRunning) return blueContainer;
-        if (greenRunning) return greenContainer;
-        return null;
-    } catch (error) {
-        logger.error('Error determining active container:', error);
-        return null;
+function sendStatus(ws, data) {
+    if (ws.readyState === ws.OPEN) {
+        ws.send(JSON.stringify({
+            type: 'status',
+            payload: data
+        }));
     }
 }
 
-async function isContainerRunning(containerName) {
-    try {
-        const { stdout } = await executeCommand('docker', [
-            'inspect',
-            '--format',
-            '{{.State.Status}}',
-            containerName
-        ], { silent: true });
-        return stdout.trim() === 'running';
-    } catch (error) {
-        return false;
+function sendLogs(ws, deploymentId, log) {
+    if (ws.readyState === ws.OPEN) {
+        ws.send(JSON.stringify({
+            type: 'logs',
+            payload: {
+                deploymentId,
+                log,
+                timestamp: new Date().toISOString()
+            }
+        }));
     }
-}
-
-async function updateReverseProxy(appName, environment, port) {
-    const nginxConfig = `
-upstream ${appName}_${environment} {
-    server localhost:${port};
-}
-
-server {
-    listen 80;
-    server_name ${appName}-${environment}.yourdomain.com;
-    
-    location / {
-        proxy_pass http://${appName}_${environment};
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        
-        # WebSocket support
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-    }
-}`;
-
-    const configPath = `/etc/nginx/conf.d/${appName}-${environment}.conf`;
-    
-    await fs.writeFile(configPath, nginxConfig);
-    await executeCommand('nginx', ['-t']); // Test configuration
-    await executeCommand('nginx', ['-s', 'reload']); // Reload nginx
 }
 
 async function checkDeploymentHealth(port, containerName) {
@@ -268,6 +200,7 @@ async function checkDeploymentHealth(port, containerName) {
         ], { silent: true });
 
         if (!status || !status.includes('running')) {
+            // Get container logs for debugging
             const { stdout: logs } = await executeCommand('docker', ['logs', containerName], { 
                 silent: true,
                 ignoreError: true 
@@ -278,6 +211,7 @@ async function checkDeploymentHealth(port, containerName) {
         }
 
         // Check port availability
+        logger.info(`Checking port ${port} availability...`);
         const portCheck = await new Promise((resolve) => {
             const net = require('net');
             const socket = net.createConnection(port);
@@ -303,50 +237,23 @@ async function checkDeploymentHealth(port, containerName) {
             throw new Error(`Port ${port} is not accessible`);
         }
 
+        // Check container logs for errors
+        const { stdout: containerLogs } = await executeCommand('docker', ['logs', '--tail', '50', containerName], {
+            silent: true,
+            ignoreError: true
+        });
+
+        if (containerLogs && containerLogs.toLowerCase().includes('error')) {
+            logger.warn('Found potential errors in container logs:', containerLogs);
+        }
+
         return { healthy: true };
     } catch (error) {
+        logger.error('Health check failed:', error);
         return { 
             healthy: false, 
             message: error.message
         };
-    }
-}
-
-async function checkProxyHealth(appName, environment) {
-    try {
-        const domain = `${appName}-${environment}.yourdomain.com`;
-        const response = await fetch(`http://${domain}/health`);
-        return {
-            healthy: response.ok,
-            message: response.ok ? 'Proxy health check passed' : 'Failed to access application through proxy'
-        };
-    } catch (error) {
-        return {
-            healthy: false,
-            message: `Proxy health check failed: ${error.message}`
-        };
-    }
-}
-
-function sendStatus(ws, data) {
-    if (ws.readyState === ws.OPEN) {
-        ws.send(JSON.stringify({
-            type: 'status',
-            payload: data
-        }));
-    }
-}
-
-function sendLogs(ws, deploymentId, log) {
-    if (ws.readyState === ws.OPEN) {
-        ws.send(JSON.stringify({
-            type: 'logs',
-            payload: {
-                deploymentId,
-                log,
-                timestamp: new Date().toISOString()
-            }
-        }));
     }
 }
 
