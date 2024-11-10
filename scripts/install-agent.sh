@@ -295,8 +295,27 @@ install_nginx() {
     mkdir -p /etc/nginx/sites-available
     mkdir -p /etc/nginx/sites-enabled
     
-    # Add nginx user to necessary groups
-    usermod -aG nginx cloudlunacy
+    # Use www-data group instead of nginx on Ubuntu/Debian
+    case "$OS_TYPE" in
+        ubuntu | debian | raspbian)
+            # Add cloudlunacy user to www-data group
+            usermod -aG www-data cloudlunacy
+            
+            # Set proper ownership
+            chown -R cloudlunacy:www-data /etc/nginx/sites-available
+            chown -R cloudlunacy:www-data /etc/nginx/sites-enabled
+            ;;
+        *)
+            # Create nginx group if it doesn't exist (for other distros)
+            groupadd -f nginx
+            usermod -aG nginx cloudlunacy
+            chown -R cloudlunacy:nginx /etc/nginx/sites-available
+            chown -R cloudlunacy:nginx /etc/nginx/sites-enabled
+            ;;
+    esac
+    
+    chmod 775 /etc/nginx/sites-available
+    chmod 775 /etc/nginx/sites-enabled
     
     # Update nginx configuration to include sites-enabled
     if ! grep -q "include /etc/nginx/sites-enabled/\*" /etc/nginx/nginx.conf; then
@@ -308,14 +327,8 @@ install_nginx() {
         sed -i '/http {/a \    server_names_hash_bucket_size 128;' /etc/nginx/nginx.conf
     fi
     
-    # Set permissions
-    chown -R cloudlunacy:nginx /etc/nginx/sites-available
-    chown -R cloudlunacy:nginx /etc/nginx/sites-enabled
-    chmod 775 /etc/nginx/sites-available
-    chmod 775 /etc/nginx/sites-enabled
-    
     # Add cloudlunacy user to sudoers for specific nginx commands
-    echo "cloudlunacy ALL=(ALL) NOPASSWD: /usr/sbin/nginx, /bin/systemctl reload nginx, /bin/systemctl restart nginx" | EDITOR="tee -a" visudo
+    echo "cloudlunacy ALL=(ALL) NOPASSWD: /usr/sbin/nginx, /bin/systemctl reload nginx, /bin/systemctl restart nginx, /usr/bin/tee /etc/nginx/sites-available/*, /usr/bin/tee /etc/nginx/sites-enabled/*, /bin/ln -sf /etc/nginx/sites-available/* /etc/nginx/sites-enabled/*, /bin/rm /etc/nginx/sites-available/*, /bin/rm /etc/nginx/sites-enabled/*" | EDITOR="tee -a" visudo
     
     # Test and reload nginx
     nginx -t && systemctl reload nginx
