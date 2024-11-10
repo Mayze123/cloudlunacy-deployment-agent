@@ -2,6 +2,9 @@ const Handlebars = require('handlebars');
 const fs = require('fs').promises;
 const path = require('path');
 const logger = require('./logger');
+const { exec } = require('child_process');
+const util = require('util');
+const execAsync = util.promisify(exec);
 
 class TemplateHandler {
   constructor(templatesDir, deployConfig) {
