@@ -7,6 +7,8 @@ const path = require('path');
 const TemplateHandler = require('../utils/templateHandler');
 const deployConfig = require('../deployConfig.json');
 const { ensureDeploymentPermissions } = require('../utils/permissionCheck');
+const apiClient = require('../utils/apiClient');
+const EnvironmentManager = require('../utils/environmentManager');
 
 async function deployApp(payload, ws) {
     const {
@@ -19,9 +21,8 @@ async function deployApp(payload, ws) {
         githubToken, 
         environment,
         port,
-        envVars = {}
+        envVarsToken
     } = payload;
-
 
     logger.info(`Starting deployment ${deploymentId} for ${appType} app: ${appName}`);
     
@@ -66,11 +67,37 @@ async function deployApp(payload, ws) {
             logger.warn('Cleanup warning:', error);
         }
 
+        // Retrieve and set up environment variables
+        sendLogs(ws, deploymentId, 'Retrieving environment variables...');
+        let envVars = {};
+        let envFilePath;
+        try {
+            logger.info(`Fetching env vars for deployment ${deploymentId}`);
+            const { data } = await apiClient.post(`/api/deploy/env-vars/${deploymentId}`, {
+                token: envVarsToken
+            });
+            
+            if (!data || !data.variables) {
+                throw new Error('Invalid response format for environment variables');
+            }
+            
+            envVars = data.variables;
+            logger.info('Successfully retrieved environment variables');
+        } catch (error) {
+            logger.error('Environment variables setup failed:', error);
+            throw new Error(`Environment variables setup failed: ${error.message}`);
+        }
+
         // Clone repository
         sendLogs(ws, deploymentId, 'Cloning repository...');
         const repoUrl = `https://x-access-token:${githubToken}@github.com/${repositoryOwner}/${repositoryName}.git`;
         await executeCommand('git', ['clone', '-b', branch, repoUrl, '.']);
         sendLogs(ws, deploymentId, 'Repository cloned successfully');
+
+        // Initialize environment manager and write env file
+        const envManager = new EnvironmentManager(deployDir);
+        envFilePath = await envManager.writeEnvFile(envVars, environment);
+        sendLogs(ws, deploymentId, 'Environment variables configured successfully');
 
         // Initialize template handler
         const templateHandler = new TemplateHandler(
@@ -85,7 +112,7 @@ async function deployApp(payload, ws) {
             appName,
             environment,
             port,
-            envVars,
+            envFile: path.basename(envFilePath),
             buildConfig: {
                 nodeVersion: '18',
                 buildOutputDir: 'build',
@@ -100,6 +127,9 @@ async function deployApp(payload, ws) {
             fs.writeFile('docker-compose.yml', files.dockerCompose),
             files.nginxConf ? fs.writeFile('nginx.conf', files.nginxConf) : Promise.resolve()
         ]);
+
+        // Update docker-compose with env file reference
+        await envManager.updateDockerCompose(path.basename(envFilePath), containerName);
 
         // Validate docker-compose file
         try {
