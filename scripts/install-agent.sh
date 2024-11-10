@@ -261,6 +261,68 @@ install_node() {
     log "Node.js installed successfully."
 }
 
+install_nginx() {
+    log "Checking Nginx installation..."
+    if command -v nginx >/dev/null 2>&1; then
+        log "Nginx is already installed."
+    else
+        log "Nginx not found. Installing Nginx..."
+
+        case "$OS_TYPE" in
+            ubuntu | debian | raspbian)
+                apt-get install -y nginx
+                ;;
+            centos | rhel | fedora | rocky | almalinux)
+                if command -v dnf >/dev/null 2>&1; then
+                    dnf install -y nginx
+                else
+                    yum install -y nginx
+                fi
+                ;;
+            *)
+                log_error "Nginx installation not supported on this OS."
+                exit 1
+                ;;
+        esac
+
+        systemctl enable nginx
+        systemctl start nginx
+        log "Nginx installed successfully."
+    fi
+
+    # Set up Nginx directories and permissions
+    log "Setting up Nginx configuration directories..."
+    mkdir -p /etc/nginx/sites-available
+    mkdir -p /etc/nginx/sites-enabled
+    
+    # Add nginx user to necessary groups
+    usermod -aG nginx cloudlunacy
+    
+    # Update nginx configuration to include sites-enabled
+    if ! grep -q "include /etc/nginx/sites-enabled/\*" /etc/nginx/nginx.conf; then
+        sed -i '/http {/a \    include /etc/nginx/sites-enabled/*;' /etc/nginx/nginx.conf
+    fi
+    
+    # Add server_names_hash_bucket_size if not present
+    if ! grep -q "server_names_hash_bucket_size" /etc/nginx/nginx.conf; then
+        sed -i '/http {/a \    server_names_hash_bucket_size 128;' /etc/nginx/nginx.conf
+    fi
+    
+    # Set permissions
+    chown -R cloudlunacy:nginx /etc/nginx/sites-available
+    chown -R cloudlunacy:nginx /etc/nginx/sites-enabled
+    chmod 775 /etc/nginx/sites-available
+    chmod 775 /etc/nginx/sites-enabled
+    
+    # Add cloudlunacy user to sudoers for specific nginx commands
+    echo "cloudlunacy ALL=(ALL) NOPASSWD: /usr/sbin/nginx, /bin/systemctl reload nginx, /bin/systemctl restart nginx" | EDITOR="tee -a" visudo
+    
+    # Test and reload nginx
+    nginx -t && systemctl reload nginx
+    
+    log "Nginx setup completed."
+}
+
 # Function to create dedicated user and directories
 setup_user_directories() {
     log "Creating dedicated user and directories..."
@@ -279,6 +341,12 @@ setup_user_directories() {
     mkdir -p "$BASE_DIR"
     chown -R "$USERNAME":"$USERNAME" "$BASE_DIR"
     chmod -R 750 "$BASE_DIR"
+
+    # Create nginx configuration directories
+    mkdir -p "$BASE_DIR/nginx/sites-available"
+    mkdir -p "$BASE_DIR/nginx/sites-enabled"
+    chown -R "$USERNAME":"$USERNAME" "$BASE_DIR/nginx"
+    chmod -R 750 "$BASE_DIR/nginx"
 
     # Create subdirectories
     mkdir -p "$BASE_DIR"/{logs,ssh,config,bin}
@@ -320,7 +388,7 @@ install_agent_dependencies() {
         sudo -u "$USERNAME" HOME="$BASE_DIR" npm install --cache "$NPM_CACHE_DIR" --no-fund --no-audit
     else
         sudo -u "$USERNAME" HOME="$BASE_DIR" npm init -y
-        sudo -u "$USERNAME" HOME="$BASE_DIR" npm install axios dotenv winston ws handlebars js-yaml --cache "$NPM_CACHE_DIR" --no-fund --no-audit
+        sudo -u "$USERNAME" HOME="$BASE_DIR" npm install axios dotenv winston shelljs ws handlebars js-yaml --cache "$NPM_CACHE_DIR" --no-fund --no-audit
     fi
 
     log "Agent dependencies installed."
@@ -371,6 +439,72 @@ EOF'
 
     sudo -u "$USERNAME" chmod 600 "$SSH_DIR/config"
     log "SSH setup completed."
+}
+
+setup_nginx_templates() {
+    log "Setting up Nginx configuration templates..."
+    
+    TEMPLATES_DIR="$BASE_DIR/templates/nginx"
+    mkdir -p "$TEMPLATES_DIR"
+    
+    # Create a basic Nginx virtual host template
+    cat <<EOF > "$TEMPLATES_DIR/virtual-host.template"
+server {
+    listen 80;
+    server_name {{domain}};
+
+    location / {
+        proxy_pass http://127.0.0.1:{{port}};
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+
+    location /socket.io/ {
+        proxy_pass http://127.0.0.1:{{port}};
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+}
+EOF
+
+    # Set proper ownership and permissions
+    chown -R "$USERNAME":"$USERNAME" "$TEMPLATES_DIR"
+    chmod 750 "$TEMPLATES_DIR"
+    chmod 640 "$TEMPLATES_DIR/virtual-host.template"
+    
+    log "Nginx templates created successfully."
+}
+
+setup_nginx_permissions() {
+    log "Configuring Nginx sudo permissions..."
+    
+    # Create sudoers.d file for cloudlunacy nginx permissions
+    cat <<EOF > /etc/sudoers.d/cloudlunacy-nginx
+# Allow cloudlunacy user to manage nginx
+cloudlunacy ALL=(ALL) NOPASSWD: /usr/sbin/nginx
+cloudlunacy ALL=(ALL) NOPASSWD: /bin/systemctl reload nginx
+cloudlunacy ALL=(ALL) NOPASSWD: /bin/systemctl restart nginx
+cloudlunacy ALL=(ALL) NOPASSWD: /usr/bin/tee /etc/nginx/sites-available/*
+cloudlunacy ALL=(ALL) NOPASSWD: /usr/bin/tee /etc/nginx/sites-enabled/*
+cloudlunacy ALL=(ALL) NOPASSWD: /bin/ln -sf /etc/nginx/sites-available/* /etc/nginx/sites-enabled/*
+cloudlunacy ALL=(ALL) NOPASSWD: /bin/rm /etc/nginx/sites-available/*
+cloudlunacy ALL=(ALL) NOPASSWD: /bin/rm /etc/nginx/sites-enabled/*
+EOF
+
+    # Set proper permissions on the sudoers file
+    chmod 440 /etc/sudoers.d/cloudlunacy-nginx
+    
+    log "Nginx sudo permissions configured."
 }
 
 setup_docker_permissions() {
@@ -514,9 +648,12 @@ main() {
     update_system
     install_dependencies
     install_docker
+    install_nginx
     install_node
     setup_user_directories
     setup_docker_permissions
+    setup_nginx_permissions
+    setup_nginx_templates
     setup_ssh "$GITHUB_SSH_KEY"
     download_agent
     install_agent_dependencies

@@ -9,6 +9,7 @@ const deployConfig = require('../deployConfig.json');
 const { ensureDeploymentPermissions } = require('../utils/permissionCheck');
 const apiClient = require('../utils/apiClient');
 const EnvironmentManager = require('../utils/environmentManager');
+const nginxManager = require('../utils/nginxManager');
 
 async function deployApp(payload, ws) {
     const {
@@ -21,6 +22,7 @@ async function deployApp(payload, ws) {
         githubToken, 
         environment,
         port,
+        domain,
         envVarsToken
     } = payload;
 
@@ -127,7 +129,7 @@ async function deployApp(payload, ws) {
                 buildOutputDir: 'build',
                 cacheControl: 'public, max-age=31536000'
             },
-            domain: `${appName}-${environment}.yourdomain.com`
+            domain: domain || `${appName}-${environment}.yourdomain.com`
         });
 
         // Write deployment files
@@ -181,24 +183,56 @@ async function deployApp(payload, ws) {
         sendLogs(ws, deploymentId, 'Container logs:');
         sendLogs(ws, deploymentId, containerLogs);
 
+        // Configure Nginx if domain is provided
+        if (domain) {
+            try {
+                sendLogs(ws, deploymentId, `Configuring domain: ${domain}`);
+                await nginxManager.configureNginx(domain, port, deployDir);
+                
+                // Execute curl to check domain accessibility
+                const maxRetries = 5;
+                let retryCount = 0;
+                let domainAccessible = false;
+
+                while (retryCount < maxRetries && !domainAccessible) {
+                    try {
+                        await executeCommand('curl', ['--max-time', '5', '-I', `http://${domain}`]);
+                        domainAccessible = true;
+                        sendLogs(ws, deploymentId, `Domain ${domain} is accessible`);
+                    } catch (error) {
+                        retryCount++;
+                        if (retryCount < maxRetries) {
+                            sendLogs(ws, deploymentId, `Waiting for domain to become accessible (attempt ${retryCount}/${maxRetries})...`);
+                            await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5 seconds between retries
+                        }
+                    }
+                }
+
+                if (!domainAccessible) {
+                    logger.warn(`Domain ${domain} is not yet accessible, but deployment will continue`);
+                    sendLogs(ws, deploymentId, `Warning: Domain ${domain} is not yet accessible. DNS propagation may take some time.`);
+                }
+            } catch (error) {
+                logger.error(`Failed to configure domain ${domain}:`, error);
+                sendLogs(ws, deploymentId, `Warning: Domain configuration encountered an error: ${error.message}`);
+                // Continue deployment even if domain configuration fails
+            }
+        }
+
         // Verify deployment
         sendLogs(ws, deploymentId, 'Verifying deployment...');
-        const health = await checkDeploymentHealth(port, serviceName);
+        const health = await checkDeploymentHealth(port, serviceName, domain);
         
         if (!health.healthy) {
             throw new Error(`Deployment health check failed: ${health.message}`);
         }
 
-        // Verify environment variables in container
-        const { stdout: envVarsOutput } = await executeCommand('docker', ['exec', serviceName, 'printenv']);
-        sendLogs(ws, deploymentId, 'Container environment variables:');
-        sendLogs(ws, deploymentId, envVarsOutput);
-
         // Send success status
         sendStatus(ws, {
             deploymentId,
             status: 'success',
-            message: 'Deployment completed successfully'
+            message: 'Deployment completed successfully',
+            domain
         });
 
     } catch (error) {
@@ -219,6 +253,12 @@ async function deployApp(payload, ws) {
                 logger.error('Container logs before cleanup:', failureLogs);
             } catch (logError) {
                 logger.warn('Could not retrieve container logs:', logError);
+            }
+
+            // Remove Nginx config if it was created
+            if (domain) {
+                await nginxManager.removeConfig(domain);
+                sendLogs(ws, deploymentId, `Removed Nginx configuration for ${domain}`);
             }
 
             // Stop and remove containers
@@ -262,7 +302,7 @@ function sendLogs(ws, deploymentId, log) {
     }
 }
 
-async function checkDeploymentHealth(port, containerName) {
+async function checkDeploymentHealth(port, containerName, domain) {
     try {
         // Wait for container to start
         await new Promise(resolve => setTimeout(resolve, 10000));
@@ -311,6 +351,30 @@ async function checkDeploymentHealth(port, containerName) {
 
         if (!portCheck) {
             throw new Error(`Port ${port} is not accessible`);
+        }
+
+        // Check domain accessibility if provided
+        if (domain) {
+            logger.info(`Verifying domain configuration for ${domain}`);
+            
+            // Check nginx configuration
+            const nginxCheck = await executeCommand('sudo', ['nginx', '-t'], { silent: true })
+                .catch(error => ({ error }));
+                
+            if (nginxCheck.error) {
+                logger.warn('Nginx configuration test failed:', nginxCheck.error);
+            }
+
+            // Check if site is at least locally accessible via curl
+            const curlCheck = await executeCommand(
+                'curl',
+                ['--max-time', '5', '-I', `http://localhost:${port}`],
+                { silent: true }
+            ).catch(error => ({ error }));
+
+            if (curlCheck.error) {
+                logger.warn(`Local port ${port} is not accessible:`, curlCheck.error);
+            }
         }
 
         // Check container logs for errors
