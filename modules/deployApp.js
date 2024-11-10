@@ -31,50 +31,60 @@ async function deployApp(payload, ws) {
     const greenContainer = `${appName}-green`;
     
     try {
-        // Check permissions and tools
-        const permissionsOk = await ensureDeploymentPermissions();
-        if (!permissionsOk) {
-            throw new Error('Deployment failed: Permission check failed');
-        }
-
-        await executeCommand('which', ['docker']);
-        await executeCommand('which', ['docker-compose']);
-        
-        // Set up deployment directory
-        await fs.mkdir(deployDir, { recursive: true });
-        process.chdir(deployDir);
-
-        sendStatus(ws, {
-            deploymentId,
-            status: 'in_progress',
-            message: 'Starting deployment...'
-        });
-
-        // Determine active container
-        const activeContainer = await determineActiveContainer(blueContainer, greenContainer);
-        const newContainer = activeContainer === blueContainer ? greenContainer : blueContainer;
-        const newPort = parseInt(port) + (activeContainer === blueContainer ? 1 : 0);
-        
-        sendLogs(ws, deploymentId, `Current active container: ${activeContainer || 'none'}`);
-        sendLogs(ws, deploymentId, `Preparing new container: ${newContainer} on port ${newPort}`);
-
-        // Retrieve and set up environment variables
-        sendLogs(ws, deploymentId, 'Retrieving environment variables...');
-        let envVars = {};
-        try {
-            const { data } = await apiClient.post(`/api/deploy/env-vars/${deploymentId}`, {
-                token: envVarsToken
-            });
-            envVars = data.variables;
-            
-            // Initialize environment manager and write env file
-            const envManager = new EnvironmentManager(deployDir);
-            const envFilePath = await envManager.writeEnvFile(envVars, environment);
-            
-            sendLogs(ws, deploymentId, 'Environment variables configured successfully');
-        } catch (error) {
-            throw new Error(`Environment variables setup failed: ${error.message}`);
-        }
+         // Check permissions and tools
+         const permissionsOk = await ensureDeploymentPermissions();
+         if (!permissionsOk) {
+             throw new Error('Deployment failed: Permission check failed');
+         }
+ 
+         await executeCommand('which', ['docker']);
+         await executeCommand('which', ['docker-compose']);
+         
+         // Set up deployment directory
+         await fs.mkdir(deployDir, { recursive: true });
+         process.chdir(deployDir);
+ 
+         sendStatus(ws, {
+             deploymentId,
+             status: 'in_progress',
+             message: 'Starting deployment...'
+         });
+ 
+         // Determine active container
+         const blueContainer = `${appName}-blue`;
+         const greenContainer = `${appName}-green`;
+         activeContainer = await determineActiveContainer(blueContainer, greenContainer);
+         newContainer = activeContainer === blueContainer ? greenContainer : blueContainer;
+         const newPort = parseInt(port) + (activeContainer === blueContainer ? 1 : 0);
+         
+         sendLogs(ws, deploymentId, `Current active container: ${activeContainer || 'none'}`);
+         sendLogs(ws, deploymentId, `Preparing new container: ${newContainer} on port ${newPort}`);
+ 
+         // Retrieve and set up environment variables
+         sendLogs(ws, deploymentId, 'Retrieving environment variables...');
+         let envVars = {};
+         try {
+             logger.info(`Fetching env vars for deployment ${deploymentId}`);
+             const { data } = await apiClient.post(`/api/deploy/env-vars/${deploymentId}`, {
+                 token: envVarsToken
+             });
+             
+             if (!data || !data.variables) {
+                 throw new Error('Invalid response format for environment variables');
+             }
+             
+             envVars = data.variables;
+             logger.info('Successfully retrieved environment variables');
+             
+             // Initialize environment manager and write env file
+             const envManager = new EnvironmentManager(deployDir);
+             const envFilePath = await envManager.writeEnvFile(envVars, environment);
+             
+             sendLogs(ws, deploymentId, 'Environment variables configured successfully');
+         } catch (error) {
+             logger.error('Environment variables setup failed:', error);
+             throw new Error(`Environment variables setup failed: ${error.message}`);
+         }
 
         // Clone repository
         sendLogs(ws, deploymentId, 'Cloning repository...');
@@ -174,10 +184,14 @@ async function deployApp(payload, ws) {
 
         // Cleanup on failure
         try {
-            const failedContainer = activeContainer === blueContainer ? greenContainer : blueContainer;
-            await executeCommand('docker', ['stop', failedContainer]).catch(() => {});
-            await executeCommand('docker', ['rm', failedContainer]).catch(() => {});
-            await fs.rm(deployDir, { recursive: true, force: true });
+            if (newContainer) {
+                await executeCommand('docker', ['stop', newContainer]).catch(() => {});
+                await executeCommand('docker', ['rm', newContainer]).catch(() => {});
+            }
+            
+            if (deployDir) {
+                await fs.rm(deployDir, { recursive: true, force: true });
+            }
         } catch (cleanupError) {
             logger.error('Cleanup failed:', cleanupError);
         }

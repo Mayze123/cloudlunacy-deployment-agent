@@ -3,7 +3,7 @@ const axios = require('axios');
 const logger = require('./logger');
 
 const apiClient = axios.create({
-  baseURL: process.env.BACKEND_URL,
+  baseURL: process.env.BACKEND_URL || 'http://localhost:3001',
   timeout: 30000,
   headers: {
     'Content-Type': 'application/json'
@@ -11,7 +11,13 @@ const apiClient = axios.create({
 });
 
 apiClient.interceptors.request.use(config => {
-  config.headers.Authorization = `Bearer ${process.env.AGENT_API_TOKEN}`;
+  if (process.env.AGENT_API_TOKEN) {
+    config.headers.Authorization = `Bearer ${process.env.AGENT_API_TOKEN}`;
+  }
+  
+  // Log the request URL and method
+  logger.info(`Making ${config.method.toUpperCase()} request to: ${config.url}`);
+  
   return config;
 });
 
@@ -26,12 +32,17 @@ apiClient.interceptors.response.use(
       message: error.message
     });
 
+    // Throw a more detailed error
     if (error.response) {
-      throw new Error(error.response.data.message || error.response.data.error || error.response.statusText);
+      throw new Error(
+        error.response.data?.message || 
+        error.response.data?.error || 
+        `Request failed with status ${error.response.status}`
+      );
     } else if (error.request) {
-      throw new Error('No response received from server');
+      throw new Error(`No response received from server: ${error.message}`);
     } else {
-      throw new Error(error.message);
+      throw new Error(`Request setup failed: ${error.message}`);
     }
   }
 );
