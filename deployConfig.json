@@ -21,7 +21,10 @@
       "startCommand": "npm start",
       "healthCheckEndpoint": "/health",
       "volumes": [],
-      "dependencies": []
+      "dependencies": [],
+      "envVars": {
+        "NODE_ENV": "production"
+      }
     }
   }
 }

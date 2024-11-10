@@ -1,47 +1,25 @@
 
 // templates/docker-compose.node.hbs
-version: '3.8'
-
+version: "3.8"
 services:
   {{appName}}:
+    container_name: {{appName}}-{{environment}}
     build:
       context: .
       dockerfile: Dockerfile
-      args:
-        NODE_ENV: {{environment}}
-    container_name: {{appName}}-{{environment}}
-    restart: always
     ports:
       - "{{port}}:{{port}}"
     environment:
-      - NODE_ENV={{environment}}
-      {{#each envVars}}
-      - {{@key}}={{{this}}}
-      {{/each}}
-    {{#if volumes}}
-    volumes:
-      {{#each volumes}}
-      - {{this}}
-      {{/each}}
-    {{/if}}
-    networks:
-      - {{appName}}_network
-    {{#if dependencies}}
-    depends_on:
-      {{#each dependencies}}
-      - {{this}}
-      {{/each}}
-    {{/if}}
-    labels:
-      - "app.name={{appName}}"
-      - "app.environment={{environment}}"
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
-
-networks:
-  {{appName}}_network:
-    name: {{appName}}_{{environment}}_network
-    driver: bridge
+      - NODE_ENV={{environment}}{{#if envVars}}{{#each envVars}}
+      - {{@key}}={{{this}}}{{/each}}{{/if}}
+    restart: unless-stopped{{#if volumes}}
+    volumes:{{#each volumes}}
+      - {{this}}{{/each}}{{/if}}{{#if dependencies}}
+    depends_on:{{#each dependencies}}
+      - {{this}}{{/each}}{{/if}}
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:{{port}}{{healthCheckEndpoint}}"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
