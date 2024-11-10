@@ -1,0 +1,41 @@
+// templates/Dockerfile.node.hbs
+FROM node:{{nodeVersion}}-alpine
+
+WORKDIR /app
+
+# Install dependencies first (better layer caching)
+COPY package*.json ./
+{{
+#if
+ useYarn}}
+RUN yarn install
+{{else if usePnpm}}
+RUN npm install -g pnpm && pnpm install
+{{else}}
+RUN npm install
+{{
+/if
+}}
+
+# Copy application code
+COPY . .
+
+{{
+#if
+ buildCommand}}
+RUN {{{buildCommand}}}
+{{
+/if
+}}
+
+EXPOSE {{port}}
+
+{{
+#if
+ startCommand}}
+CMD {{{startCommand}}}
+{{else}}
+CMD ["npm", "start"]
+{{
+/if
+}}

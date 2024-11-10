@@ -7,7 +7,9 @@
     "defaults": {
       "nodeVersion": "18",
       "buildOutputDir": "build",
-      "cacheControl": "public, max-age=31536000"
+      "cacheControl": "public, max-age=31536000",
+      "securityHeaders": true,
+      "nginxLocations": []
     }
   },
   "node": {
@@ -16,7 +18,27 @@
     "defaultPort": 3000,
     "defaults": {
       "nodeVersion": "18",
-      "healthCheckEndpoint": "/health"
+      "startCommand": "npm start",
+      "healthCheckEndpoint": "/health",
+      "volumes": [
+        "./logs:/app/logs"
+      ],
+      "dependencies": []
+    }
+  },
+  "express": {
+    "extends": "node",
+    "defaults": {
+      "startCommand": "node server.js",
+      "healthCheckEndpoint": "/api/health"
+    }
+  },
+  "nextjs": {
+    "extends": "node",
+    "defaults": {
+      "buildCommand": "npm run build",
+      "startCommand": "npm run start",
+      "healthCheckEndpoint": "/api/health"
     }
   }
 }

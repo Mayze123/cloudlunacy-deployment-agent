@@ -24,28 +24,24 @@ async function deployApp(payload, ws) {
     logger.info(`Starting deployment ${deploymentId} for ${appType} app: ${appName}`);
     
     try {
-        // Check if docker and docker-compose are installed
-        try {
-            await executeCommand('which', ['docker']);
-            await executeCommand('which', ['docker-compose']);
-        } catch (error) {
-            throw new Error('Docker or Docker Compose not found. Please ensure both are installed.');
-        }
-
+        // Check for required tools
+        await executeCommand('which', ['docker']);
+        await executeCommand('which', ['docker-compose']);
+        
         // Set up deployment directory
         const deployDir = path.join('/opt/cloudlunacy/deployments', deploymentId);
         await fs.mkdir(deployDir, { recursive: true });
         process.chdir(deployDir);
 
-        // Send initial status
+        // Send initial status and logs
         sendStatus(ws, {
             deploymentId,
             status: 'in_progress',
             message: 'Starting deployment...'
         });
+        sendLogs(ws, deploymentId, 'Setting up deployment environment...');
 
         // Clone repository
-        sendLogs(ws, deploymentId, 'Cloning repository...');
         const repoUrl = `https://x-access-token:${githubToken}@github.com/${repositoryOwner}/${repositoryName}.git`;
         await executeCommand('git', ['clone', '-b', branch, repoUrl, '.']);
         sendLogs(ws, deploymentId, 'Repository cloned successfully');
@@ -57,7 +53,7 @@ async function deployApp(payload, ws) {
         );
 
         // Generate deployment files
-        sendLogs(ws, deploymentId, 'Generating deployment files...');
+        sendLogs(ws, deploymentId, 'Generating deployment configuration...');
         const files = await templateHandler.generateDeploymentFiles({
             appType,
             appName,
@@ -69,21 +65,25 @@ async function deployApp(payload, ws) {
                 buildOutputDir: 'build',
                 cacheControl: 'public, max-age=31536000'
             },
-            domain: `${appName}-${environment}.yourdomain.com`,
-            api: environment === 'production'
-                ? { url: 'https://api.yourdomain.com' }
-                : { url: 'https://staging-api.yourdomain.com' }
+            domain: `${appName}-${environment}.yourdomain.com`
         });
 
-        // Write deployment files
+        // Write and validate files
         await Promise.all([
             fs.writeFile('Dockerfile', files.dockerfile),
             fs.writeFile('docker-compose.yml', files.dockerCompose),
             files.nginxConf ? fs.writeFile('nginx.conf', files.nginxConf) : Promise.resolve()
         ]);
-        sendLogs(ws, deploymentId, 'Deployment files generated');
 
-        // Stop existing containers if any
+        // Validate docker-compose file
+        try {
+            await executeCommand('docker-compose', ['config']);
+            sendLogs(ws, deploymentId, 'Deployment configuration validated');
+        } catch (error) {
+            throw new Error(`Invalid docker-compose configuration: ${error.message}`);
+        }
+
+        // Clean up existing containers
         try {
             await executeCommand('docker-compose', ['down', '--remove-orphans']);
             sendLogs(ws, deploymentId, 'Cleaned up existing containers');
@@ -102,7 +102,7 @@ async function deployApp(payload, ws) {
 
         // Verify deployment
         sendLogs(ws, deploymentId, 'Verifying deployment...');
-        await new Promise(resolve => setTimeout(resolve, 5000)); // Wait for container to start
+        await new Promise(resolve => setTimeout(resolve, 5000));
         const health = await checkDeploymentHealth(port);
         
         if (!health.healthy) {
@@ -116,12 +116,10 @@ async function deployApp(payload, ws) {
             message: 'Deployment completed successfully'
         });
 
-        logger.info(`Deployment ${deploymentId} completed successfully`);
-
     } catch (error) {
         logger.error(`Deployment ${deploymentId} failed:`, error);
         
-        // Send failure status
+        // Send detailed error message
         sendStatus(ws, {
             deploymentId,
             status: 'failed',
