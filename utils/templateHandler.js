@@ -214,7 +214,7 @@ class TemplateHandler {
   async generateDeploymentFiles(appConfig) {
     logger.info('Starting file generation with detailed config:', JSON.stringify({
         ...appConfig,
-        githubToken: '[REDACTED]' 
+        githubToken: '[REDACTED]'
     }, null, 2));
 
     const {
@@ -241,7 +241,9 @@ class TemplateHandler {
 
     const serviceName = `${appName}-${environment}`.toLowerCase().replace(/[^a-z0-9-]/g, '-');
 
+    // Generate docker-compose.yml without duplicate networks
     const dockerComposeContent = `version: "3.8"
+
 services:
 ${serviceName}:
 container_name: ${serviceName}
@@ -267,8 +269,10 @@ healthcheck:
 
 networks:
 app-network:
-driver: bridge`;
+driver: bridge
+name: ${serviceName}-network`;
 
+    // Generate Dockerfile with curl for healthcheck
     const dockerfileContent = `FROM node:18-alpine
 
 # Install curl for healthcheck
@@ -292,9 +296,11 @@ COPY .env.${environment} .env
 ENV NODE_ENV=${environment}
 ENV PORT=${this.deployConfig[appType].defaultPort}
 
-# Create healthcheck endpoint and dotenv loading script
-RUN echo "const http=require('http');const server=http.createServer((req,res)=>{if(req.url==='/health'){res.writeHead(200);res.end('OK');}});server.listen(${this.deployConfig[appType].defaultPort});" > healthcheck.js && \
-echo "require('dotenv').config(); require('./healthcheck');" > load-env.js
+# Create healthcheck endpoint
+RUN echo "const http=require('http');const server=http.createServer((req,res)=>{if(req.url==='/health'){res.writeHead(200);res.end('OK');}});server.listen(${this.deployConfig[appType].defaultPort});" > healthcheck.js
+
+# Add dotenv loading script
+RUN echo "require('dotenv').config(); require('./healthcheck');" > load-env.js
 
 # Start the application
 CMD ["sh", "-c", "node load-env.js & npm start"]`;
@@ -310,25 +316,28 @@ CMD ["sh", "-c", "node load-env.js & npm start"]`;
         await fs.writeFile(path.join(tempValidationDir, 'Dockerfile'), dockerfileContent);
         await fs.writeFile(path.join(tempValidationDir, `.env.${environment}`), 'NODE_ENV=production\n');
 
+        // Validate docker-compose file
         const { stdout: validationOutput } = await executeCommand(
             'docker-compose', 
             ['config'], 
             { cwd: tempValidationDir }
         );
         logger.info('Docker compose validation output:', validationOutput);
+
+        return {
+            dockerCompose: dockerComposeContent,
+            dockerfile: dockerfileContent,
+            allocatedPort: deploymentPort
+        };
     } catch (error) {
         logger.error('File validation failed:', error);
         throw error;
     } finally {
+        // Cleanup temporary directory
         await fs.rm(tempValidationDir, { recursive: true, force: true }).catch(() => {});
     }
-
-    return {
-        dockerCompose: dockerComposeContent,
-        dockerfile: dockerfileContent,
-        allocatedPort: deploymentPort
-    };
 }
+
 
   async validateConfig(appConfig) {
     const required = ['appType', 'appName', 'environment', 'port'];
