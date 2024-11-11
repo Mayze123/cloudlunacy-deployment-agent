@@ -297,22 +297,22 @@ install_nginx() {
 
     # Set up Nginx directories and permissions
     log "Setting up Nginx configuration directories..."
-    
+
     # Ensure directories exist
     mkdir -p /etc/nginx/sites-available
     mkdir -p /etc/nginx/sites-enabled
-    
+
     # Ubuntu-specific setup
     if [ "$OS_TYPE" = "ubuntu" ] || [ "$OS_TYPE" = "debian" ] || [ "$OS_TYPE" = "raspbian" ]; then
         log "Configuring Nginx permissions for Ubuntu..."
         # Add cloudlunacy user to www-data group
         usermod -aG www-data "$USERNAME"
-        
+
         # Set ownership
         chown -R root:root /etc/nginx
         chown -R "$USERNAME:www-data" /etc/nginx/sites-available
         chown -R "$USERNAME:www-data" /etc/nginx/sites-enabled
-        
+
         # Set directory permissions
         chmod 755 /etc/nginx
         chmod 775 /etc/nginx/sites-available
@@ -332,21 +332,21 @@ install_nginx() {
 
     # Update nginx configuration
     NGINX_CONF="/etc/nginx/nginx.conf"
-    
+
     # Backup original config
     cp "$NGINX_CONF" "$NGINX_CONF.bak"
-    
+
     # Add includes if they don't exist
     if ! grep -q "include /etc/nginx/sites-enabled/\*" "$NGINX_CONF"; then
         sed -i '/http {/a \    include /etc/nginx/sites-enabled/*;' "$NGINX_CONF"
         log "Added sites-enabled include to nginx.conf"
     fi
-    
+
     if ! grep -q "server_names_hash_bucket_size" "$NGINX_CONF"; then
         sed -i '/http {/a \    server_names_hash_bucket_size 128;' "$NGINX_CONF"
         log "Added server_names_hash_bucket_size directive"
     fi
-    
+
     # Create sudoers entry
     SUDOERS_FILE="/etc/sudoers.d/cloudlunacy-nginx"
     cat > "$SUDOERS_FILE" << EOF
@@ -354,25 +354,25 @@ install_nginx() {
 $USERNAME ALL=(ALL) NOPASSWD: /usr/sbin/nginx
 $USERNAME ALL=(ALL) NOPASSWD: /bin/systemctl reload nginx
 $USERNAME ALL=(ALL) NOPASSWD: /bin/systemctl restart nginx
-$USERNAME ALL=(ALL) NOPASSWD: /bin/cat /var/log/nginx/error.log
-$USERNAME ALL=(ALL) NOPASSWD: /bin/cat /etc/nginx/nginx.conf
-$USERNAME ALL=(ALL) NOPASSWD: /bin/journalctl -xeu nginx.service --no-pager -n 50
+$USERNAME ALL=(ALL) NOPASSWD: /usr/bin/cat /var/log/nginx/error.log
+$USERNAME ALL=(ALL) NOPASSWD: /usr/bin/cat /etc/nginx/nginx.conf
+$USERNAME ALL=(ALL) NOPASSWD: /usr/bin/journalctl -xeu nginx.service --no-pager -n 50
 $USERNAME ALL=(ALL) NOPASSWD: /usr/bin/tee /etc/nginx/sites-available/*
 $USERNAME ALL=(ALL) NOPASSWD: /usr/bin/tee /etc/nginx/sites-enabled/*
 $USERNAME ALL=(ALL) NOPASSWD: /bin/ln -sf /etc/nginx/sites-available/* /etc/nginx/sites-enabled/*
 $USERNAME ALL=(ALL) NOPASSWD: /bin/rm -f /etc/nginx/sites-available/*
 $USERNAME ALL=(ALL) NOPASSWD: /bin/rm -f /etc/nginx/sites-enabled/*
 $USERNAME ALL=(ALL) NOPASSWD: /bin/mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled
-$USERNAME ALL=(ALL) NOPASSWD: /bin/tail -n 50 /var/log/nginx/error.log
+$USERNAME ALL=(ALL) NOPASSWD: /usr/bin/tail -n 50 /var/log/nginx/error.log
 EOF
 
     # Set proper permissions on sudoers file
     chmod 440 "$SUDOERS_FILE"
-    
+
     # Create required directories for templates
     NGINX_TEMPLATE_DIR="$BASE_DIR/templates/nginx"
     mkdir -p "$NGINX_TEMPLATE_DIR"
-    
+
     # Create virtual host template
     cat > "$NGINX_TEMPLATE_DIR/virtual-host.template" << 'EOF'
 server {
@@ -388,7 +388,7 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        
+
         # Add timeout configurations
         proxy_connect_timeout 60s;
         proxy_send_timeout 60s;
@@ -404,7 +404,7 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        
+
         # WebSocket specific timeouts
         proxy_connect_timeout 7d;
         proxy_send_timeout 7d;
@@ -421,7 +421,7 @@ server {
     # Customize error pages
     error_page 404 /404.html;
     error_page 500 502 503 504 /50x.html;
-    
+
     # Enable gzip compression
     gzip on;
     gzip_disable "msie6";
@@ -436,19 +436,19 @@ EOF
     chown -R "$USERNAME:$USERNAME" "$BASE_DIR/templates"
     chmod -R 750 "$BASE_DIR/templates"
     chmod 640 "$NGINX_TEMPLATE_DIR/virtual-host.template"
-    
+
     # Test nginx configuration
     if ! nginx -t; then
         log_error "Nginx configuration test failed"
         cat "$NGINX_CONF"
         exit 1
     fi
-    
+
     # Reload nginx to apply changes
     systemctl reload nginx
-    
+
     log "Nginx setup completed successfully"
-    
+
     # Verify template existence
     if [ -f "$NGINX_TEMPLATE_DIR/virtual-host.template" ]; then
         log "Nginx template created successfully at $NGINX_TEMPLATE_DIR/virtual-host.template"

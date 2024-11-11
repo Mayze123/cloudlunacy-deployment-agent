@@ -10,6 +10,7 @@ class NginxManager {
   constructor() {
     this.sitesAvailablePath = '/etc/nginx/sites-available';
     this.sitesEnabledPath = '/etc/nginx/sites-enabled';
+    this.templatePath = '/opt/cloudlunacy/templates/nginx/virtual-host.template';
   }
 
   async configureNginx(domain, port, deployDir) {
