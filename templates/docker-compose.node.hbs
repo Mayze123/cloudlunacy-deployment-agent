@@ -1,25 +1,31 @@
 
-// templates/docker-compose.node.hbs
-version: "3.8"
-services:
-  {{appName}}:
-    container_name: {{appName}}-{{environment}}
-    build:
-      context: .
-      dockerfile: Dockerfile
-    ports:
-      - "{{port}}:{{port}}"
-    environment:
-      - NODE_ENV={{environment}}{{#if envVars}}{{#each envVars}}
-      - {{@key}}={{{this}}}{{/each}}{{/if}}
-    restart: unless-stopped{{#if volumes}}
-    volumes:{{#each volumes}}
-      - {{this}}{{/each}}{{/if}}{{#if dependencies}}
-    depends_on:{{#each dependencies}}
-      - {{this}}{{/each}}{{/if}}
-    healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:{{port}}{{healthCheckEndpoint}}"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 15s
+// templates/docker-compose.node.hbs version: '3.8' services:
+{{appName}}: container_name:
+{{appName}}
+build: context: . dockerfile: Dockerfile ports: - "{{port}}:{{port}}"
+environment: - NODE_ENV={{environment}}
+{{#if envVars}}
+  {{#each envVars}}
+    -
+    {{@key}}={{{this}}}
+  {{/each}}
+{{/if}}
+restart: unless-stopped
+{{#if volumes}}
+  volumes:
+  {{#each volumes}}
+    -
+    {{this}}
+  {{/each}}
+{{/if}}
+{{#if dependencies}}
+  depends_on:
+  {{#each dependencies}}
+    -
+    {{this}}
+  {{/each}}
+{{/if}}
+networks: - app-network healthcheck: test: ["CMD", "wget", "--spider", "-q",
+"http://localhost:{{port}}{{healthCheckEndpoint}}"] interval: 30s timeout: 5s
+retries: 3 start_period: 15s networks: app-network: name:
+{{appName}}-network driver: bridge
