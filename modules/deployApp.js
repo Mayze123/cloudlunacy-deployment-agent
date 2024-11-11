@@ -27,7 +27,6 @@ async function deployApp(payload, ws) {
     envVarsToken,
   } = payload;
 
-  // Create consistent container/service name
   const serviceName = `${appName}-${environment}`
     .toLowerCase()
     .replace(/[^a-z0-9-]/g, "-");
@@ -39,61 +38,37 @@ async function deployApp(payload, ws) {
   );
 
   try {
-    // Initialize port manager
+    // Initialize port manager early
     await portManager.initialize();
 
-    // Initialize template handler early
+    // Initialize template handler
     const templateHandler = new TemplateHandler(
       path.join("/opt/cloudlunacy/templates"),
       deployConfig
     );
-
-    // Explicitly initialize templates
     await templateHandler.init();
 
-    // Check permissions before deployment
+    // Check permissions
     const permissionsOk = await ensureDeploymentPermissions();
     if (!permissionsOk) {
       throw new Error("Deployment failed: Permission check failed");
     }
 
-    // Check for required tools
-    await executeCommand("which", ["docker"]);
-    await executeCommand("which", ["docker-compose"]);
+    // Clean up existing deployment
+    await cleanupExistingDeployment(serviceName);
 
     // Set up deployment directory
     await fs.mkdir(deployDir, { recursive: true });
     process.chdir(deployDir);
 
-    // Send initial status and logs
+    // Send initial status
     sendStatus(ws, {
       deploymentId,
       status: "in_progress",
       message: "Starting deployment...",
     });
 
-    // Cleanup existing containers and networks
-    try {
-      sendLogs(
-        ws,
-        deploymentId,
-        `Cleaning up existing container: ${serviceName}`
-      );
-      await executeCommand("docker", ["stop", serviceName]).catch(() => {});
-      await executeCommand("docker", ["rm", serviceName]).catch(() => {});
-
-      // Remove existing networks
-      const networkName = "app-network";
-      await executeCommand("docker", ["network", "rm", networkName]).catch(
-        () => {}
-      );
-
-      sendLogs(ws, deploymentId, "Previous deployment cleaned up");
-    } catch (error) {
-      logger.warn("Cleanup warning:", error);
-    }
-
-    // Retrieve and set up environment variables
+    // Retrieve environment variables
     sendLogs(ws, deploymentId, "Retrieving environment variables...");
     let envVars = {};
     let envFilePath;
@@ -121,35 +96,23 @@ async function deployApp(payload, ws) {
     sendLogs(ws, deploymentId, "Cloning repository...");
     const repoUrl = `https://x-access-token:${githubToken}@github.com/${repositoryOwner}/${repositoryName}.git`;
     await executeCommand("git", ["clone", "-b", branch, repoUrl, "."]);
-    sendLogs(ws, deploymentId, "Repository cloned successfully");
 
-    // Initialize environment manager and write env files
+    // Set up environment files
     const envManager = new EnvironmentManager(deployDir);
     envFilePath = await envManager.writeEnvFile(envVars, environment);
-
-    // Also create a regular .env file
     await fs.copyFile(envFilePath, path.join(deployDir, ".env"));
 
-    sendLogs(ws, deploymentId, "Environment variables configured successfully");
+    // Get or allocate port
+    const deploymentPort = await portManager.allocatePort(appName, environment);
+    logger.info(`Using port ${deploymentPort} for ${serviceName}`);
 
-    // Verify environment files
-    const envFiles = await fs.readdir(deployDir);
-    sendLogs(
-      ws,
-      deploymentId,
-      `Environment files in directory: ${envFiles
-        .filter((f) => f.startsWith(".env"))
-        .join(", ")}`
-    );
-
-    // Generate deployment files
+    // Generate deployment files with allocated port
     sendLogs(ws, deploymentId, "Generating deployment configuration...");
-
     const files = await templateHandler.generateDeploymentFiles({
       appType,
       appName,
       environment,
-      port: requestedPort,
+      port: deploymentPort,
       envFile: path.basename(envFilePath),
       buildConfig: {
         nodeVersion: "18",
@@ -158,9 +121,6 @@ async function deployApp(payload, ws) {
       },
       domain: domain || `${appName}-${environment}.yourdomain.com`,
     });
-
-    // Use the allocated port for the rest of the deployment
-    const deploymentPort = files.allocatedPort;
 
     // Write deployment files
     await Promise.all([
@@ -171,35 +131,13 @@ async function deployApp(payload, ws) {
         : Promise.resolve(),
     ]);
 
-    // Create env loading script
-    const envLoaderContent = `
-        const dotenv = require('dotenv');
-        const path = require('path');
-        
-        // Load environment specific variables
-        const envFile = path.join(process.cwd(), '.env.${environment}');
-        const result = dotenv.config({ path: envFile });
-        
-        if (result.error) {
-            console.error('Error loading environment variables:', result.error);
-            process.exit(1);
-        }
-        
-        console.log('Environment variables loaded successfully');
-        `;
-
-    await fs.writeFile("load-env.js", envLoaderContent);
-    sendLogs(ws, deploymentId, "Environment loader script created");
-
     // Validate docker-compose file
     try {
       sendLogs(ws, deploymentId, "Validating deployment configuration...");
       const { stdout: configOutput } = await executeCommand("docker-compose", [
         "config",
       ]);
-      sendLogs(ws, deploymentId, "Docker Compose configuration:");
-      sendLogs(ws, deploymentId, configOutput);
-      sendLogs(ws, deploymentId, "Deployment configuration validated");
+      sendLogs(ws, deploymentId, "Docker Compose configuration validated");
     } catch (error) {
       throw new Error(`Invalid docker-compose configuration: ${error.message}`);
     }
@@ -207,18 +145,8 @@ async function deployApp(payload, ws) {
     // Build and start containers
     sendLogs(ws, deploymentId, "Building application...");
     await executeCommand("docker-compose", ["build", "--no-cache"]);
-    sendLogs(ws, deploymentId, "Application built successfully");
-
     sendLogs(ws, deploymentId, "Starting application...");
     await executeCommand("docker-compose", ["up", "-d", "--force-recreate"]);
-
-    // Log container status
-    const { stdout: containerLogs } = await executeCommand("docker", [
-      "logs",
-      serviceName,
-    ]);
-    sendLogs(ws, deploymentId, "Container logs:");
-    sendLogs(ws, deploymentId, containerLogs);
 
     // Configure Nginx if domain is provided
     if (domain) {
@@ -226,7 +154,7 @@ async function deployApp(payload, ws) {
         sendLogs(ws, deploymentId, `Configuring domain: ${domain}`);
         await nginxManager.configureNginx(domain, deploymentPort, deployDir);
 
-        // Execute curl to check domain accessibility
+        // Verify domain accessibility
         const maxRetries = 5;
         let retryCount = 0;
         let domainAccessible = false;
@@ -244,25 +172,9 @@ async function deployApp(payload, ws) {
           } catch (error) {
             retryCount++;
             if (retryCount < maxRetries) {
-              sendLogs(
-                ws,
-                deploymentId,
-                `Waiting for domain to become accessible (attempt ${retryCount}/${maxRetries})...`
-              );
-              await new Promise((resolve) => setTimeout(resolve, 5000)); // Wait 5 seconds between retries
+              await new Promise((resolve) => setTimeout(resolve, 5000));
             }
           }
-        }
-
-        if (!domainAccessible) {
-          logger.warn(
-            `Domain ${domain} is not yet accessible, but deployment will continue`
-          );
-          sendLogs(
-            ws,
-            deploymentId,
-            `Warning: Domain ${domain} is not yet accessible. DNS propagation may take some time.`
-          );
         }
       } catch (error) {
         logger.error(`Failed to configure domain ${domain}:`, error);
@@ -271,7 +183,6 @@ async function deployApp(payload, ws) {
           deploymentId,
           `Warning: Domain configuration encountered an error: ${error.message}`
         );
-        // Continue deployment even if domain configuration fails
       }
     }
 
@@ -306,7 +217,7 @@ async function deployApp(payload, ws) {
 
     // Cleanup on failure
     try {
-      // Get container logs before cleanup if possible
+      // Get container logs before cleanup
       try {
         const { stdout: failureLogs } = await executeCommand("docker", [
           "logs",
@@ -317,21 +228,16 @@ async function deployApp(payload, ws) {
         logger.warn("Could not retrieve container logs:", logError);
       }
 
-      // Remove Nginx config if it was created
+      // Release allocated port
+      await portManager.releasePort(appName, environment);
+
+      // Remove Nginx config if created
       if (domain) {
         await nginxManager.removeConfig(domain);
-        sendLogs(ws, deploymentId, `Removed Nginx configuration for ${domain}`);
       }
 
-      // Stop and remove containers
-      await executeCommand("docker", ["stop", serviceName]).catch(() => {});
-      await executeCommand("docker", ["rm", serviceName]).catch(() => {});
-
-      // Remove network
-      const networkName = "app-network";
-      await executeCommand("docker", ["network", "rm", networkName]).catch(
-        () => {}
-      );
+      // Clean up containers and networks
+      await cleanupExistingDeployment(serviceName);
 
       // Remove deployment directory
       await fs.rm(deployDir, { recursive: true, force: true });
@@ -339,7 +245,6 @@ async function deployApp(payload, ws) {
       logger.error("Cleanup failed:", cleanupError);
     }
   } finally {
-    // Always return to original directory
     process.chdir(currentDir);
   }
 }
@@ -551,6 +456,43 @@ async function checkDeploymentHealth(port, containerName, domain) {
       message: error.message,
       details: error.stack,
     };
+  }
+}
+
+async function cleanupExistingDeployment(serviceName) {
+  try {
+    // Stop and remove existing container
+    await executeCommand("docker", ["stop", serviceName]).catch(() => {});
+    await executeCommand("docker", ["rm", serviceName]).catch(() => {});
+
+    // Kill any process using the required port
+    const { stdout: netstatOutput } = await executeCommand("netstat", [
+      "-tlpn",
+    ]);
+    const portProcesses = netstatOutput
+      .split("\n")
+      .filter((line) => line.includes(":3000 "))
+      .map((line) => {
+        const match = line.match(/LISTEN\s+(\d+)/);
+        return match ? match[1] : null;
+      })
+      .filter(Boolean);
+
+    for (const pid of portProcesses) {
+      try {
+        await executeCommand("kill", ["-9", pid]);
+        logger.info(`Killed process ${pid} using port 3000`);
+      } catch (error) {
+        logger.warn(`Failed to kill process ${pid}: ${error.message}`);
+      }
+    }
+
+    // Remove network
+    await executeCommand("docker", ["network", "rm", "app-network"]).catch(
+      () => {}
+    );
+  } catch (error) {
+    logger.warn("Cleanup warning:", error);
   }
 }
 
