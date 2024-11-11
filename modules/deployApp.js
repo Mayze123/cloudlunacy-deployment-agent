@@ -379,7 +379,8 @@ async function checkDeploymentHealth(port, containerName, domain) {
     // Initial delay to allow container to start
     await new Promise((resolve) => setTimeout(resolve, 15000));
 
-    // Get detailed container status
+    // Get container state with detailed information
+    logger.info(`Checking container state for ${containerName}...`);
     const { stdout: containerStatus } = await executeCommand("docker", [
       "inspect",
       "--format",
@@ -387,41 +388,51 @@ async function checkDeploymentHealth(port, containerName, domain) {
       containerName,
     ]);
 
-    const containerState = JSON.parse(containerStatus);
-    logger.info("Container state:", containerState);
+    try {
+      const containerState = JSON.parse(containerStatus);
+      logger.info("Container state:", JSON.stringify(containerState, null, 2));
 
-    if (!containerState.Running) {
-      const { stdout: logs } = await executeCommand("docker", [
-        "logs",
-        containerName,
-      ]);
-      logger.error("Container failed to start. Logs:", logs);
-      throw new Error(
-        `Container failed to start: ${containerState.Error || "Unknown error"}`
-      );
+      if (!containerState.Running) {
+        // Get container logs if not running
+        const { stdout: logs } = await executeCommand("docker", [
+          "logs",
+          containerName,
+        ]);
+        logger.error("Container failed to start. Logs:", logs);
+        throw new Error(
+          `Container failed to start: ${
+            containerState.Error || "Unknown error"
+          }`
+        );
+      }
+    } catch (parseError) {
+      logger.error("Failed to parse container state:", containerStatus);
+      throw new Error("Failed to parse container state");
     }
 
-    // Check network connectivity
+    // Check network connectivity with detailed network info
+    logger.info(`Checking network configuration for ${containerName}...`);
     const { stdout: networkInfo } = await executeCommand("docker", [
       "inspect",
       "--format",
-      "{{json .NetworkSettings.Networks}}",
+      "{{range $network, $config := .NetworkSettings.Networks}}Network: {{$network}}, IP: {{$config.IPAddress}}, Gateway: {{$config.Gateway}}, MacAddress: {{$config.MacAddress}}{{println}}{{end}}",
       containerName,
     ]);
 
-    logger.info("Container network info:", networkInfo);
+    logger.info("Network configuration:", networkInfo);
 
-    // Check port bindings
-    const { stdout: portInfo } = await executeCommand("docker", [
+    // Get detailed port bindings
+    logger.info(`Checking port bindings for ${containerName}...`);
+    const { stdout: portBindings } = await executeCommand("docker", [
       "inspect",
       "--format",
-      "{{json .NetworkSettings.Ports}}",
+      "{{range $p, $conf := .NetworkSettings.Ports}}{{$p}} -> {{range $conf}}{{.HostIp}}:{{.HostPort}}{{end}}{{println}}{{end}}",
       containerName,
     ]);
 
-    logger.info("Container port bindings:", portInfo);
+    logger.info("Port bindings:", portBindings);
 
-    // Check port accessibility
+    // Check port accessibility using netcat
     logger.info(`Checking port ${port} availability...`);
     const portCheck = await new Promise((resolve) => {
       const net = require("net");
@@ -429,41 +440,46 @@ async function checkDeploymentHealth(port, containerName, domain) {
 
       const timeout = setTimeout(() => {
         socket.destroy();
+        logger.warn(`Port ${port} connection timed out`);
         resolve(false);
       }, 5000);
 
       socket.on("connect", () => {
         clearTimeout(timeout);
         socket.end();
+        logger.info(`Successfully connected to port ${port}`);
         resolve(true);
       });
 
       socket.on("error", (error) => {
         clearTimeout(timeout);
-        logger.error(`Port connection error:`, error);
+        logger.error("Port connection error:", error);
         resolve(false);
       });
     });
 
     if (!portCheck) {
-      // Get list of all ports in use
+      // Get netstat information for debugging
       const { stdout: netstatOutput } = await executeCommand("netstat", [
         "-tulpn",
       ]);
       logger.error("Port not accessible. Current port usage:", netstatOutput);
 
-      // Get container logs
+      // Get recent container logs
       const { stdout: logs } = await executeCommand("docker", [
         "logs",
+        "--tail",
+        "50",
         containerName,
       ]);
-      logger.error("Container logs:", logs);
+      logger.error("Recent container logs:", logs);
 
       throw new Error(`Port ${port} is not accessible`);
     }
 
     // Check application health endpoint
     try {
+      logger.info(`Checking application health endpoint on port ${port}...`);
       const { stdout: healthCheck } = await executeCommand("curl", [
         "--max-time",
         "5",
@@ -472,42 +488,60 @@ async function checkDeploymentHealth(port, containerName, domain) {
       ]);
       logger.info("Health endpoint response:", healthCheck);
     } catch (error) {
-      logger.warn("Health endpoint check failed:", error);
+      logger.warn("Health endpoint check failed:", error.message);
     }
 
-    // Check domain configuration if provided
+    // Check nginx configuration if domain is provided
     if (domain) {
       logger.info(`Verifying domain configuration for ${domain}`);
 
-      // Verify nginx config
+      // Test nginx configuration
       const { stdout: nginxStatus } = await executeCommand("sudo", [
         "nginx",
         "-t",
       ]);
       logger.info("Nginx configuration status:", nginxStatus);
 
-      // Check local domain resolution
+      // Test domain resolution locally
       try {
+        logger.info(`Testing local domain access for ${domain}...`);
         const { stdout: localCheck } = await executeCommand("curl", [
           "--max-time",
           "5",
-          "-i",
+          "--verbose",
           "-H",
           `"Host: ${domain}"`,
           `http://localhost:${port}`,
         ]);
         logger.info("Local domain check response:", localCheck);
       } catch (error) {
-        logger.warn("Local domain check failed:", error);
+        logger.warn("Local domain check failed:", error.message);
       }
     }
+
+    // Get final container state and logs
+    const { stdout: finalState } = await executeCommand("docker", [
+      "inspect",
+      "--format",
+      "{{.State.Status}} (Running: {{.State.Running}}, ExitCode: {{.State.ExitCode}}, Health: {{.State.Health.Status}})",
+      containerName,
+    ]);
+    logger.info("Final container state:", finalState);
+
+    const { stdout: containerLogs } = await executeCommand("docker", [
+      "logs",
+      "--tail",
+      "20",
+      containerName,
+    ]);
+    logger.info("Recent container logs:", containerLogs);
 
     return {
       healthy: true,
       details: {
-        containerState,
-        portBinding: JSON.parse(portInfo),
-        networkInfo: JSON.parse(networkInfo),
+        containerState: finalState,
+        portBindings,
+        networkInfo,
       },
     };
   } catch (error) {
