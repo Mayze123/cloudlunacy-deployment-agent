@@ -16,39 +16,41 @@ class NginxManager {
     try {
       logger.info(`Configuring Nginx for ${domain} on port ${port}`);
 
-      // Check if configuration already exists
-      const existingConfig = await this.getExistingConfig(domain);
-      if (existingConfig) {
-        logger.info(`Found existing Nginx config for ${domain}`);
-        
-        // Check if the port has changed
-        const currentPort = this.extractPortFromConfig(existingConfig);
-        if (currentPort === port) {
-          logger.info(`Port ${port} unchanged for ${domain}, skipping Nginx reconfiguration`);
-          return;
-        }
-        logger.info(`Port changed from ${currentPort} to ${port} for ${domain}, updating configuration`);
+      // Read template
+      const template = await fs.readFile(this.templatePath, 'utf-8');
+      if (!template) {
+        throw new Error('Nginx template not found');
       }
 
-      const nginxConfig = await this.generateNginxConfig(domain, port);
-      
-      // Write configuration
+      // Replace variables
+      const config = template
+        .replace(/\{\{domain\}\}/g, domain)
+        .replace(/\{\{port\}\}/g, port);
+
+      // Write configuration using sudo
       const configPath = path.join(this.sitesAvailablePath, domain);
-      await executeCommand('sudo', ['bash', '-c', `echo '${nginxConfig}' | sudo tee ${configPath}`]);
+      await executeCommand('sudo', ['bash', '-c', `echo '${config}' | sudo tee ${configPath} > /dev/null`]);
       
-      // Create symlink if it doesn't exist
+      // Create symlink
       const enabledPath = path.join(this.sitesEnabledPath, domain);
-      if (!await this.checkFileExists(enabledPath)) {
-        await executeCommand('sudo', ['ln', '-sf', configPath, enabledPath]);
+      await executeCommand('sudo', ['ln', '-sf', configPath, enabledPath]);
+
+      // Test configuration
+      try {
+        await executeCommand('sudo', ['nginx', '-t']);
+      } catch (error) {
+        logger.error('Nginx configuration test failed:', error);
+        await this.collectNginxDiagnostics();
+        throw error;
       }
 
-      // Verify configuration and reload
-      await this.verifyAndReload();
+      // Reload nginx
+      await executeCommand('sudo', ['systemctl', 'reload', 'nginx']);
       
       logger.info(`Nginx configuration completed for ${domain}`);
     } catch (error) {
       logger.error('Nginx configuration failed:', error);
-      await this.collectNginxDiagnostics(error);
+      await this.collectNginxDiagnostics();
       throw error;
     }
   }
@@ -100,9 +102,10 @@ class NginxManager {
     }
   }
 
-  async collectNginxDiagnostics(error) {
+  async collectNginxDiagnostics() {
     try {
-      const errorLog = await executeCommand('sudo', ['tail', '-n', '50', '/var/log/nginx/error.log'])
+      // Use sudo with proper permissions
+      const errorLog = await executeCommand('sudo', ['cat', '/var/log/nginx/error.log'])
         .catch(() => ({ stdout: 'Could not read nginx error log' }));
       
       const journalLog = await executeCommand(
@@ -112,9 +115,8 @@ class NginxManager {
 
       logger.error('Nginx error log:', errorLog.stdout);
       logger.error('Journal log:', journalLog.stdout);
-      logger.error('Original error:', error.message);
-    } catch (diagError) {
-      logger.error('Failed to collect Nginx diagnostics:', diagError);
+    } catch (error) {
+      logger.error('Failed to collect Nginx diagnostics:', error);
     }
   }
 
@@ -140,6 +142,8 @@ class NginxManager {
       throw error;
     }
   }
+
+  
 }
 
 module.exports = new NginxManager();

@@ -354,26 +354,22 @@ install_nginx() {
 $USERNAME ALL=(ALL) NOPASSWD: /usr/sbin/nginx
 $USERNAME ALL=(ALL) NOPASSWD: /bin/systemctl reload nginx
 $USERNAME ALL=(ALL) NOPASSWD: /bin/systemctl restart nginx
+$USERNAME ALL=(ALL) NOPASSWD: /bin/cat /var/log/nginx/error.log
+$USERNAME ALL=(ALL) NOPASSWD: /bin/cat /etc/nginx/nginx.conf
+$USERNAME ALL=(ALL) NOPASSWD: /bin/journalctl -xeu nginx.service --no-pager -n 50
 $USERNAME ALL=(ALL) NOPASSWD: /usr/bin/tee /etc/nginx/sites-available/*
 $USERNAME ALL=(ALL) NOPASSWD: /usr/bin/tee /etc/nginx/sites-enabled/*
 $USERNAME ALL=(ALL) NOPASSWD: /bin/ln -sf /etc/nginx/sites-available/* /etc/nginx/sites-enabled/*
 $USERNAME ALL=(ALL) NOPASSWD: /bin/rm -f /etc/nginx/sites-available/*
 $USERNAME ALL=(ALL) NOPASSWD: /bin/rm -f /etc/nginx/sites-enabled/*
+$USERNAME ALL=(ALL) NOPASSWD: /bin/mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled
+$USERNAME ALL=(ALL) NOPASSWD: /bin/tail -n 50 /var/log/nginx/error.log
 EOF
 
     # Set proper permissions on sudoers file
     chmod 440 "$SUDOERS_FILE"
     
-    # Test and reload nginx
-    if ! nginx -t; then
-        log_error "Nginx configuration test failed"
-        cat "$NGINX_CONF"
-        exit 1
-    fi
-    
-    systemctl reload nginx
-    
-    # Create nginx template directory
+    # Create required directories for templates
     NGINX_TEMPLATE_DIR="$BASE_DIR/templates/nginx"
     mkdir -p "$NGINX_TEMPLATE_DIR"
     
@@ -392,6 +388,11 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+        
+        # Add timeout configurations
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 60s;
+        proxy_read_timeout 60s;
     }
 
     location /socket.io/ {
@@ -403,16 +404,58 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+        
+        # WebSocket specific timeouts
+        proxy_connect_timeout 7d;
+        proxy_send_timeout 7d;
+        proxy_read_timeout 7d;
     }
+
+    # Add general security headers
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "no-referrer-when-downgrade" always;
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+
+    # Customize error pages
+    error_page 404 /404.html;
+    error_page 500 502 503 504 /50x.html;
+    
+    # Enable gzip compression
+    gzip on;
+    gzip_disable "msie6";
+    gzip_vary on;
+    gzip_proxied any;
+    gzip_comp_level 6;
+    gzip_types text/plain text/css text/xml application/json application/javascript application/xml+rss application/atom+xml image/svg+xml;
 }
 EOF
 
-    # Set template permissions
-    chown -R "$USERNAME:$USERNAME" "$NGINX_TEMPLATE_DIR"
-    chmod 750 "$NGINX_TEMPLATE_DIR"
+    # Set template directory permissions
+    chown -R "$USERNAME:$USERNAME" "$BASE_DIR/templates"
+    chmod -R 750 "$BASE_DIR/templates"
     chmod 640 "$NGINX_TEMPLATE_DIR/virtual-host.template"
     
+    # Test nginx configuration
+    if ! nginx -t; then
+        log_error "Nginx configuration test failed"
+        cat "$NGINX_CONF"
+        exit 1
+    fi
+    
+    # Reload nginx to apply changes
+    systemctl reload nginx
+    
     log "Nginx setup completed successfully"
+    
+    # Verify template existence
+    if [ -f "$NGINX_TEMPLATE_DIR/virtual-host.template" ]; then
+        log "Nginx template created successfully at $NGINX_TEMPLATE_DIR/virtual-host.template"
+    else
+        log_error "Failed to create Nginx template"
+        exit 1
+    fi
 }
 
 # Function to create dedicated user and directories
@@ -536,11 +579,13 @@ EOF'
 setup_nginx_templates() {
     log "Setting up Nginx configuration templates..."
     
-    TEMPLATES_DIR="$BASE_DIR/templates/nginx"
-    mkdir -p "$TEMPLATES_DIR"
+    # Create templates directory with proper ownership
+    NGINX_TEMPLATE_DIR="$BASE_DIR/templates/nginx"
+    mkdir -p "$NGINX_TEMPLATE_DIR"
+    chown -R "$USERNAME:$USERNAME" "$BASE_DIR/templates"
     
-    # Create a basic Nginx virtual host template
-    cat <<EOF > "$TEMPLATES_DIR/virtual-host.template"
+    # Create the virtual host template
+    cat > "$NGINX_TEMPLATE_DIR/virtual-host.template" << 'EOF'
 server {
     listen 80;
     server_name {{domain}};
@@ -548,33 +593,32 @@ server {
     location / {
         proxy_pass http://127.0.0.1:{{port}};
         proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
     }
 
     location /socket.io/ {
         proxy_pass http://127.0.0.1:{{port}};
         proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
     }
 }
 EOF
 
-    # Set proper ownership and permissions
-    chown -R "$USERNAME":"$USERNAME" "$TEMPLATES_DIR"
-    chmod 750 "$TEMPLATES_DIR"
-    chmod 640 "$TEMPLATES_DIR/virtual-host.template"
+    # Set proper permissions
+    chown "$USERNAME:$USERNAME" "$NGINX_TEMPLATE_DIR/virtual-host.template"
+    chmod 640 "$NGINX_TEMPLATE_DIR/virtual-host.template"
     
-    log "Nginx templates created successfully."
+    log "Nginx templates created successfully"
 }
 
 setup_nginx_permissions() {
@@ -745,7 +789,6 @@ main() {
     setup_user_directories
     setup_docker_permissions
     setup_nginx_permissions
-    setup_nginx_templates
     setup_ssh "$GITHUB_SSH_KEY"
     download_agent
     install_agent_dependencies
