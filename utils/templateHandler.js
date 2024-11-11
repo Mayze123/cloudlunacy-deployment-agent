@@ -6,6 +6,7 @@ const { exec } = require('child_process');
 const util = require('util');
 const { executeCommand } = require('./executor');
 const execAsync = util.promisify(exec);
+const portManager = require('./portManager');
 
 class TemplateHandler {
   constructor(templatesDir, deployConfig) {
@@ -211,75 +212,123 @@ class TemplateHandler {
   }
 
   async generateDeploymentFiles(appConfig) {
-    // Ensure templates exist before generating files
-    await this.ensureTemplatesExist();
-    
-    logger.info('Starting file generation with config:', JSON.stringify(appConfig, null, 2));
+    logger.info('Starting file generation with detailed config:', JSON.stringify({
+        ...appConfig,
+        githubToken: '[REDACTED]' 
+    }, null, 2));
 
     const {
-      appType,
-      appName,
-      environment,
-      port,
-      envFile,
-      buildConfig = {},
+        appType,
+        appName,
+        environment,
+        port: requestedPort,
+        envFile,
+        buildConfig = {},
+        domain
     } = appConfig;
 
-    const config = this.mergeDefaults(appType, buildConfig);
-    logger.info('Merged config:', JSON.stringify(config, null, 2));
+    // Get or allocate port
+    let deploymentPort = requestedPort;
+    if (!deploymentPort) {
+        deploymentPort = await portManager.allocatePort(appName, environment);
+        logger.info(`Allocated port ${deploymentPort} for ${appName}-${environment}`);
+    } else {
+        logger.info(`Using requested port ${deploymentPort} for ${appName}-${environment}`);
+    }
 
-    const files = {};
+    const config = this.mergeDefaults(appType, buildConfig);
+    logger.info('Merged configuration:', JSON.stringify(config, null, 2));
+
     const serviceName = `${appName}-${environment}`.toLowerCase().replace(/[^a-z0-9-]/g, '-');
 
     const dockerComposeContent = `version: "3.8"
 services:
-  ${serviceName}:
-    container_name: ${serviceName}
-    build:
-      context: .
-      dockerfile: Dockerfile
-    ports:
-      - "${port}:${port}"
-    environment:
-      - NODE_ENV=${environment}
-    env_file:
-      - .env.${environment}
-    restart: unless-stopped
-    networks:
-      - app-network
+${serviceName}:
+container_name: ${serviceName}
+build:
+  context: .
+  dockerfile: Dockerfile
+ports:
+  - "${deploymentPort}:${this.deployConfig[appType].defaultPort}"
+environment:
+  - NODE_ENV=${environment}
+  - PORT=${this.deployConfig[appType].defaultPort}
+env_file:
+  - .env.${environment}
+restart: unless-stopped
+networks:
+  - app-network
+healthcheck:
+  test: ["CMD", "curl", "-f", "http://localhost:${this.deployConfig[appType].defaultPort}/health"]
+  interval: 30s
+  timeout: 10s
+  retries: 3
+  start_period: 40s
 
 networks:
-  app-network:
-    driver: bridge`;
+app-network:
+driver: bridge`;
 
     const dockerfileContent = `FROM node:18-alpine
+
+# Install curl for healthcheck
+RUN apk add --no-cache curl
+
 WORKDIR /app
+
+# Copy package files first for better caching
 COPY package*.json ./
+
+# Install dependencies
 RUN npm ci --only=production
+
+# Copy application files
 COPY . .
+
+# Copy environment file
 COPY .env.${environment} .env
+
+# Set environment variables
 ENV NODE_ENV=${environment}
-EXPOSE ${port}
+ENV PORT=${this.deployConfig[appType].defaultPort}
 
-# Add explicit dotenv loading
-RUN echo "require('dotenv').config();" > load-env.js
+# Create healthcheck endpoint and dotenv loading script
+RUN echo "const http=require('http');const server=http.createServer((req,res)=>{if(req.url==='/health'){res.writeHead(200);res.end('OK');}});server.listen(${this.deployConfig[appType].defaultPort});" > healthcheck.js && \
+echo "require('dotenv').config(); require('./healthcheck');" > load-env.js
 
-CMD ["sh", "-c", "node load-env.js && npm start"]`;
+# Start the application
+CMD ["sh", "-c", "node load-env.js & npm start"]`;
 
-    files.dockerCompose = dockerComposeContent;
-    files.dockerfile = dockerfileContent;
+    logger.info('Generated docker-compose.yml:', dockerComposeContent);
+    logger.info('Generated Dockerfile:', dockerfileContent);
 
-    logger.info('Generated docker-compose content:', dockerComposeContent);
-    logger.info('Generated dockerfile content:', dockerfileContent);
-
+    // Validate the generated files
+    const tempValidationDir = `/tmp/validate-${Date.now()}`;
     try {
-      await this.validateGeneratedFiles(files);
-      return files;
+        await fs.mkdir(tempValidationDir, { recursive: true });
+        await fs.writeFile(path.join(tempValidationDir, 'docker-compose.yml'), dockerComposeContent);
+        await fs.writeFile(path.join(tempValidationDir, 'Dockerfile'), dockerfileContent);
+        await fs.writeFile(path.join(tempValidationDir, `.env.${environment}`), 'NODE_ENV=production\n');
+
+        const { stdout: validationOutput } = await executeCommand(
+            'docker-compose', 
+            ['config'], 
+            { cwd: tempValidationDir }
+        );
+        logger.info('Docker compose validation output:', validationOutput);
     } catch (error) {
-      logger.error('Validation failed:', error);
-      throw new Error(`Failed to generate deployment files: ${error.message}`);
+        logger.error('File validation failed:', error);
+        throw error;
+    } finally {
+        await fs.rm(tempValidationDir, { recursive: true, force: true }).catch(() => {});
     }
-  }
+
+    return {
+        dockerCompose: dockerComposeContent,
+        dockerfile: dockerfileContent,
+        allocatedPort: deploymentPort
+    };
+}
 
   async validateConfig(appConfig) {
     const required = ['appType', 'appName', 'environment', 'port'];
