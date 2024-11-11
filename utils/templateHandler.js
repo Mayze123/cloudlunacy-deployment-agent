@@ -12,21 +12,23 @@ class TemplateHandler {
     this.deployConfig = this.processConfigInheritance(deployConfig);
     this.templates = {};
     this.registerHelpers();
-    this.ensureTemplatesExist().catch(error => {
-      logger.error('Failed to initialize templates:', error);
-    });
+  }
+
+  async init() {
+    await this.ensureTemplatesExist();
   }
 
   async ensureTemplatesExist() {
+    logger.info('Ensuring all required templates exist...');
+    
     try {
-      // Ensure templates directory exists
-      await fs.mkdir(this.templatesDir, { recursive: true });
+      // Create base templates directory
+      await executeCommand('sudo', ['mkdir', '-p', this.templatesDir]);
       
-      // Ensure nginx templates directory exists
+      // Create nginx templates directory
       const nginxTemplateDir = path.join(this.templatesDir, 'nginx');
-      await fs.mkdir(nginxTemplateDir, { recursive: true });
+      await executeCommand('sudo', ['mkdir', '-p', nginxTemplateDir]);
 
-      // Define the virtual host template content
       const virtualHostTemplate = `server {
     listen 80;
     server_name {{domain}};
@@ -62,50 +64,22 @@ class TemplateHandler {
         proxy_send_timeout 7d;
         proxy_read_timeout 7d;
     }
-
-    # Add security headers
-    add_header X-Frame-Options "SAMEORIGIN" always;
-    add_header X-XSS-Protection "1; mode=block" always;
-    add_header X-Content-Type-Options "nosniff" always;
-    add_header Referrer-Policy "no-referrer-when-downgrade" always;
-    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
-
-    # Customize error pages
-    error_page 404 /404.html;
-    error_page 500 502 503 504 /50x.html;
-
-    # Enable gzip compression
-    gzip on;
-    gzip_disable "msie6";
-    gzip_vary on;
-    gzip_proxied any;
-    gzip_comp_level 6;
-    gzip_types text/plain text/css text/xml application/json application/javascript application/xml+rss application/atom+xml image/svg+xml;
 }`;
 
-      // Write the virtual host template if it doesn't exist
+      // Write the template file using sudo
       const virtualHostPath = path.join(nginxTemplateDir, 'virtual-host.template');
-      try {
-        await fs.access(virtualHostPath);
-        logger.info('Nginx virtual host template already exists');
-      } catch {
-        await fs.writeFile(virtualHostPath, virtualHostTemplate);
-        logger.info('Created Nginx virtual host template');
-      }
+      await executeCommand('sudo', ['bash', '-c', `cat > ${virtualHostPath} << 'EOL'
+${virtualHostTemplate}
+EOL`]);
 
-      // Set proper permissions
-      await fs.chmod(virtualHostPath, 0o644);
+      // Set proper permissions and ownership
+      await executeCommand('sudo', ['chown', 'cloudlunacy:cloudlunacy', virtualHostPath]);
+      await executeCommand('sudo', ['chmod', '644', virtualHostPath]);
       
-      // Ensure proper ownership
-      try {
-        await execAsync(`chown cloudlunacy:cloudlunacy ${virtualHostPath}`);
-      } catch (error) {
-        logger.warn('Failed to set template ownership:', error);
-      }
-
+      logger.info('Templates created successfully');
       return true;
     } catch (error) {
-      logger.error('Failed to ensure templates exist:', error);
+      logger.error('Failed to create templates:', error);
       throw error;
     }
   }
@@ -242,6 +216,9 @@ class TemplateHandler {
   }
 
   async generateDeploymentFiles(appConfig) {
+    // Ensure templates exist before generating files
+    await this.ensureTemplatesExist();
+    
     logger.info('Starting file generation with config:', JSON.stringify(appConfig, null, 2));
 
     const {
@@ -257,10 +234,8 @@ class TemplateHandler {
     logger.info('Merged config:', JSON.stringify(config, null, 2));
 
     const files = {};
-    // Normalize service name to be consistent across all uses
     const serviceName = `${appName}-${environment}`.toLowerCase().replace(/[^a-z0-9-]/g, '-');
 
-    // Generate docker-compose.yml with explicit env_file configuration
     const dockerComposeContent = `version: "3.8"
 services:
   ${serviceName}:
@@ -282,7 +257,6 @@ networks:
   app-network:
     driver: bridge`;
 
-    // Generate Dockerfile with explicit dotenv loading
     const dockerfileContent = `FROM node:18-alpine
 WORKDIR /app
 COPY package*.json ./
@@ -303,7 +277,6 @@ CMD ["sh", "-c", "node load-env.js && npm start"]`;
     logger.info('Generated docker-compose content:', dockerComposeContent);
     logger.info('Generated dockerfile content:', dockerfileContent);
 
-    // Validate the generated files
     try {
       await this.validateGeneratedFiles(files);
       return files;

@@ -34,6 +34,16 @@ async function deployApp(payload, ws) {
     logger.info(`Starting deployment ${deploymentId} for ${appType} app: ${appName}`);
     
     try {
+
+        // Initialize template handler early
+        const templateHandler = new TemplateHandler(
+            path.join('/opt/cloudlunacy/templates'),
+            deployConfig
+        );
+        
+        // Explicitly initialize templates
+        await templateHandler.init();
+
         // Check permissions before deployment
         const permissionsOk = await ensureDeploymentPermissions();
         if (!permissionsOk) {
@@ -110,14 +120,9 @@ async function deployApp(payload, ws) {
         const envFiles = await fs.readdir(deployDir);
         sendLogs(ws, deploymentId, `Environment files in directory: ${envFiles.filter(f => f.startsWith('.env')).join(', ')}`);
 
-        // Initialize template handler
-        const templateHandler = new TemplateHandler(
-            path.join('/opt/cloudlunacy/templates'),
-            deployConfig
-        );
-
         // Generate deployment files
         sendLogs(ws, deploymentId, 'Generating deployment configuration...');
+
         const files = await templateHandler.generateDeploymentFiles({
             appType,
             appName,
