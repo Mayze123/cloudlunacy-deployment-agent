@@ -4,6 +4,7 @@ const path = require('path');
 const logger = require('./logger');
 const { exec } = require('child_process');
 const util = require('util');
+const { executeCommand } = require('./executor');
 const execAsync = util.promisify(exec);
 
 class TemplateHandler {
