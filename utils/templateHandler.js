@@ -24,11 +24,11 @@ class TemplateHandler {
     
     try {
       // Create base templates directory
-      await executeCommand('sudo', ['mkdir', '-p', this.templatesDir]);
+      await fs.mkdir(this.templatesDir, { recursive: true });
       
       // Create nginx templates directory
       const nginxTemplateDir = path.join(this.templatesDir, 'nginx');
-      await executeCommand('sudo', ['mkdir', '-p', nginxTemplateDir]);
+      await fs.mkdir(nginxTemplateDir, { recursive: true });
 
       const virtualHostTemplate = `server {
     listen 80;
@@ -67,15 +67,9 @@ class TemplateHandler {
     }
 }`;
 
-      // Write the template file using sudo
+      // Write the template file
       const virtualHostPath = path.join(nginxTemplateDir, 'virtual-host.template');
-      await executeCommand('sudo', ['bash', '-c', `cat > ${virtualHostPath} << 'EOL'
-${virtualHostTemplate}
-EOL`]);
-
-      // Set proper permissions and ownership
-      await executeCommand('sudo', ['chown', 'cloudlunacy:cloudlunacy', virtualHostPath]);
-      await executeCommand('sudo', ['chmod', '644', virtualHostPath]);
+      await fs.writeFile(virtualHostPath, virtualHostTemplate, 'utf8');
       
       logger.info('Templates created successfully');
       return true;
