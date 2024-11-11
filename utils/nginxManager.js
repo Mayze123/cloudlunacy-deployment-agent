@@ -7,54 +7,127 @@ const path = require('path');
 const shelljs = require('shelljs');
 
 class NginxManager {
-  constructor() {
-    this.sitesAvailablePath = '/etc/nginx/sites-available';
-    this.sitesEnabledPath = '/etc/nginx/sites-enabled';
-    this.templatePath = '/opt/cloudlunacy/templates/nginx/virtual-host.template';
-  }
-
-  async configureNginx(domain, port, deployDir) {
-    try {
-      logger.info(`Configuring Nginx for ${domain} on port ${port}`);
-
-      // Read template
-      const template = await fs.readFile(this.templatePath, 'utf-8');
-      if (!template) {
-        throw new Error('Nginx template not found');
+    constructor() {
+        this.sitesAvailablePath = '/etc/nginx/sites-available';
+        this.sitesEnabledPath = '/etc/nginx/sites-enabled';
+        this.templatePath = '/opt/cloudlunacy/templates/nginx/virtual-host.template';
+        this.initialize().catch(error => {
+          logger.error('Failed to initialize NginxManager:', error);
+        });
+      }
+    
+      async initialize() {
+        try {
+          // Ensure required directories exist
+          await this.ensureDirectories();
+          
+          // Ensure proper permissions are set
+          await this.ensurePermissions();
+          
+          // Verify Nginx configuration
+          await this.verifyNginxConfig();
+          
+          logger.info('NginxManager initialized successfully');
+        } catch (error) {
+          logger.error('NginxManager initialization failed:', error);
+          throw error;
+        }
       }
 
-      // Replace variables
-      const config = template
-        .replace(/\{\{domain\}\}/g, domain)
-        .replace(/\{\{port\}\}/g, port);
-
-      // Write configuration using sudo
-      const configPath = path.join(this.sitesAvailablePath, domain);
-      await executeCommand('sudo', ['bash', '-c', `echo '${config}' | sudo tee ${configPath} > /dev/null`]);
-      
-      // Create symlink
-      const enabledPath = path.join(this.sitesEnabledPath, domain);
-      await executeCommand('sudo', ['ln', '-sf', configPath, enabledPath]);
-
-      // Test configuration
-      try {
-        await executeCommand('sudo', ['nginx', '-t']);
-      } catch (error) {
-        logger.error('Nginx configuration test failed:', error);
-        await this.collectNginxDiagnostics();
-        throw error;
+      async ensureDirectories() {
+        const dirs = [
+          this.sitesAvailablePath,
+          this.sitesEnabledPath,
+          path.dirname(this.templatePath)
+        ];
+    
+        for (const dir of dirs) {
+          try {
+            await executeCommand('sudo', ['mkdir', '-p', dir]);
+          } catch (error) {
+            logger.error(`Failed to create directory ${dir}:`, error);
+            throw error;
+          }
+        }
       }
 
-      // Reload nginx
-      await executeCommand('sudo', ['systemctl', 'reload', 'nginx']);
-      
-      logger.info(`Nginx configuration completed for ${domain}`);
-    } catch (error) {
-      logger.error('Nginx configuration failed:', error);
-      await this.collectNginxDiagnostics();
-      throw error;
-    }
-  }
+      async ensurePermissions() {
+        try {
+          // Set directory permissions
+          await executeCommand('sudo', ['chmod', '755', this.sitesAvailablePath]);
+          await executeCommand('sudo', ['chmod', '755', this.sitesEnabledPath]);
+          
+          // Ensure cloudlunacy user has proper permissions via www-data group
+          await executeCommand('sudo', ['chown', '-R', 'root:www-data', this.sitesAvailablePath]);
+          await executeCommand('sudo', ['chown', '-R', 'root:www-data', this.sitesEnabledPath]);
+          
+          // Add cloudlunacy user to www-data group if not already added
+          await executeCommand('sudo', ['usermod', '-aG', 'www-data', 'cloudlunacy']).catch(() => {});
+        } catch (error) {
+          logger.error('Failed to set permissions:', error);
+          throw error;
+        }
+      }
+    
+      async verifyNginxConfig() {
+        try {
+          await executeCommand('sudo', ['nginx', '-t']);
+        } catch (error) {
+          logger.error('Nginx configuration test failed:', error);
+          throw error;
+        }
+      }
+    
+
+      async configureNginx(domain, port, deployDir) {
+        try {
+          logger.info(`Configuring Nginx for ${domain} on port ${port}`);
+    
+          // Ensure template exists
+          await this.ensureTemplate();
+    
+          // Read template
+          const template = await fs.readFile(this.templatePath, 'utf-8');
+          if (!template) {
+            throw new Error('Nginx template not found');
+          }
+    
+          // Replace variables
+          const config = template
+            .replace(/\{\{domain\}\}/g, domain)
+            .replace(/\{\{port\}\}/g, port);
+    
+          // Write configuration
+          const configPath = path.join(this.sitesAvailablePath, domain);
+          await executeCommand('sudo', ['bash', '-c', `echo '${config}' | sudo tee ${configPath} > /dev/null`]);
+          
+          // Create symlink
+          const enabledPath = path.join(this.sitesEnabledPath, domain);
+          await executeCommand('sudo', ['ln', '-sf', configPath, enabledPath]);
+    
+          // Test and reload configuration
+          await this.verifyAndReload();
+          
+          logger.info(`Nginx configuration completed for ${domain}`);
+        } catch (error) {
+          logger.error('Nginx configuration failed:', error);
+          await this.collectNginxDiagnostics();
+          throw error;
+        }
+      }
+    
+      async ensureTemplate() {
+        try {
+          // Check if template exists
+          await fs.access(this.templatePath);
+        } catch {
+          // Template doesn't exist, try to recreate it
+          logger.warn('Nginx template not found, attempting to recreate it');
+          const templateHandler = require('./templateHandler');
+          await templateHandler.ensureTemplatesExist();
+        }
+      }
+    
 
   async getExistingConfig(domain) {
     try {

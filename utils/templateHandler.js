@@ -12,6 +12,102 @@ class TemplateHandler {
     this.deployConfig = this.processConfigInheritance(deployConfig);
     this.templates = {};
     this.registerHelpers();
+    this.ensureTemplatesExist().catch(error => {
+      logger.error('Failed to initialize templates:', error);
+    });
+  }
+
+  async ensureTemplatesExist() {
+    try {
+      // Ensure templates directory exists
+      await fs.mkdir(this.templatesDir, { recursive: true });
+      
+      // Ensure nginx templates directory exists
+      const nginxTemplateDir = path.join(this.templatesDir, 'nginx');
+      await fs.mkdir(nginxTemplateDir, { recursive: true });
+
+      // Define the virtual host template content
+      const virtualHostTemplate = `server {
+    listen 80;
+    server_name {{domain}};
+
+    location / {
+        proxy_pass http://127.0.0.1:{{port}};
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # Add timeout configurations
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 60s;
+        proxy_read_timeout 60s;
+    }
+
+    location /socket.io/ {
+        proxy_pass http://127.0.0.1:{{port}};
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # WebSocket specific timeouts
+        proxy_connect_timeout 7d;
+        proxy_send_timeout 7d;
+        proxy_read_timeout 7d;
+    }
+
+    # Add security headers
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "no-referrer-when-downgrade" always;
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+
+    # Customize error pages
+    error_page 404 /404.html;
+    error_page 500 502 503 504 /50x.html;
+
+    # Enable gzip compression
+    gzip on;
+    gzip_disable "msie6";
+    gzip_vary on;
+    gzip_proxied any;
+    gzip_comp_level 6;
+    gzip_types text/plain text/css text/xml application/json application/javascript application/xml+rss application/atom+xml image/svg+xml;
+}`;
+
+      // Write the virtual host template if it doesn't exist
+      const virtualHostPath = path.join(nginxTemplateDir, 'virtual-host.template');
+      try {
+        await fs.access(virtualHostPath);
+        logger.info('Nginx virtual host template already exists');
+      } catch {
+        await fs.writeFile(virtualHostPath, virtualHostTemplate);
+        logger.info('Created Nginx virtual host template');
+      }
+
+      // Set proper permissions
+      await fs.chmod(virtualHostPath, 0o644);
+      
+      // Ensure proper ownership
+      try {
+        await execAsync(`chown cloudlunacy:cloudlunacy ${virtualHostPath}`);
+      } catch (error) {
+        logger.warn('Failed to set template ownership:', error);
+      }
+
+      return true;
+    } catch (error) {
+      logger.error('Failed to ensure templates exist:', error);
+      throw error;
+    }
   }
 
   processConfigInheritance(config) {
