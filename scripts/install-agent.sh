@@ -389,18 +389,23 @@ setup_traefik_proxy() {
         systemctl disable nginx || true
     fi
 
-    # Create Traefik directories
+    # Create base Traefik directory
     TRAEFIK_DIR="${BASE_DIR}/traefik"
-    mkdir -p "${TRAEFIK_DIR}"/{config,certs}
-    touch "${TRAEFIK_DIR}/acme.json"
-    chmod 600 "${TRAEFIK_DIR}/acme.json"
-    chown -R "$USERNAME:$USERNAME" "${TRAEFIK_DIR}"
-    
-    # Create Traefik dynamic configuration directory
+    mkdir -p "${TRAEFIK_DIR}"
+
+    # Create subdirectories
     mkdir -p "${TRAEFIK_DIR}/config"
-    
-    # Create base Traefik configuration
-    cat > "${TRAEFIK_DIR}/traefik.yml" << EOF
+    mkdir -p "${TRAEFIK_DIR}/certs"
+
+    # Create and secure acme.json
+    if [ ! -f "${TRAEFIK_DIR}/acme.json" ]; then
+        touch "${TRAEFIK_DIR}/acme.json"
+        chmod 600 "${TRAEFIK_DIR}/acme.json"
+    fi
+
+    # Create Traefik configuration file
+    TRAEFIK_CONFIG="${TRAEFIK_DIR}/traefik.yml"
+    cat > "${TRAEFIK_CONFIG}" << 'EOF'
 api:
   dashboard: true
   insecure: false
@@ -434,15 +439,21 @@ certificatesResolvers:
         entryPoint: web
 EOF
 
+    # Set proper permissions
+    chown -R "$USERNAME:$USERNAME" "${TRAEFIK_DIR}"
+    chmod 644 "${TRAEFIK_CONFIG}"
+    
     # Create docker-compose file for Traefik
-    TRAEFIK_DOMAIN=${DOMAIN:-traefik.localhost}
+    TRAEFIK_DOMAIN=${DOMAIN:-$(curl -s https://api.ipify.org || echo "localhost")}
     ADMIN_USER=${ADMIN_USER:-admin}
     # Generate a random password if not provided
     ADMIN_PASSWORD=${ADMIN_PASSWORD:-$(openssl rand -base64 12)}
+    
     # Generate htpasswd string
     HTPASSWD=$(docker run --rm httpd:2.4-alpine htpasswd -nb "${ADMIN_USER}" "${ADMIN_PASSWORD}" | sed -e s/\\$/\\$\\$/g)
     
-    cat > "$BASE_DIR/docker-compose.proxy.yml" << EOF
+    COMPOSE_FILE="$BASE_DIR/docker-compose.proxy.yml"
+    cat > "${COMPOSE_FILE}" << EOF
 version: "3.8"
 services:
   traefik:
@@ -476,11 +487,24 @@ networks:
     external: true
 EOF
 
-    # Create Traefik network
-    docker network create traefik-public || true
+    # Create Traefik network if it doesn't exist
+    if ! docker network ls | grep -q "traefik-public"; then
+        docker network create traefik-public || true
+    fi
+
+    # Stop and remove existing Traefik container if it exists
+    if docker ps -a | grep -q "traefik"; then
+        docker stop traefik || true
+        docker rm traefik || true
+    fi
 
     # Start Traefik
-    docker-compose -f "$BASE_DIR/docker-compose.proxy.yml" up -d
+    log "Starting Traefik..."
+    if ! docker-compose -f "${COMPOSE_FILE}" up -d; then
+        log_error "Failed to start Traefik. Check logs:"
+        docker-compose -f "${COMPOSE_FILE}" logs
+        exit 1
+    fi
 
     # Wait for container to start
     sleep 5
@@ -493,18 +517,19 @@ EOF
     fi
 
     # Save credentials to a file
-    cat > "${TRAEFIK_DIR}/credentials.txt" << EOF
+    CREDS_FILE="${TRAEFIK_DIR}/credentials.txt"
+    cat > "${CREDS_FILE}" << EOF
 Traefik Dashboard Credentials:
 URL: https://${TRAEFIK_DOMAIN}
 Username: ${ADMIN_USER}
 Password: ${ADMIN_PASSWORD}
 EOF
 
-    chmod 600 "${TRAEFIK_DIR}/credentials.txt"
-    chown "$USERNAME:$USERNAME" "${TRAEFIK_DIR}/credentials.txt"
+    chmod 600 "${CREDS_FILE}"
+    chown "$USERNAME:$USERNAME" "${CREDS_FILE}"
 
     log "Traefik Proxy setup completed successfully"
-    log "Dashboard credentials saved to: ${TRAEFIK_DIR}/credentials.txt"
+    log "Dashboard credentials saved to: ${CREDS_FILE}"
     log "Dashboard URL: https://${TRAEFIK_DOMAIN}"
     log "Username: ${ADMIN_USER}"
     log "Password: ${ADMIN_PASSWORD}"
