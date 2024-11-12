@@ -158,11 +158,13 @@ install_dependencies() {
 }
 
 check_permissions() {
+    log "Checking system permissions..."
+    
     # Check if we can write to BASE_DIR
     if [ ! -w "$BASE_DIR" ]; then
         log_error "Cannot write to $BASE_DIR"
         exit 1
-    }
+    fi
 
     # Check if we can create directories
     if ! mkdir -p "$BASE_DIR/test" 2>/dev/null; then
@@ -176,6 +178,8 @@ check_permissions() {
         log_error "Cannot access Docker socket. Make sure you're running as root or in the docker group"
         exit 1
     }
+    
+    log "Permission checks passed"
 }
 
 # Function to install Docker
