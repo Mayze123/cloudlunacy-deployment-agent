@@ -386,8 +386,26 @@ EOF'
 setup_nginx_proxy() {
     log "Setting up Nginx Proxy..."
     
+    # Check if anything is using port 80
+    if lsof -i :80 >/dev/null 2>&1; then
+        log_warn "Port 80 is in use. Stopping system nginx if running..."
+        systemctl stop nginx || true
+        systemctl disable nginx || true
+        
+        # Double check if port is still in use
+        sleep 2
+        if lsof -i :80 >/dev/null 2>&1; then
+            log_error "Port 80 is still in use. Please free up port 80 before continuing."
+            lsof -i :80
+            exit 1
+        fi
+    fi
+
     # Create dedicated network for proxy
     docker network create nginx-proxy || true
+    
+    # Remove existing proxy container if it exists
+    docker rm -f nginx-proxy >/dev/null 2>&1 || true
     
     # Create nginx proxy container
     cat > "$BASE_DIR/docker-compose.proxy.yml" << EOF
@@ -432,9 +450,22 @@ EOF
     chown -R "$USERNAME:$USERNAME" "${BASE_DIR}/nginx"
     chmod -R 755 "${BASE_DIR}/nginx"
 
+    # Stop any existing docker-compose services
+    if [ -f "$BASE_DIR/docker-compose.proxy.yml" ]; then
+        docker-compose -f "$BASE_DIR/docker-compose.proxy.yml" down || true
+    fi
+
     # Start the proxy
     docker-compose -f "$BASE_DIR/docker-compose.proxy.yml" up -d
-    log "Nginx Proxy setup completed"
+
+    # Verify the proxy started successfully
+    if ! docker ps | grep -q nginx-proxy; then
+        log_error "Failed to start nginx proxy. Check docker logs."
+        docker logs nginx-proxy
+        exit 1
+    fi
+
+    log "Nginx Proxy setup completed successfully"
 }
 
 setup_docker_permissions() {
