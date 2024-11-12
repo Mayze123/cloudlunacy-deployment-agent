@@ -62,27 +62,10 @@ async function deployApp(payload, ws) {
 
     // Retrieve environment variables
     sendLogs(ws, deploymentId, "Retrieving environment variables...");
-    let envVars = {};
-    let envFilePath;
-    try {
-      logger.info(`Fetching env vars for deployment ${deploymentId}`);
-      const { data } = await apiClient.post(
-        `/api/deploy/env-vars/${deploymentId}`,
-        {
-          token: envVarsToken,
-        }
-      );
-
-      if (!data || !data.variables) {
-        throw new Error("Invalid response format for environment variables");
-      }
-
-      envVars = data.variables;
-      logger.info("Successfully retrieved environment variables");
-    } catch (error) {
-      logger.error("Environment variables setup failed:", error);
-      throw new Error(`Environment variables setup failed: ${error.message}`);
-    }
+    const envVars = await retrieveEnvironmentVariables(
+      deploymentId,
+      envVarsToken
+    );
 
     // Clone repository
     sendLogs(ws, deploymentId, "Cloning repository...");
@@ -91,8 +74,11 @@ async function deployApp(payload, ws) {
 
     // Set up environment files
     const envManager = new EnvironmentManager(deployDir);
-    envFilePath = await envManager.writeEnvFile(envVars, environment);
+    const envFilePath = await envManager.writeEnvFile(envVars, environment);
     await fs.copyFile(envFilePath, path.join(deployDir, ".env"));
+
+    // Ensure Traefik network exists
+    await ensureTraefikNetwork();
 
     // Generate deployment files
     sendLogs(ws, deploymentId, "Generating deployment configuration...");
@@ -105,48 +91,19 @@ async function deployApp(payload, ws) {
       buildConfig: {
         nodeVersion: "18",
         buildOutputDir: "build",
-        cacheControl: "public, max-age=31536000",
       },
     });
 
-    // Write deployment files
-    await Promise.all([
-      fs.writeFile("Dockerfile", files.dockerfile),
-      fs.writeFile("docker-compose.yml", files.dockerCompose),
-    ]);
+    // Write and validate deployment files
+    await writeDeploymentFiles(files);
+    await validateDockerCompose();
 
-    // Validate docker-compose file
-    try {
-      sendLogs(ws, deploymentId, "Validating deployment configuration...");
-      const { stdout: configOutput } = await executeCommand("docker-compose", [
-        "config",
-      ]);
-      sendLogs(ws, deploymentId, "Docker Compose configuration validated");
-    } catch (error) {
-      throw new Error(`Invalid docker-compose configuration: ${error.message}`);
-    }
+    // Build and start containers with detailed logging
+    await buildAndStartContainers(ws, deploymentId, serviceName);
 
-    // Ensure connection to Traefik network
-    try {
-      await executeCommand("docker", ["network", "inspect", "traefik-public"]);
-    } catch (error) {
-      sendLogs(ws, deploymentId, "Creating Traefik network...");
-      await executeCommand("docker", ["network", "create", "traefik-public"]);
-    }
-
-    // Build and start containers
-    sendLogs(ws, deploymentId, "Building application...");
-    await executeCommand("docker-compose", ["build", "--no-cache"]);
-    sendLogs(ws, deploymentId, "Starting application...");
-    await executeCommand("docker-compose", ["up", "-d", "--force-recreate"]);
-
-    // Verify deployment
+    // Verify deployment with enhanced checks
     sendLogs(ws, deploymentId, "Verifying deployment...");
-    const health = await checkDeploymentHealth(
-      files.allocatedPort,
-      serviceName,
-      domain
-    );
+    const health = await checkDeploymentHealth(serviceName, domain);
 
     if (!health.healthy) {
       throw new Error(`Deployment health check failed: ${health.message}`);
@@ -161,46 +118,95 @@ async function deployApp(payload, ws) {
     });
   } catch (error) {
     logger.error(`Deployment ${deploymentId} failed:`, error);
-
-    // Send detailed error message
-    sendStatus(ws, {
+    await handleDeploymentFailure(
+      error,
+      ws,
       deploymentId,
-      status: "failed",
-      message: error.message || "Deployment failed",
-    });
-
-    // Cleanup on failure
-    await handleDeploymentFailure(error, deploymentId, serviceName, deployDir);
+      serviceName,
+      deployDir
+    );
   } finally {
     process.chdir(currentDir);
   }
 }
 
+async function buildAndStartContainers(ws, deploymentId, serviceName) {
+  sendLogs(ws, deploymentId, "Building application...");
+
+  try {
+    // Build with detailed output
+    const buildResult = await executeCommand(
+      "docker-compose",
+      ["build", "--no-cache"],
+      {
+        stdout: (data) => sendLogs(ws, deploymentId, `Build: ${data}`),
+        stderr: (data) => sendLogs(ws, deploymentId, `Build error: ${data}`),
+      }
+    );
+
+    sendLogs(ws, deploymentId, "Starting application...");
+
+    // Start containers with detailed output
+    const startResult = await executeCommand(
+      "docker-compose",
+      ["up", "-d", "--force-recreate"],
+      {
+        stdout: (data) => sendLogs(ws, deploymentId, `Start: ${data}`),
+        stderr: (data) => sendLogs(ws, deploymentId, `Start error: ${data}`),
+      }
+    );
+
+    // Verify container is actually running
+    const { stdout: containerList } = await executeCommand("docker", [
+      "ps",
+      "--filter",
+      `name=${serviceName}`,
+    ]);
+    if (!containerList.includes(serviceName)) {
+      // Get container logs if it exists but isn't running
+      try {
+        const { stdout: logs } = await executeCommand("docker", [
+          "logs",
+          serviceName,
+        ]);
+        throw new Error(`Container failed to start. Logs:\n${logs}`);
+      } catch (logError) {
+        throw new Error("Container failed to start and no logs available");
+      }
+    }
+  } catch (error) {
+    throw new Error(`Failed to build/start containers: ${error.message}`);
+  }
+}
+
 async function handleDeploymentFailure(
   error,
+  ws,
   deploymentId,
   serviceName,
   deployDir
 ) {
+  // Send error status
+  sendStatus(ws, {
+    deploymentId,
+    status: "failed",
+    message: error.message,
+  });
+
   try {
-    // Get container logs before cleanup
+    // Get container logs if possible
     try {
-      const { stdout: failureLogs } = await executeCommand("docker", [
-        "logs",
-        serviceName,
-      ]);
-      logger.error("Container logs before cleanup:", failureLogs);
+      const logs = await getContainerLogs(serviceName);
+      logger.error(`Container logs before cleanup:\n${logs}`);
     } catch (logError) {
-      logger.warn("Could not retrieve container logs:", logError);
+      logger.warn(`Could not retrieve container logs: ${logError.message}`);
     }
 
-    // Clean up containers and networks
+    // Clean up deployment
     await cleanupExistingDeployment(serviceName);
-
-    // Remove deployment directory
     await fs.rm(deployDir, { recursive: true, force: true });
   } catch (cleanupError) {
-    logger.error("Cleanup failed:", cleanupError);
+    logger.error(`Cleanup failed: ${cleanupError.message}`);
   }
 }
 
@@ -245,128 +251,78 @@ async function cleanupExistingDeployment(serviceName) {
   }
 }
 
-async function checkDeploymentHealth(port, containerName, domain) {
+async function checkDeploymentHealth(serviceName, domain) {
   try {
-    logger.info(
-      `Starting comprehensive health check for ${containerName} on port ${port}`
-    );
+    logger.info(`Starting health check for ${serviceName}`);
 
-    // Initial delay to allow container to start
-    await new Promise((resolve) => setTimeout(resolve, 15000));
+    // Wait for container to start
+    await new Promise((resolve) => setTimeout(resolve, 10000));
 
-    // Get container state with detailed information
-    logger.info(`Checking container state for ${containerName}...`);
-    const { stdout: containerStatus } = await executeCommand("docker", [
-      "inspect",
-      "--format",
-      "{{json .State}}",
-      containerName,
-    ]);
-
-    try {
-      const containerState = JSON.parse(containerStatus);
-      logger.info("Container state:", JSON.stringify(containerState, null, 2));
-
-      if (!containerState.Running) {
-        // Get container logs if not running
-        const { stdout: logs } = await executeCommand("docker", [
-          "logs",
-          containerName,
-        ]);
-        logger.error("Container failed to start. Logs:", logs);
-        throw new Error(
-          `Container failed to start: ${
-            containerState.Error || "Unknown error"
-          }`
-        );
-      }
-    } catch (parseError) {
-      logger.error("Failed to parse container state:", containerStatus);
-      throw new Error("Failed to parse container state");
+    // Check if container exists and is running
+    const containerInfo = await getContainerInfo(serviceName);
+    if (!containerInfo) {
+      throw new Error("Container not found");
     }
 
-    // Check network connectivity
-    logger.info(`Checking network configuration for ${containerName}...`);
-    const { stdout: networkInfo } = await executeCommand("docker", [
-      "inspect",
-      "--format",
-      "{{range $network, $config := .NetworkSettings.Networks}}Network: {{$network}}, IP: {{$config.IPAddress}}{{println}}{{end}}",
-      containerName,
-    ]);
-
-    logger.info("Network configuration:", networkInfo);
-
-    // Verify Traefik routing
-    logger.info(`Verifying Traefik routing for ${domain}...`);
-    try {
-      // Check if Traefik picked up the configuration
-      const { stdout: traefikRoutes } = await executeCommand("docker", [
-        "exec",
-        "traefik",
-        "traefik",
-        "healthcheck",
-      ]);
-      logger.info("Traefik health check passed");
-
-      // Try to access the service through Traefik
-      await executeCommand("curl", [
-        "--max-time",
-        "5",
-        "-I",
-        "-H",
-        `"Host: ${domain}"`,
-        "http://localhost",
-      ]);
-      logger.info(`Service accessible through Traefik for domain ${domain}`);
-    } catch (error) {
-      logger.warn("Traefik routing verification failed:", error.message);
+    if (!containerInfo.State.Running) {
+      const logs = await getContainerLogs(serviceName);
+      throw new Error(`Container is not running. Logs:\n${logs}`);
     }
 
-    // Check application health endpoint
-    try {
-      logger.info(`Checking application health endpoint on port ${port}...`);
-      const { stdout: healthCheck } = await executeCommand("curl", [
-        "--max-time",
-        "5",
-        "-i",
-        `http://localhost:${port}/health`,
-      ]);
-      logger.info("Health endpoint response:", healthCheck);
-    } catch (error) {
-      logger.warn("Health endpoint check failed:", error.message);
+    // Check Traefik routing
+    const traefikCheck = await checkTraefikRouting(domain);
+    if (!traefikCheck.success) {
+      throw new Error(`Traefik routing check failed: ${traefikCheck.error}`);
     }
 
-    // Get final container state and logs
-    const { stdout: finalState } = await executeCommand("docker", [
-      "inspect",
-      "--format",
-      "{{.State.Status}} (Running: {{.State.Running}}, ExitCode: {{.State.ExitCode}})",
-      containerName,
-    ]);
-    logger.info("Final container state:", finalState);
-
-    const { stdout: containerLogs } = await executeCommand("docker", [
-      "logs",
-      "--tail",
-      "20",
-      containerName,
-    ]);
-    logger.info("Recent container logs:", containerLogs);
-
-    return {
-      healthy: true,
-      details: {
-        containerState: finalState,
-        networkInfo,
-      },
-    };
+    return { healthy: true };
   } catch (error) {
-    logger.error("Health check failed:", error);
     return {
       healthy: false,
       message: error.message,
-      details: error.stack,
     };
+  }
+}
+
+async function getContainerInfo(serviceName) {
+  try {
+    const { stdout } = await executeCommand("docker", ["inspect", serviceName]);
+    return JSON.parse(stdout)[0];
+  } catch (error) {
+    logger.error(`Failed to get container info: ${error.message}`);
+    return null;
+  }
+}
+
+async function checkTraefikRouting(domain) {
+  try {
+    // Check if Traefik is running
+    const { stdout: traefikStatus } = await executeCommand("docker", [
+      "ps",
+      "--filter",
+      "name=traefik",
+      "--format",
+      "{{.Status}}",
+    ]);
+    if (!traefikStatus) {
+      return { success: false, error: "Traefik container not running" };
+    }
+
+    // Check for Traefik router configuration
+    const { stdout: traefikRouters } = await executeCommand("docker", [
+      "exec",
+      "traefik",
+      "traefik",
+      "status",
+      "--error-detail",
+    ]);
+    if (!traefikRouters.includes(domain)) {
+      return { success: false, error: "Domain not configured in Traefik" };
+    }
+
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
   }
 }
 
