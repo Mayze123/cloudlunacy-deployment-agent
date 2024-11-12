@@ -491,9 +491,17 @@ verify_nginx_setup() {
         return 1
     fi
 
-    # Test nginx is serving requests
-    if ! curl -s --fail http://localhost/nginx-health >/dev/null 2>&1; then
-        log_error "Nginx is not serving requests"
+    # Test nginx is responding to requests
+    if ! curl -s --fail http://localhost/ -o /dev/null; then
+        # If main page fails, check if nginx is listening
+        if ! netstat -tlpn | grep -q ':80.*nginx'; then
+            log_error "Nginx is not listening on port 80"
+            netstat -tlpn | grep nginx
+            return 1
+        fi
+        # If nginx is listening but not responding, check logs
+        log_error "Nginx is running but not serving requests. Checking logs..."
+        tail -n 50 /var/log/nginx/error.log
         return 1
     fi
 
@@ -639,6 +647,18 @@ setup_nginx() {
     
     # Remove default nginx site if it exists
     rm -f /etc/nginx/sites-enabled/default
+
+    cat > /etc/nginx/conf.d/default.conf << 'EOF'
+    server {
+        listen 80 default_server;
+        server_name _;
+
+        location / {
+            return 200 'Server is running\n';
+            add_header Content-Type text/plain;
+        }
+    }
+    EOF
     
     # Set up main nginx configuration
     cat > /etc/nginx/nginx.conf << 'EOF'
