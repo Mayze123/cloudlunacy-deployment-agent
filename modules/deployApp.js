@@ -9,8 +9,6 @@ const deployConfig = require("../deployConfig.json");
 const { ensureDeploymentPermissions } = require("../utils/permissionCheck");
 const apiClient = require("../utils/apiClient");
 const EnvironmentManager = require("../utils/environmentManager");
-// Removed NginxManager import
-// Removed PortManager import
 
 async function deployApp(payload, ws) {
   const {
@@ -26,9 +24,11 @@ async function deployApp(payload, ws) {
     envVarsToken,
   } = payload;
 
+  // Adjusted serviceName construction
   const serviceName = `${appName}-${environment}`
     .toLowerCase()
     .replace(/[^a-z0-9-]/g, "-");
+
   const deployDir = path.join("/opt/cloudlunacy/deployments", deploymentId);
   const currentDir = process.cwd();
 
@@ -107,6 +107,7 @@ async function deployApp(payload, ws) {
     const files = await templateHandler.generateDeploymentFiles({
       appType,
       appName,
+      serviceName, // Ensure serviceName is passed
       environment,
       port: containerPort,
       envFile: path.basename(envFilePath),
@@ -124,6 +125,10 @@ async function deployApp(payload, ws) {
       fs.writeFile("docker-compose.yml", files.dockerCompose),
     ]);
 
+    // Log generated files for debugging
+    logger.info("Generated Dockerfile:\n", files.dockerfile);
+    logger.info("Generated docker-compose.yml:\n", files.dockerCompose);
+
     // Validate docker-compose file
     try {
       sendLogs(ws, deploymentId, "Validating deployment configuration...");
@@ -132,14 +137,33 @@ async function deployApp(payload, ws) {
       ]);
       sendLogs(ws, deploymentId, "Docker Compose configuration validated");
     } catch (error) {
-      throw new Error(`Invalid docker-compose configuration: ${error.message}`);
+      throw new Error(
+        `Invalid docker-compose configuration: ${error.message}\n${error.stderr}`
+      );
     }
 
-    // Build and start containers
+    // Build and start containers with error handling
     sendLogs(ws, deploymentId, "Building application...");
-    await executeCommand("docker-compose", ["build", "--no-cache"]);
+    try {
+      await executeCommand("docker-compose", ["build", "--no-cache"]);
+      sendLogs(ws, deploymentId, "Application built successfully");
+    } catch (error) {
+      logger.error(`Build failed: ${error.message}`, error);
+      throw new Error(
+        `Failed to build application: ${error.message}\n${error.stderr}`
+      );
+    }
+
     sendLogs(ws, deploymentId, "Starting application...");
-    await executeCommand("docker-compose", ["up", "-d", "--force-recreate"]);
+    try {
+      await executeCommand("docker-compose", ["up", "-d", "--force-recreate"]);
+      sendLogs(ws, deploymentId, "Application started successfully");
+    } catch (error) {
+      logger.error(`Startup failed: ${error.message}`, error);
+      throw new Error(
+        `Failed to start application: ${error.message}\n${error.stderr}`
+      );
+    }
 
     // Optionally verify domain accessibility
     if (domain) {
@@ -271,33 +295,48 @@ async function checkDeploymentHealth(containerName, domain) {
       containerName,
     ]);
 
+    let containerState;
     try {
-      const containerState = JSON.parse(containerStatus);
+      containerState = JSON.parse(containerStatus);
       logger.info("Container state:", JSON.stringify(containerState, null, 2));
-
-      if (!containerState.Running) {
-        // Get container logs if not running
-        const { stdout: logs } = await executeCommand("docker", [
-          "logs",
-          containerName,
-        ]);
-        logger.error("Container failed to start. Logs:", logs);
-        throw new Error(
-          `Container failed to start: ${
-            containerState.Error || "Unknown error"
-          }`
-        );
-      }
     } catch (parseError) {
       logger.error("Failed to parse container state:", containerStatus);
       throw new Error("Failed to parse container state");
     }
 
-    // Check container health status if available
-    if (containerState.Health && containerState.Health.Status !== "healthy") {
+    if (!containerState.Running) {
+      // Get container logs if not running
+      const { stdout: logs } = await executeCommand("docker", [
+        "logs",
+        containerName,
+      ]);
+      logger.error("Container failed to start. Logs:", logs);
       throw new Error(
-        `Container health check failed: ${containerState.Health.Status}`
+        `Container failed to start: ${containerState.Error || "Unknown error"}`
       );
+    }
+
+    // Check container health status if available
+    if (containerState.Health) {
+      if (containerState.Health.Status !== "healthy") {
+        // Retrieve health check logs
+        const healthLog = containerState.Health.Log || [];
+        const recentHealthLog = healthLog
+          .map(
+            (entry) =>
+              `ExitCode: ${entry.ExitCode}, Output: ${entry.Output.trim()}`
+          )
+          .join("\n");
+        logger.error("Health check failed. Logs:\n", recentHealthLog);
+
+        throw new Error(
+          `Container health check failed: ${containerState.Health.Status}\n${recentHealthLog}`
+        );
+      } else {
+        logger.info(`Container health status: ${containerState.Health.Status}`);
+      }
+    } else {
+      logger.warn("No health check configured for the container.");
     }
 
     // Optionally verify domain accessibility
