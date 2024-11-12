@@ -383,129 +383,117 @@ EOF'
     log "SSH setup completed."
 }
 
-setup_nginx_proxy() {
-    log "Setting up Nginx Proxy..."
+setup_traefik_proxy() {
+    log "Setting up Traefik Proxy..."
     
     # Get user's UID and GID
     USER_UID=$(id -u "$USERNAME")
     USER_GID=$(id -g "$USERNAME")
     
-    # Check if anything is using port 80
-    if lsof -i :80 >/dev/null 2>&1; then
-        log_warn "Port 80 is in use. Stopping system nginx if running..."
+    # Check if anything is using port 80/443
+    if lsof -i :80 >/dev/null 2>&1 || lsof -i :443 >/dev/null 2>&1; then
+        log_warn "Port 80/443 is in use. Stopping system nginx if running..."
         systemctl stop nginx || true
         systemctl disable nginx || true
     fi
 
-    # Create all required directories with correct ownership
-    log "Creating nginx directories..."
-    mkdir -p "${BASE_DIR}/nginx/"{conf.d,vhost.d,html,certs,temp/{client,proxy,fastcgi,uwsgi,scgi}}
-    chown -R "$USERNAME:$USERNAME" "${BASE_DIR}/nginx"
-    chmod -R 775 "${BASE_DIR}/nginx"
+    # Create Traefik directories
+    TRAEFIK_DIR="${BASE_DIR}/traefik"
+    mkdir -p "${TRAEFIK_DIR}"/{config,certs}
+    touch "${TRAEFIK_DIR}/acme.json"
+    chmod 600 "${TRAEFIK_DIR}/acme.json"
+    chown -R "$USERNAME:$USERNAME" "${TRAEFIK_DIR}"
     
-    # Create dedicated network for proxy
-    docker network create nginx-proxy || true
+    # Create Traefik dynamic configuration directory
+    mkdir -p "${TRAEFIK_DIR}/config"
     
-    # Remove existing proxy container if it exists
-    docker rm -f nginx-proxy >/dev/null 2>&1 || true
+    # Create base Traefik configuration
+    cat > "${TRAEFIK_DIR}/traefik.yml" << EOF
+api:
+  dashboard: true
+  insecure: false
 
-    # Create base nginx configuration
-    cat > "${BASE_DIR}/nginx/nginx.conf" << EOF
-worker_processes auto;
-pid /tmp/nginx.pid;
+entryPoints:
+  web:
+    address: ":80"
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+  websecure:
+    address: ":443"
 
-events {
-    worker_connections 768;
-}
+providers:
+  docker:
+    endpoint: "unix:///var/run/docker.sock"
+    exposedByDefault: false
+    network: traefik-public
+  file:
+    directory: /etc/traefik/config
+    watch: true
 
-http {
-    client_body_temp_path /temp/client;
-    proxy_temp_path /temp/proxy;
-    fastcgi_temp_path /temp/fastcgi;
-    uwsgi_temp_path /temp/uwsgi;
-    scgi_temp_path /temp/scgi;
-
-    sendfile on;
-    tcp_nopush on;
-    tcp_nodelay on;
-    keepalive_timeout 65;
-    types_hash_max_size 2048;
-
-    include /etc/nginx/mime.types;
-    default_type application/octet-stream;
-
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_prefer_server_ciphers on;
-
-    access_log /dev/stdout;
-    error_log /dev/stderr;
-
-    gzip on;
-
-    include /etc/nginx/conf.d/*.conf;
-}
+certificatesResolvers:
+  letsencrypt:
+    acme:
+      email: ${ADMIN_EMAIL:-admin@yourdomain.com}
+      storage: /etc/traefik/acme.json
+      httpChallenge:
+        entryPoint: web
 EOF
-    
-    # Create nginx proxy container
+
+    # Create docker-compose file for Traefik
     cat > "$BASE_DIR/docker-compose.proxy.yml" << EOF
 version: "3.8"
 services:
-  nginx-proxy:
-    image: nginx:alpine
-    container_name: nginx-proxy
+  traefik:
+    image: traefik:v2.10
+    container_name: traefik
     restart: always
+    security_opt:
+      - no-new-privileges:true
     ports:
       - "80:80"
       - "443:443"
     volumes:
-      - ${BASE_DIR}/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      - ${BASE_DIR}/nginx/conf.d:/etc/nginx/conf.d
-      - ${BASE_DIR}/nginx/vhost.d:/etc/nginx/vhost.d
-      - ${BASE_DIR}/nginx/html:/usr/share/nginx/html
-      - ${BASE_DIR}/nginx/certs:/etc/nginx/certs:ro
-      - ${BASE_DIR}/nginx/temp:/temp
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+      - ${TRAEFIK_DIR}/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ${TRAEFIK_DIR}/acme.json:/etc/traefik/acme.json
+      - ${TRAEFIK_DIR}/config:/etc/traefik/config
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
-      - nginx-proxy
-    user: "${USER_UID}:${USER_GID}"
+      - traefik-public
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.traefik-secure.entrypoints=websecure"
+      - "traefik.http.routers.traefik-secure.rule=Host(\`traefik.$DOMAIN\`)"
+      - "traefik.http.routers.traefik-secure.service=api@internal"
+      - "traefik.http.routers.traefik-secure.middlewares=admin-auth"
+      - "traefik.http.middlewares.admin-auth.basicauth.users=admin:$$apr1$$9AY0gkTk$$SecretHashHere"
+
 networks:
-  nginx-proxy:
+  traefik-public:
     external: true
 EOF
-    
-    # Create default configuration
-    cat > "${BASE_DIR}/nginx/conf.d/default.conf" << EOF
-server {
-    listen 80 default_server;
-    server_name _;
-    
-    location / {
-        return 200 'Server is running\n';
-        add_header Content-Type text/plain;
-    }
-}
-EOF
 
-    # Ensure proper ownership of all files
-    chown "$USERNAME:$USERNAME" "$BASE_DIR/docker-compose.proxy.yml"
-    chown "$USERNAME:$USERNAME" "${BASE_DIR}/nginx/nginx.conf"
-    chown "$USERNAME:$USERNAME" "${BASE_DIR}/nginx/conf.d/default.conf"
-    chmod 664 "${BASE_DIR}/nginx/conf.d/default.conf"
-    chmod 664 "${BASE_DIR}/nginx/nginx.conf"
+    # Create Traefik network
+    docker network create traefik-public || true
 
-    # Start the proxy
+    # Start Traefik
     docker-compose -f "$BASE_DIR/docker-compose.proxy.yml" up -d
 
-    # Wait a moment for the container to start
-    sleep 2
+    # Wait for container to start
+    sleep 5
 
     # Check if container is running
-    if ! docker ps | grep -q nginx-proxy; then
-        log_error "Failed to start nginx proxy. Check docker logs:"
-        docker logs nginx-proxy
+    if ! docker ps | grep -q traefik; then
+        log_error "Failed to start Traefik proxy. Check docker logs:"
+        docker logs traefik
         exit 1
     fi
 
-    log "Nginx Proxy setup completed successfully"
+    log "Traefik Proxy setup completed successfully"
 }
 
 setup_docker_permissions() {
@@ -649,7 +637,7 @@ main() {
     update_system
     install_dependencies
     install_docker
-    setup_nginx_proxy
+    setup_traefik_proxy
     install_node
     setup_user_directories
     setup_docker_permissions

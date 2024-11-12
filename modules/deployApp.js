@@ -1,5 +1,3 @@
-// src/modules/deployApp.js
-
 const { executeCommand } = require("../utils/executor");
 const logger = require("../utils/logger");
 const fs = require("fs").promises;
@@ -9,8 +7,6 @@ const deployConfig = require("../deployConfig.json");
 const { ensureDeploymentPermissions } = require("../utils/permissionCheck");
 const apiClient = require("../utils/apiClient");
 const EnvironmentManager = require("../utils/environmentManager");
-const nginxManager = require("../utils/nginxManager");
-const portManager = require("../utils/portManager");
 
 async function deployApp(payload, ws) {
   const {
@@ -22,7 +18,6 @@ async function deployApp(payload, ws) {
     branch,
     githubToken,
     environment,
-    port: requestedPort,
     domain,
     envVarsToken,
   } = payload;
@@ -38,9 +33,6 @@ async function deployApp(payload, ws) {
   );
 
   try {
-    // Initialize port manager early
-    await portManager.initialize();
-
     // Initialize template handler
     const templateHandler = new TemplateHandler(
       path.join("/opt/cloudlunacy/templates"),
@@ -102,33 +94,25 @@ async function deployApp(payload, ws) {
     envFilePath = await envManager.writeEnvFile(envVars, environment);
     await fs.copyFile(envFilePath, path.join(deployDir, ".env"));
 
-    // Get or allocate port
-    const deploymentPort = await portManager.allocatePort(appName, environment);
-    logger.info(`Using port ${deploymentPort} for ${serviceName}`);
-
-    // Generate deployment files with allocated port
+    // Generate deployment files
     sendLogs(ws, deploymentId, "Generating deployment configuration...");
     const files = await templateHandler.generateDeploymentFiles({
       appType,
       appName,
       environment,
-      port: deploymentPort,
+      domain,
       envFile: path.basename(envFilePath),
       buildConfig: {
         nodeVersion: "18",
         buildOutputDir: "build",
         cacheControl: "public, max-age=31536000",
       },
-      domain: domain || `${appName}-${environment}.yourdomain.com`,
     });
 
     // Write deployment files
     await Promise.all([
       fs.writeFile("Dockerfile", files.dockerfile),
       fs.writeFile("docker-compose.yml", files.dockerCompose),
-      files.nginxConf
-        ? fs.writeFile("nginx.conf", files.nginxConf)
-        : Promise.resolve(),
     ]);
 
     // Validate docker-compose file
@@ -142,54 +126,24 @@ async function deployApp(payload, ws) {
       throw new Error(`Invalid docker-compose configuration: ${error.message}`);
     }
 
+    // Ensure connection to Traefik network
+    try {
+      await executeCommand("docker", ["network", "inspect", "traefik-public"]);
+    } catch (error) {
+      sendLogs(ws, deploymentId, "Creating Traefik network...");
+      await executeCommand("docker", ["network", "create", "traefik-public"]);
+    }
+
     // Build and start containers
     sendLogs(ws, deploymentId, "Building application...");
     await executeCommand("docker-compose", ["build", "--no-cache"]);
     sendLogs(ws, deploymentId, "Starting application...");
     await executeCommand("docker-compose", ["up", "-d", "--force-recreate"]);
 
-    // Configure Nginx if domain is provided
-    if (domain) {
-      try {
-        sendLogs(ws, deploymentId, `Configuring domain: ${domain}`);
-        await nginxManager.configureNginx(domain, deploymentPort, deployDir);
-
-        // Verify domain accessibility
-        const maxRetries = 5;
-        let retryCount = 0;
-        let domainAccessible = false;
-
-        while (retryCount < maxRetries && !domainAccessible) {
-          try {
-            await executeCommand("curl", [
-              "--max-time",
-              "5",
-              "-I",
-              `http://${domain}`,
-            ]);
-            domainAccessible = true;
-            sendLogs(ws, deploymentId, `Domain ${domain} is accessible`);
-          } catch (error) {
-            retryCount++;
-            if (retryCount < maxRetries) {
-              await new Promise((resolve) => setTimeout(resolve, 5000));
-            }
-          }
-        }
-      } catch (error) {
-        logger.error(`Failed to configure domain ${domain}:`, error);
-        sendLogs(
-          ws,
-          deploymentId,
-          `Warning: Domain configuration encountered an error: ${error.message}`
-        );
-      }
-    }
-
     // Verify deployment
     sendLogs(ws, deploymentId, "Verifying deployment...");
     const health = await checkDeploymentHealth(
-      deploymentPort,
+      files.allocatedPort,
       serviceName,
       domain
     );
@@ -216,62 +170,78 @@ async function deployApp(payload, ws) {
     });
 
     // Cleanup on failure
-    try {
-      // Get container logs before cleanup
-      try {
-        const { stdout: failureLogs } = await executeCommand("docker", [
-          "logs",
-          serviceName,
-        ]);
-        logger.error("Container logs before cleanup:", failureLogs);
-      } catch (logError) {
-        logger.warn("Could not retrieve container logs:", logError);
-      }
-
-      // Release allocated port
-      await portManager.releasePort(appName, environment);
-
-      // Remove Nginx config if created
-      if (domain) {
-        await nginxManager.removeConfig(domain);
-      }
-
-      // Clean up containers and networks
-      await cleanupExistingDeployment(serviceName);
-
-      // Remove deployment directory
-      await fs.rm(deployDir, { recursive: true, force: true });
-    } catch (cleanupError) {
-      logger.error("Cleanup failed:", cleanupError);
-    }
+    await handleDeploymentFailure(error, deploymentId, serviceName, deployDir);
   } finally {
     process.chdir(currentDir);
   }
 }
 
-function sendStatus(ws, data) {
-  if (ws.readyState === ws.OPEN) {
-    ws.send(
-      JSON.stringify({
-        type: "status",
-        payload: data,
-      })
-    );
+async function handleDeploymentFailure(
+  error,
+  deploymentId,
+  serviceName,
+  deployDir
+) {
+  try {
+    // Get container logs before cleanup
+    try {
+      const { stdout: failureLogs } = await executeCommand("docker", [
+        "logs",
+        serviceName,
+      ]);
+      logger.error("Container logs before cleanup:", failureLogs);
+    } catch (logError) {
+      logger.warn("Could not retrieve container logs:", logError);
+    }
+
+    // Clean up containers and networks
+    await cleanupExistingDeployment(serviceName);
+
+    // Remove deployment directory
+    await fs.rm(deployDir, { recursive: true, force: true });
+  } catch (cleanupError) {
+    logger.error("Cleanup failed:", cleanupError);
   }
 }
 
-function sendLogs(ws, deploymentId, log) {
-  if (ws.readyState === ws.OPEN) {
-    ws.send(
-      JSON.stringify({
-        type: "logs",
-        payload: {
-          deploymentId,
-          log,
-          timestamp: new Date().toISOString(),
-        },
-      })
-    );
+async function cleanupExistingDeployment(serviceName) {
+  try {
+    // Stop and remove existing container
+    await executeCommand("docker", ["stop", serviceName]).catch(() => {});
+    await executeCommand("docker", ["rm", serviceName]).catch(() => {});
+
+    // Get container ID if it exists
+    const { stdout: containerId } = await executeCommand("docker", [
+      "ps",
+      "-aq",
+      "-f",
+      `name=${serviceName}`,
+    ]).catch(() => ({ stdout: "" }));
+
+    if (containerId) {
+      // Force remove container if it still exists
+      await executeCommand("docker", ["rm", "-f", containerId]).catch(() => {});
+    }
+
+    // Remove any dangling images
+    const { stdout: images } = await executeCommand("docker", [
+      "images",
+      "-q",
+      "-f",
+      "dangling=true",
+    ]).catch(() => ({ stdout: "" }));
+
+    if (images) {
+      await executeCommand("docker", [
+        "rmi",
+        "-f",
+        ...images.split("\n"),
+      ]).catch(() => {});
+    }
+
+    logger.info(`Cleaned up deployment for ${serviceName}`);
+  } catch (error) {
+    logger.warn("Cleanup warning:", error);
   }
 }
 
@@ -315,71 +285,41 @@ async function checkDeploymentHealth(port, containerName, domain) {
       throw new Error("Failed to parse container state");
     }
 
-    // Check network connectivity with detailed network info
+    // Check network connectivity
     logger.info(`Checking network configuration for ${containerName}...`);
     const { stdout: networkInfo } = await executeCommand("docker", [
       "inspect",
       "--format",
-      "{{range $network, $config := .NetworkSettings.Networks}}Network: {{$network}}, IP: {{$config.IPAddress}}, Gateway: {{$config.Gateway}}, MacAddress: {{$config.MacAddress}}{{println}}{{end}}",
+      "{{range $network, $config := .NetworkSettings.Networks}}Network: {{$network}}, IP: {{$config.IPAddress}}{{println}}{{end}}",
       containerName,
     ]);
 
     logger.info("Network configuration:", networkInfo);
 
-    // Get detailed port bindings
-    logger.info(`Checking port bindings for ${containerName}...`);
-    const { stdout: portBindings } = await executeCommand("docker", [
-      "inspect",
-      "--format",
-      "{{range $p, $conf := .NetworkSettings.Ports}}{{$p}} -> {{range $conf}}{{.HostIp}}:{{.HostPort}}{{end}}{{println}}{{end}}",
-      containerName,
-    ]);
-
-    logger.info("Port bindings:", portBindings);
-
-    // Check port accessibility using netcat
-    logger.info(`Checking port ${port} availability...`);
-    const portCheck = await new Promise((resolve) => {
-      const net = require("net");
-      const socket = net.createConnection(port);
-
-      const timeout = setTimeout(() => {
-        socket.destroy();
-        logger.warn(`Port ${port} connection timed out`);
-        resolve(false);
-      }, 5000);
-
-      socket.on("connect", () => {
-        clearTimeout(timeout);
-        socket.end();
-        logger.info(`Successfully connected to port ${port}`);
-        resolve(true);
-      });
-
-      socket.on("error", (error) => {
-        clearTimeout(timeout);
-        logger.error("Port connection error:", error);
-        resolve(false);
-      });
-    });
-
-    if (!portCheck) {
-      // Get netstat information for debugging
-      const { stdout: netstatOutput } = await executeCommand("netstat", [
-        "-tulpn",
+    // Verify Traefik routing
+    logger.info(`Verifying Traefik routing for ${domain}...`);
+    try {
+      // Check if Traefik picked up the configuration
+      const { stdout: traefikRoutes } = await executeCommand("docker", [
+        "exec",
+        "traefik",
+        "traefik",
+        "healthcheck",
       ]);
-      logger.error("Port not accessible. Current port usage:", netstatOutput);
+      logger.info("Traefik health check passed");
 
-      // Get recent container logs
-      const { stdout: logs } = await executeCommand("docker", [
-        "logs",
-        "--tail",
-        "50",
-        containerName,
+      // Try to access the service through Traefik
+      await executeCommand("curl", [
+        "--max-time",
+        "5",
+        "-I",
+        "-H",
+        `"Host: ${domain}"`,
+        "http://localhost",
       ]);
-      logger.error("Recent container logs:", logs);
-
-      throw new Error(`Port ${port} is not accessible`);
+      logger.info(`Service accessible through Traefik for domain ${domain}`);
+    } catch (error) {
+      logger.warn("Traefik routing verification failed:", error.message);
     }
 
     // Check application health endpoint
@@ -396,39 +336,11 @@ async function checkDeploymentHealth(port, containerName, domain) {
       logger.warn("Health endpoint check failed:", error.message);
     }
 
-    // Check nginx configuration if domain is provided
-    if (domain) {
-      logger.info(`Verifying domain configuration for ${domain}`);
-
-      // Test nginx configuration
-      const { stdout: nginxStatus } = await executeCommand("sudo", [
-        "nginx",
-        "-t",
-      ]);
-      logger.info("Nginx configuration status:", nginxStatus);
-
-      // Test domain resolution locally
-      try {
-        logger.info(`Testing local domain access for ${domain}...`);
-        const { stdout: localCheck } = await executeCommand("curl", [
-          "--max-time",
-          "5",
-          "--verbose",
-          "-H",
-          `"Host: ${domain}"`,
-          `http://localhost:${port}`,
-        ]);
-        logger.info("Local domain check response:", localCheck);
-      } catch (error) {
-        logger.warn("Local domain check failed:", error.message);
-      }
-    }
-
     // Get final container state and logs
     const { stdout: finalState } = await executeCommand("docker", [
       "inspect",
       "--format",
-      "{{.State.Status}} (Running: {{.State.Running}}, ExitCode: {{.State.ExitCode}}, Health: {{.State.Health.Status}})",
+      "{{.State.Status}} (Running: {{.State.Running}}, ExitCode: {{.State.ExitCode}})",
       containerName,
     ]);
     logger.info("Final container state:", finalState);
@@ -445,7 +357,6 @@ async function checkDeploymentHealth(port, containerName, domain) {
       healthy: true,
       details: {
         containerState: finalState,
-        portBindings,
         networkInfo,
       },
     };
@@ -459,40 +370,29 @@ async function checkDeploymentHealth(port, containerName, domain) {
   }
 }
 
-async function cleanupExistingDeployment(serviceName) {
-  try {
-    // Stop and remove existing container
-    await executeCommand("docker", ["stop", serviceName]).catch(() => {});
-    await executeCommand("docker", ["rm", serviceName]).catch(() => {});
-
-    // Kill any process using the required port
-    const { stdout: netstatOutput } = await executeCommand("netstat", [
-      "-tlpn",
-    ]);
-    const portProcesses = netstatOutput
-      .split("\n")
-      .filter((line) => line.includes(":3000 "))
-      .map((line) => {
-        const match = line.match(/LISTEN\s+(\d+)/);
-        return match ? match[1] : null;
+function sendStatus(ws, data) {
+  if (ws.readyState === ws.OPEN) {
+    ws.send(
+      JSON.stringify({
+        type: "status",
+        payload: data,
       })
-      .filter(Boolean);
-
-    for (const pid of portProcesses) {
-      try {
-        await executeCommand("kill", ["-9", pid]);
-        logger.info(`Killed process ${pid} using port 3000`);
-      } catch (error) {
-        logger.warn(`Failed to kill process ${pid}: ${error.message}`);
-      }
-    }
-
-    // Remove network
-    await executeCommand("docker", ["network", "rm", "app-network"]).catch(
-      () => {}
     );
-  } catch (error) {
-    logger.warn("Cleanup warning:", error);
+  }
+}
+
+function sendLogs(ws, deploymentId, log) {
+  if (ws.readyState === ws.OPEN) {
+    ws.send(
+      JSON.stringify({
+        type: "logs",
+        payload: {
+          deploymentId,
+          log,
+          timestamp: new Date().toISOString(),
+        },
+      })
+    );
   }
 }
 

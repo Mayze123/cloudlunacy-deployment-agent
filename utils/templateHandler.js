@@ -6,7 +6,6 @@ const { exec } = require("child_process");
 const util = require("util");
 const { executeCommand } = require("./executor");
 const execAsync = util.promisify(exec);
-const portManager = require("./portManager");
 
 class TemplateHandler {
   constructor(templatesDir, deployConfig) {
@@ -18,69 +17,6 @@ class TemplateHandler {
 
   async init() {
     await this.ensureTemplatesExist();
-  }
-
-  async ensureTemplatesExist() {
-    logger.info("Ensuring all required templates exist...");
-
-    try {
-      // Create base templates directory
-      await fs.mkdir(this.templatesDir, { recursive: true });
-
-      // Create nginx templates directory
-      const nginxTemplateDir = path.join(this.templatesDir, "nginx");
-      await fs.mkdir(nginxTemplateDir, { recursive: true });
-
-      const virtualHostTemplate = `server {
-    listen 80;
-    server_name {{domain}};
-
-    location / {
-        proxy_pass http://127.0.0.1:{{port}};
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-
-        # Add timeout configurations
-        proxy_connect_timeout 60s;
-        proxy_send_timeout 60s;
-        proxy_read_timeout 60s;
-    }
-
-    location /socket.io/ {
-        proxy_pass http://127.0.0.1:{{port}};
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-
-        # WebSocket specific timeouts
-        proxy_connect_timeout 7d;
-        proxy_send_timeout 7d;
-        proxy_read_timeout 7d;
-    }
-}`;
-
-      // Write the template file
-      const virtualHostPath = path.join(
-        nginxTemplateDir,
-        "virtual-host.template"
-      );
-      await fs.writeFile(virtualHostPath, virtualHostTemplate, "utf8");
-
-      logger.info("Templates created successfully");
-      return true;
-    } catch (error) {
-      logger.error("Failed to create templates:", error);
-      throw error;
-    }
   }
 
   processConfigInheritance(config) {
@@ -114,7 +50,6 @@ class TemplateHandler {
       if (typeof value === "object") {
         value = JSON.stringify(value);
       }
-      // Escape quotes in value if it's a string
       if (typeof value === "string") {
         value = value.replace(/"/g, '\\"');
       }
@@ -131,6 +66,115 @@ class TemplateHandler {
     Handlebars.registerHelper("ifEquals", function (arg1, arg2, options) {
       return arg1 === arg2 ? options.fn(this) : options.inverse(this);
     });
+  }
+
+  async ensureTemplatesExist() {
+    logger.info("Ensuring all required templates exist...");
+
+    try {
+      // Create base templates directory
+      await fs.mkdir(this.templatesDir, { recursive: true });
+
+      // Create config templates directory
+      const configTemplateDir = path.join(this.templatesDir, "config");
+      await fs.mkdir(configTemplateDir, { recursive: true });
+
+      // Basic service template for different app types
+      const serviceTemplate = {
+        node: `version: "3.8"
+services:
+  {{serviceName}}:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      - NODE_ENV={{environment}}
+      - PORT={{containerPort}}
+    env_file:
+      - .env.{{environment}}
+    networks:
+      - traefik-public
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik-public"
+      - "traefik.http.routers.{{serviceName}}.rule=Host(\`{{domain}}\`)"
+      - "traefik.http.routers.{{serviceName}}.entrypoints=websecure"
+      - "traefik.http.routers.{{serviceName}}.tls.certresolver=letsencrypt"
+      - "traefik.http.services.{{serviceName}}.loadbalancer.server.port={{containerPort}}"
+      - "traefik.http.middlewares.{{serviceName}}-compress.compress=true"
+      - "traefik.http.routers.{{serviceName}}.middlewares={{serviceName}}-compress"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:{{containerPort}}/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  traefik-public:
+    external: true`,
+
+        react: `version: "3.8"
+services:
+  {{serviceName}}:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      - NODE_ENV={{environment}}
+      - PORT={{containerPort}}
+    env_file:
+      - .env.{{environment}}
+    networks:
+      - traefik-public
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik-public"
+      - "traefik.http.routers.{{serviceName}}.rule=Host(\`{{domain}}\`)"
+      - "traefik.http.routers.{{serviceName}}.entrypoints=websecure"
+      - "traefik.http.routers.{{serviceName}}.tls.certresolver=letsencrypt"
+      - "traefik.http.services.{{serviceName}}.loadbalancer.server.port={{containerPort}}"
+      - "traefik.http.middlewares.{{serviceName}}-compress.compress=true"
+      - "traefik.http.middlewares.{{serviceName}}-spa.replacepathregex.regex=^/[^/]*$"
+      - "traefik.http.middlewares.{{serviceName}}-spa.replacepathregex.replacement=/"
+      - "traefik.http.routers.{{serviceName}}.middlewares={{serviceName}}-compress,{{serviceName}}-spa"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:{{containerPort}}/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  traefik-public:
+    external: true`,
+      };
+
+      // Write service templates
+      for (const [type, template] of Object.entries(serviceTemplate)) {
+        const templatePath = path.join(
+          configTemplateDir,
+          `${type}-service.template`
+        );
+        await fs.writeFile(templatePath, template, "utf8");
+      }
+
+      logger.info("Templates created successfully");
+      return true;
+    } catch (error) {
+      logger.error("Failed to create templates:", error);
+      throw error;
+    }
   }
 
   async loadTemplate(templateName) {
@@ -151,39 +195,26 @@ class TemplateHandler {
   }
 
   mergeDefaults(appType, config) {
-    const defaults = this.deployConfig[appType].defaults || {};
+    const defaults = this.deployConfig[appType]?.defaults || {};
     return { ...defaults, ...config };
   }
 
   async validateGeneratedFiles(files) {
     logger.info("Validating generated files...");
 
-    // Log the exact content that will be written
-    logger.info(
-      "Docker Compose Content (exact):",
-      JSON.stringify(files.dockerCompose)
-    );
-    logger.info(
-      "Dockerfile Content (exact):",
-      JSON.stringify(files.dockerfile)
-    );
+    logger.info("Docker Compose Content:", JSON.stringify(files.dockerCompose));
+    logger.info("Dockerfile Content:", JSON.stringify(files.dockerfile));
 
-    // Basic validation of generated files
     if (!files.dockerfile || !files.dockerCompose) {
       throw new Error("Missing required deployment files");
     }
 
-    // Create a temporary directory for validation
     const tempDir = `/tmp/deploy-validate-${Date.now()}`;
     try {
-      // Create temp directory
       await fs.mkdir(tempDir, { recursive: true });
 
-      // Write files with explicit encoding
       const composePath = path.join(tempDir, "docker-compose.yml");
       const dockerfilePath = path.join(tempDir, "Dockerfile");
-
-      // Create a dummy .env file for validation
       const envPath = path.join(tempDir, ".env.production");
 
       await Promise.all([
@@ -192,11 +223,9 @@ class TemplateHandler {
         fs.writeFile(envPath, "DUMMY_ENV=true\n", "utf8"),
       ]);
 
-      // Log the actual file content after writing
       const writtenContent = await fs.readFile(composePath, "utf8");
       logger.info("Written docker-compose.yml content:", writtenContent);
 
-      // Modified docker-compose command to use --env-file
       const { stdout, stderr } = await execAsync(
         `cd ${tempDir} && docker-compose config`,
         {
@@ -216,7 +245,6 @@ class TemplateHandler {
       logger.error("Validation error details:", error);
       throw error;
     } finally {
-      // Cleanup
       try {
         await fs.rm(tempDir, { recursive: true, force: true });
       } catch (cleanupError) {
@@ -225,94 +253,56 @@ class TemplateHandler {
     }
   }
 
-  async generateDeploymentFiles(appConfig) {
+  async generateDeploymentFiles({
+    appType,
+    appName,
+    environment,
+    domain,
+    envFile,
+    buildConfig = {},
+  }) {
     logger.info(
-      "Starting file generation with detailed config:",
+      "Starting file generation with config:",
       JSON.stringify(
         {
-          ...appConfig,
-          githubToken: "[REDACTED]",
+          appType,
+          appName,
+          environment,
+          domain,
+          buildConfig,
         },
         null,
         2
       )
     );
 
-    const {
-      appType,
-      appName,
-      environment,
-      port: requestedPort,
-      envFile,
-      buildConfig = {},
-      domain,
-    } = appConfig;
-
-    // Get or allocate port
-    let deploymentPort = requestedPort;
-    if (!deploymentPort) {
-      deploymentPort = await portManager.allocatePort(appName, environment);
-      logger.info(
-        `Allocated host port ${deploymentPort} for ${appName}-${environment}`
-      );
-    } else {
-      logger.info(
-        `Using requested host port ${deploymentPort} for ${appName}-${environment}`
-      );
-    }
-
-    const CONTAINER_PORT = 8080;
-
     const config = this.mergeDefaults(appType, buildConfig);
-    logger.info("Merged configuration:", JSON.stringify(config, null, 2));
-
+    const CONTAINER_PORT = 8080;
     const serviceName = `${appName}-${environment}`
       .toLowerCase()
       .replace(/[^a-z0-9-]/g, "-");
 
-    // Generate docker-compose.yml without duplicate networks
-    const dockerComposeContent = `version: "3.8"
-services:
-  ${serviceName}:
-    container_name: ${serviceName}
-    build:
-      context: .
-      dockerfile: Dockerfile
-    ports:
-      - "${deploymentPort}:${CONTAINER_PORT}"
-    environment:
-      - NODE_ENV=${environment}
-      - PORT=${CONTAINER_PORT}
-    env_file:
-      - .env.${environment}
-    restart: unless-stopped
-    networks:
-      - app-network
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:${CONTAINER_PORT}/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
+    // Load the appropriate service template
+    const serviceTemplate = await this.loadTemplate(
+      `config/${appType}-service.template`
+    );
 
-networks:
-  app-network:
-    driver: bridge
-    name: ${serviceName}-network`;
+    const dockerComposeContent = serviceTemplate({
+      serviceName,
+      environment,
+      containerPort: CONTAINER_PORT,
+      domain,
+      config,
+    });
 
-    // Generate Dockerfile with curl for healthcheck
-    const dockerfileContent = `FROM node:18-alpine
+    const dockerfileContent = `FROM node:${config.nodeVersion || "18"}-alpine
+
 # Install curl for healthcheck
 RUN apk add --no-cache curl
 
 WORKDIR /app
 
-# Copy package files first for better caching
+# Copy package files
 COPY package*.json ./
 
 # Install dependencies
@@ -329,63 +319,28 @@ ENV NODE_ENV=${environment}
 ENV PORT=${CONTAINER_PORT}
 
 # Create healthcheck endpoint
-RUN echo "const http=require('http');const server=http.createServer((req,res)=>{if(req.url==='/health'){res.writeHead(200);res.end('OK');}});server.listen(${deploymentPort});" > healthcheck.js
-
-# Add dotenv loading script
-RUN echo "require('dotenv').config(); require('./healthcheck');" > load-env.js
+RUN echo "const http=require('http');const server=http.createServer((req,res)=>{if(req.url==='/health'){res.writeHead(200);res.end('OK');}});server.listen(${CONTAINER_PORT});" > healthcheck.js
 
 # Expose container port
 EXPOSE ${CONTAINER_PORT}
 
 # Start the application
-CMD ["sh", "-c", "node load-env.js & npm start"]`;
+CMD ["npm", "start"]`;
 
-    logger.info("Generated docker-compose.yml:", dockerComposeContent);
-    logger.info("Generated Dockerfile:", dockerfileContent);
+    const files = {
+      dockerCompose: dockerComposeContent,
+      dockerfile: dockerfileContent,
+      allocatedPort: CONTAINER_PORT,
+    };
 
     // Validate the generated files
-    const tempValidationDir = `/tmp/validate-${Date.now()}`;
-    try {
-      await fs.mkdir(tempValidationDir, { recursive: true });
-      await fs.writeFile(
-        path.join(tempValidationDir, "docker-compose.yml"),
-        dockerComposeContent
-      );
-      await fs.writeFile(
-        path.join(tempValidationDir, "Dockerfile"),
-        dockerfileContent
-      );
-      await fs.writeFile(
-        path.join(tempValidationDir, `.env.${environment}`),
-        "NODE_ENV=production\n"
-      );
+    await this.validateGeneratedFiles(files);
 
-      // Validate docker-compose file
-      const { stdout: validationOutput } = await executeCommand(
-        "docker-compose",
-        ["config"],
-        { cwd: tempValidationDir }
-      );
-      logger.info("Docker compose validation output:", validationOutput);
-
-      return {
-        dockerCompose: dockerComposeContent,
-        dockerfile: dockerfileContent,
-        allocatedPort: deploymentPort,
-      };
-    } catch (error) {
-      logger.error("File validation failed:", error);
-      throw error;
-    } finally {
-      // Cleanup temporary directory
-      await fs
-        .rm(tempValidationDir, { recursive: true, force: true })
-        .catch(() => {});
-    }
+    return files;
   }
 
   async validateConfig(appConfig) {
-    const required = ["appType", "appName", "environment", "port"];
+    const required = ["appType", "appName", "environment", "domain"];
     const missing = required.filter((field) => !appConfig[field]);
 
     if (missing.length > 0) {
@@ -396,23 +351,10 @@ CMD ["sh", "-c", "node load-env.js & npm start"]`;
       throw new Error(`Unsupported application type: ${appConfig.appType}`);
     }
 
-    const typeConfig = this.deployConfig[appConfig.appType];
-    const requiredTemplates = [
-      typeConfig.dockerfileTemplate,
-      typeConfig.dockerComposeTemplate,
-      appConfig.appType === "react" ? typeConfig.nginxTemplate : null,
-    ].filter(Boolean);
-
-    for (const template of requiredTemplates) {
-      try {
-        await fs.access(path.join(this.templatesDir, template));
-      } catch (error) {
-        throw new Error(`Template ${template} not found`);
-      }
-    }
-
     return true;
   }
 }
+
+module.exports = TemplateHandler;
 
 module.exports = TemplateHandler;
