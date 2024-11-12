@@ -327,7 +327,7 @@ class TemplateHandler {
     ENV PORT=${deploymentPort}  
     
     # Create healthcheck endpoint
-    RUN echo "const http=require('http');const server=http.createServer((req,res)=>{if(req.url==='/health'){res.writeHead(200);res.end('OK');}});server.listen(${deploymentPort});" > healthcheck.js  // Changed this
+    RUN echo "const http=require('http');const server=http.createServer((req,res)=>{if(req.url==='/health'){res.writeHead(200);res.end('OK');}});server.listen(${deploymentPort});" > healthcheck.js  
     
     # Add dotenv loading script
     RUN echo "require('dotenv').config(); require('./healthcheck');" > load-env.js
