@@ -648,29 +648,29 @@ setup_nginx() {
     # Remove default nginx site if it exists
     rm -f /etc/nginx/sites-enabled/default
 
-    # Add default server configuration
-    log "Setting up default server configuration..."
-    cat > /etc/nginx/conf.d/default.conf << EOF
-    server {
-        listen 80 default_server;
-        server_name _;
+# Add default server configuration
+log "Setting up default server configuration..."
+cat > /etc/nginx/conf.d/default.conf << 'EOF'
+server {
+    listen 80 default_server;
+    server_name _;
 
-        location / {
-            return 200 'Server is running\\n';
-            add_header Content-Type text/plain;
-        }
+    location / {
+        return 200 'Server is running\n';
+        add_header Content-Type text/plain;
     }
-    EOF
+}
+EOF
 
-    # Verify the configuration file was written correctly
-    if [ ! -f /etc/nginx/conf.d/default.conf ]; then
-        log_error "Failed to create default server configuration"
-        return 1
-    fi
+# Verify the configuration file was written correctly
+if [ ! -f /etc/nginx/conf.d/default.conf ]; then
+    log_error "Failed to create default server configuration"
+    return 1
+fi
 
-    # Log the configuration content
-    log "Default server configuration:"
-    cat /etc/nginx/conf.d/default.conf
+# Log the configuration content
+log "Default server configuration:"
+cat /etc/nginx/conf.d/default.conf
     
     # Set up main nginx configuration
     cat > /etc/nginx/nginx.conf << 'EOF'
