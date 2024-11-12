@@ -157,6 +157,27 @@ install_dependencies() {
     log "Dependencies installed."
 }
 
+check_permissions() {
+    # Check if we can write to BASE_DIR
+    if [ ! -w "$BASE_DIR" ]; then
+        log_error "Cannot write to $BASE_DIR"
+        exit 1
+    }
+
+    # Check if we can create directories
+    if ! mkdir -p "$BASE_DIR/test" 2>/dev/null; then
+        log_error "Cannot create directories in $BASE_DIR"
+        exit 1
+    fi
+    rm -rf "$BASE_DIR/test"
+
+    # Check if Docker socket is accessible
+    if [ ! -w "/var/run/docker.sock" ]; then
+        log_error "Cannot access Docker socket. Make sure you're running as root or in the docker group"
+        exit 1
+    }
+}
+
 # Function to install Docker
 install_docker() {
     log "Checking Docker installation..."
@@ -389,23 +410,21 @@ setup_traefik_proxy() {
         systemctl disable nginx || true
     fi
 
-    # Create base Traefik directory
+    # First remove any existing Traefik setup
+    rm -rf "${BASE_DIR}/traefik"
+
+    # Create directory structure
     TRAEFIK_DIR="${BASE_DIR}/traefik"
-    mkdir -p "${TRAEFIK_DIR}"
+    mkdir -p "${TRAEFIK_DIR}"/{config,certs}
 
-    # Create subdirectories
-    mkdir -p "${TRAEFIK_DIR}/config"
-    mkdir -p "${TRAEFIK_DIR}/certs"
+    log "Creating Traefik configuration files..."
 
-    # Create and secure acme.json
-    if [ ! -f "${TRAEFIK_DIR}/acme.json" ]; then
-        touch "${TRAEFIK_DIR}/acme.json"
-        chmod 600 "${TRAEFIK_DIR}/acme.json"
-    fi
+    # Create acme.json file with proper permissions
+    touch "${TRAEFIK_DIR}/acme.json"
+    chmod 600 "${TRAEFIK_DIR}/acme.json"
 
-    # Create Traefik configuration file
-    TRAEFIK_CONFIG="${TRAEFIK_DIR}/traefik.yml"
-    cat > "${TRAEFIK_CONFIG}" << 'EOF'
+    # Create traefik.yml configuration file
+    tee "${TRAEFIK_DIR}/traefik.yml" > /dev/null << EOF
 api:
   dashboard: true
   insecure: false
@@ -441,7 +460,7 @@ EOF
 
     # Set proper permissions
     chown -R "$USERNAME:$USERNAME" "${TRAEFIK_DIR}"
-    chmod 644 "${TRAEFIK_CONFIG}"
+    chmod 644 "${TRAEFIK_DIR}/traefik.yml"
     
     # Create docker-compose file for Traefik
     TRAEFIK_DOMAIN=${DOMAIN:-$(curl -s https://api.ipify.org || echo "localhost")}
@@ -452,8 +471,8 @@ EOF
     # Generate htpasswd string
     HTPASSWD=$(docker run --rm httpd:2.4-alpine htpasswd -nb "${ADMIN_USER}" "${ADMIN_PASSWORD}" | sed -e s/\\$/\\$\\$/g)
     
-    COMPOSE_FILE="$BASE_DIR/docker-compose.proxy.yml"
-    cat > "${COMPOSE_FILE}" << EOF
+    COMPOSE_FILE="${BASE_DIR}/docker-compose.proxy.yml"
+    tee "${COMPOSE_FILE}" > /dev/null << EOF
 version: "3.8"
 services:
   traefik:
@@ -492,12 +511,6 @@ EOF
         docker network create traefik-public || true
     fi
 
-    # Stop and remove existing Traefik container if it exists
-    if docker ps -a | grep -q "traefik"; then
-        docker stop traefik || true
-        docker rm traefik || true
-    fi
-
     # Start Traefik
     log "Starting Traefik..."
     if ! docker-compose -f "${COMPOSE_FILE}" up -d; then
@@ -506,19 +519,17 @@ EOF
         exit 1
     fi
 
-    # Wait for container to start
+    # Wait for container to start and verify
     sleep 5
-
-    # Check if container is running
     if ! docker ps | grep -q traefik; then
         log_error "Failed to start Traefik proxy. Check docker logs:"
         docker logs traefik
         exit 1
     fi
 
-    # Save credentials to a file
+    # Save credentials
     CREDS_FILE="${TRAEFIK_DIR}/credentials.txt"
-    cat > "${CREDS_FILE}" << EOF
+    tee "${CREDS_FILE}" > /dev/null << EOF
 Traefik Dashboard Credentials:
 URL: https://${TRAEFIK_DOMAIN}
 Username: ${ADMIN_USER}
@@ -681,6 +692,7 @@ main() {
 
     update_system
     install_dependencies
+    check_permissions
     install_docker
     setup_traefik_proxy
     install_node
