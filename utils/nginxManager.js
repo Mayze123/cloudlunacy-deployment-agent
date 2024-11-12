@@ -28,18 +28,24 @@ class NginxManager {
 
   async ensureDirectories() {
     try {
-      // Only create template directory since nginx directories should already exist
       await fs
         .mkdir(path.dirname(this.templatePath), { recursive: true })
         .catch(() => {});
 
-      // Create default template if it doesn't exist
+      // Updated template to include better headers and security
       const templateContent = `server {
     listen 80;
     server_name {{domain}};
 
+    # Security headers
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "no-referrer-when-downgrade" always;
+
+    # Application
     location / {
-        proxy_pass http://127.0.0.1:{{port}};
+        proxy_pass http://127.0.0.1:{{hostPort}};
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
@@ -48,13 +54,15 @@ class NginxManager {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
 
+        # Better timeout configuration
         proxy_connect_timeout 60s;
         proxy_send_timeout 60s;
         proxy_read_timeout 60s;
     }
 
+    # WebSocket support
     location /socket.io/ {
-        proxy_pass http://127.0.0.1:{{port}};
+        proxy_pass http://127.0.0.1:{{hostPort}};
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
@@ -63,10 +71,23 @@ class NginxManager {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
 
+        # WebSocket specific timeouts
         proxy_connect_timeout 7d;
         proxy_send_timeout 7d;
         proxy_read_timeout 7d;
     }
+
+    # Error pages
+    error_page 404 /404.html;
+    error_page 500 502 503 504 /50x.html;
+
+    # Enable gzip compression
+    gzip on;
+    gzip_disable "msie6";
+    gzip_vary on;
+    gzip_proxied any;
+    gzip_comp_level 6;
+    gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript;
 }`;
       await fs
         .writeFile(this.templatePath, templateContent, "utf8")
@@ -77,9 +98,9 @@ class NginxManager {
     }
   }
 
-  async configureNginx(domain, port) {
+  async configureNginx(domain, hostPort) {
     try {
-      logger.info(`Configuring Nginx for ${domain} on port ${port}`);
+      logger.info(`Configuring Nginx for ${domain} on host port ${hostPort}`);
 
       // Read template
       const template = await fs.readFile(this.templatePath, "utf-8");
@@ -87,26 +108,27 @@ class NginxManager {
         throw new Error("Nginx template not found");
       }
 
-      // Replace variables
+      // Replace variables (renamed port to hostPort for clarity)
       const config = template
         .replace(/\{\{domain\}\}/g, domain)
-        .replace(/\{\{port\}\}/g, port);
+        .replace(/\{\{hostPort\}\}/g, hostPort);
 
-      // Write configuration using tee (allowed in sudoers)
+      // Write configuration
       const configPath = path.join(this.sitesAvailablePath, domain);
       await executeCommand("sudo", ["tee", configPath], { input: config });
 
-      // Create symlink (allowed in sudoers)
+      // Create symlink
       const enabledPath = path.join(this.sitesEnabledPath, domain);
       await executeCommand("sudo", ["ln", "-sf", configPath, enabledPath]);
 
-      // Test and reload nginx (allowed in sudoers)
-      await executeCommand("sudo", ["nginx", "-t"]);
-      await executeCommand("sudo", ["systemctl", "reload", "nginx"]);
+      // Verify configuration before reloading
+      await this.verifyAndReload();
 
-      logger.info(`Nginx configuration completed for ${domain}`);
+      logger.info(
+        `Nginx configuration completed for ${domain} (proxying to port ${hostPort})`
+      );
     } catch (error) {
-      logger.error("Nginx configuration failed:", error);
+      logger.error(`Nginx configuration failed for ${domain}:`, error);
       await this.collectNginxDiagnostics();
       throw error;
     }

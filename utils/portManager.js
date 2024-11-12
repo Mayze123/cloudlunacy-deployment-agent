@@ -1,15 +1,9 @@
-const fs = require("fs").promises;
-const path = require("path");
-const logger = require("./logger");
-const { executeCommand } = require("./executor");
-const net = require("net");
-
 class PortManager {
   constructor() {
     this.portsFile = "/opt/cloudlunacy/config/ports.json";
-    this.portRangeStart = 3000;
-    this.portRangeEnd = 3999;
-    this.reservedPorts = new Set([3000]); // Reserved for system use
+    this.portRangeStart = 30000;
+    this.portRangeEnd = 32767;
+    this.reservedPorts = new Set();
   }
 
   async initialize() {
@@ -66,11 +60,41 @@ class PortManager {
     }
   }
 
+  async isPortSafeToUse(port) {
+    try {
+      const { stdout } = await executeCommand("lsof", ["-i", `:${port}`]);
+      const processes = stdout
+        .split("\n")
+        .filter((line) => line.trim())
+        .map((line) => {
+          const [command] = line.split(/\s+/);
+          return command;
+        });
+
+      const criticalProcesses = [
+        "nginx",
+        "apache",
+        "mysql",
+        "postgresql",
+        "redis",
+      ];
+
+      return !processes.some((proc) =>
+        criticalProcesses.some((critical) =>
+          proc.toLowerCase().includes(critical)
+        )
+      );
+    } catch (error) {
+      return true;
+    }
+  }
+
   async findNextAvailablePort(startPort) {
     let port = startPort;
     while (port <= this.portRangeEnd) {
       const inUse = await this.isPortInUse(port);
-      if (!inUse && !this.reservedPorts.has(port)) {
+      const isSafe = await this.isPortSafeToUse(port);
+      if (!inUse && isSafe && !this.reservedPorts.has(port)) {
         return port;
       }
       port++;
@@ -81,29 +105,26 @@ class PortManager {
   async allocatePort(appName, environment) {
     const appId = `${appName}-${environment}`.toLowerCase();
 
-    // If port is already allocated, verify it's actually available
+    // If port is already allocated, verify it's actually available and safe
     if (this.portMap[appId]) {
       const currentPort = this.portMap[appId];
       const inUse = await this.isPortInUse(currentPort);
+      const isSafe = await this.isPortSafeToUse(currentPort);
 
-      if (!inUse) {
+      if (!inUse && isSafe) {
         logger.info(`Reusing existing port ${currentPort} for ${appId}`);
         return currentPort;
       } else {
         logger.warn(
-          `Previously allocated port ${currentPort} for ${appId} is in use, finding new port`
+          `Previously allocated port ${currentPort} for ${appId} is ${
+            inUse ? "in use" : "not safe"
+          }, finding new port`
         );
         delete this.portMap[appId];
       }
     }
 
-    // Get all allocated ports
-    const allocatedPorts = new Set([
-      ...Object.values(this.portMap),
-      ...this.reservedPorts,
-    ]);
-
-    // Find first available port that's not allocated and not in use
+    // Find first available and safe port
     try {
       const port = await this.findNextAvailablePort(this.portRangeStart);
       this.portMap[appId] = port;
@@ -133,12 +154,17 @@ class PortManager {
 
   async killProcessOnPort(port) {
     try {
-      // Get process using the port
+      if (!(await this.isPortSafeToUse(port))) {
+        logger.warn(
+          `Port ${port} is used by a critical service, skipping kill`
+        );
+        return false;
+      }
+
       const { stdout } = await executeCommand("lsof", ["-i", `:${port}`]);
       const lines = stdout.split("\n");
 
       for (const line of lines) {
-        // Skip header line
         if (line.includes("PID")) continue;
 
         const parts = line.trim().split(/\s+/);
@@ -162,12 +188,18 @@ class PortManager {
   }
 
   async ensurePortAvailable(port) {
+    if (!(await this.isPortSafeToUse(port))) {
+      logger.warn(
+        `Port ${port} is used by a critical service, cannot ensure availability`
+      );
+      return false;
+    }
+
     const inUse = await this.isPortInUse(port);
     if (inUse) {
       logger.warn(`Port ${port} is in use, attempting to free it`);
       const killed = await this.killProcessOnPort(port);
       if (killed) {
-        // Wait a bit for the port to be fully released
         await new Promise((resolve) => setTimeout(resolve, 1000));
         return true;
       }

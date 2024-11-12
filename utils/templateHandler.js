@@ -253,13 +253,15 @@ class TemplateHandler {
     if (!deploymentPort) {
       deploymentPort = await portManager.allocatePort(appName, environment);
       logger.info(
-        `Allocated port ${deploymentPort} for ${appName}-${environment}`
+        `Allocated host port ${deploymentPort} for ${appName}-${environment}`
       );
     } else {
       logger.info(
-        `Using requested port ${deploymentPort} for ${appName}-${environment}`
+        `Using requested host port ${deploymentPort} for ${appName}-${environment}`
       );
     }
+
+    const CONTAINER_PORT = 8080;
 
     const config = this.mergeDefaults(appType, buildConfig);
     logger.info("Merged configuration:", JSON.stringify(config, null, 2));
@@ -277,17 +279,17 @@ services:
       context: .
       dockerfile: Dockerfile
     ports:
-      - "${deploymentPort}:${deploymentPort}"
+      - "${deploymentPort}:${CONTAINER_PORT}"
     environment:
       - NODE_ENV=${environment}
-      - PORT=${deploymentPort}
+      - PORT=${CONTAINER_PORT}
     env_file:
       - .env.${environment}
     restart: unless-stopped
     networks:
       - app-network
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:${deploymentPort}/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:${CONTAINER_PORT}/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -324,13 +326,16 @@ COPY .env.${environment} .env
 
 # Set environment variables
 ENV NODE_ENV=${environment}
-ENV PORT=${deploymentPort}
+ENV PORT=${CONTAINER_PORT}
 
 # Create healthcheck endpoint
 RUN echo "const http=require('http');const server=http.createServer((req,res)=>{if(req.url==='/health'){res.writeHead(200);res.end('OK');}});server.listen(${deploymentPort});" > healthcheck.js
 
 # Add dotenv loading script
 RUN echo "require('dotenv').config(); require('./healthcheck');" > load-env.js
+
+# Expose container port
+EXPOSE ${CONTAINER_PORT}
 
 # Start the application
 CMD ["sh", "-c", "node load-env.js & npm start"]`;
