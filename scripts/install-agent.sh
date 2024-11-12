@@ -391,16 +391,14 @@ setup_nginx_proxy() {
         log_warn "Port 80 is in use. Stopping system nginx if running..."
         systemctl stop nginx || true
         systemctl disable nginx || true
-        
-        # Double check if port is still in use
-        sleep 2
-        if lsof -i :80 >/dev/null 2>&1; then
-            log_error "Port 80 is still in use. Please free up port 80 before continuing."
-            lsof -i :80
-            exit 1
-        fi
     fi
 
+    # Create directories with correct ownership from the start
+    log "Creating nginx directories..."
+    mkdir -p "${BASE_DIR}/nginx/"{conf.d,vhost.d,html,certs}
+    chown -R "$USERNAME:$USERNAME" "${BASE_DIR}/nginx"
+    chmod -R 775 "${BASE_DIR}/nginx"  # More permissive
+    
     # Create dedicated network for proxy
     docker network create nginx-proxy || true
     
@@ -425,13 +423,14 @@ services:
       - ${BASE_DIR}/nginx/certs:/etc/nginx/certs:ro
     networks:
       - nginx-proxy
+    user: "${USERNAME}"  # Run nginx as cloudlunacy user
 networks:
   nginx-proxy:
     external: true
 EOF
 
-    # Create directory structure
-    mkdir -p "${BASE_DIR}/nginx/"{conf.d,vhost.d,html,certs}
+    # Set compose file permissions
+    chown "$USERNAME:$USERNAME" "$BASE_DIR/docker-compose.proxy.yml"
     
     # Create default configuration
     cat > "${BASE_DIR}/nginx/conf.d/default.conf" << EOF
@@ -446,17 +445,12 @@ server {
 }
 EOF
 
-    # Set proper permissions
-    chown -R "$USERNAME:$USERNAME" "${BASE_DIR}/nginx"
-    chmod -R 755 "${BASE_DIR}/nginx"
+    # Ensure proper ownership of default config
+    chown "$USERNAME:$USERNAME" "${BASE_DIR}/nginx/conf.d/default.conf"
+    chmod 664 "${BASE_DIR}/nginx/conf.d/default.conf"
 
-    # Stop any existing docker-compose services
-    if [ -f "$BASE_DIR/docker-compose.proxy.yml" ]; then
-        docker-compose -f "$BASE_DIR/docker-compose.proxy.yml" down || true
-    fi
-
-    # Start the proxy
-    docker-compose -f "$BASE_DIR/docker-compose.proxy.yml" up -d
+    # Start the proxy as the cloudlunacy user
+    sudo -u "$USERNAME" docker-compose -f "$BASE_DIR/docker-compose.proxy.yml" up -d
 
     # Verify the proxy started successfully
     if ! docker ps | grep -q nginx-proxy; then

@@ -9,9 +9,6 @@ class NginxManager {
     this.configDir = `${this.baseDir}/nginx/conf.d`;
     this.proxyNetwork = "nginx-proxy";
     this.proxyContainer = "nginx-proxy";
-    this.initialize().catch((error) => {
-      logger.error("Failed to initialize NginxManager:", error);
-    });
   }
 
   async initialize() {
@@ -36,23 +33,15 @@ class NginxManager {
       ];
 
       for (const dir of dirs) {
-        await fs.mkdir(dir, { recursive: true });
-      }
+        try {
+          await fs.access(dir);
+        } catch {
+          // If directory doesn't exist, try to create it
+          await fs.mkdir(dir, { recursive: true, mode: 0o775 });
+        }
 
-      // Create default configuration if it doesn't exist
-      const defaultConfigPath = path.join(this.configDir, "default.conf");
-      if (!(await fs.access(defaultConfigPath).catch(() => false))) {
-        const defaultConfig = `
-server {
-    listen 80 default_server;
-    server_name _;
-    
-    location / {
-        return 200 'Server is running\\n';
-        add_header Content-Type text/plain;
-    }
-}`;
-        await fs.writeFile(defaultConfigPath, defaultConfig);
+        // Try to set permissions even if directory exists
+        await fs.chmod(dir, 0o775);
       }
 
       return true;
@@ -159,25 +148,12 @@ server {
         proxy_send_timeout 60s;
         proxy_read_timeout 60s;
     }
-
-    location /socket.io/ {
-        proxy_pass http://host.docker.internal:${hostPort};
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        
-        proxy_connect_timeout 7d;
-        proxy_send_timeout 7d;
-        proxy_read_timeout 7d;
-    }
 }`;
 
-      // Write config file
-      await fs.writeFile(path.join(this.configDir, `${domain}.conf`), config);
+      // Use fs.writeFile with mode
+      await fs.writeFile(path.join(this.configDir, `${domain}.conf`), config, {
+        mode: 0o664,
+      });
 
       // Reload nginx container
       await executeCommand("docker", [
