@@ -270,70 +270,70 @@ class TemplateHandler {
 
     // Generate docker-compose.yml without duplicate networks
     const dockerComposeContent = `version: "3.8"
-    services:
-      ${serviceName}:
-        container_name: ${serviceName}
-        build:
-          context: .
-          dockerfile: Dockerfile
-        ports:
-          - "${deploymentPort}:${deploymentPort}"
-        environment:
-          - NODE_ENV=${environment}
-          - PORT=${deploymentPort}
-        env_file:
-          - .env.${environment}
-        restart: unless-stopped
-        networks:
-          - app-network
-        healthcheck:
-          test: ["CMD", "curl", "-f", "http://localhost:${deploymentPort}/health"]
-          interval: 30s
-          timeout: 10s
-          retries: 3
-          start_period: 40s
-        logging:
-          driver: "json-file"
-          options:
-            max-size: "10m"
-            max-file: "3"
-    
+services:
+  ${serviceName}:
+    container_name: ${serviceName}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "${deploymentPort}:${deploymentPort}"
+    environment:
+      - NODE_ENV=${environment}
+      - PORT=${deploymentPort}
+    env_file:
+      - .env.${environment}
+    restart: unless-stopped
     networks:
-      app-network:
-        driver: bridge
-        name: ${serviceName}-network`;
+      - app-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${deploymentPort}/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  app-network:
+    driver: bridge
+    name: ${serviceName}-network`;
 
     // Generate Dockerfile with curl for healthcheck
     const dockerfileContent = `FROM node:18-alpine
-    # Install curl for healthcheck
-    RUN apk add --no-cache curl
-    
-    WORKDIR /app
-    
-    # Copy package files first for better caching
-    COPY package*.json ./
-    
-    # Install dependencies
-    RUN npm ci --only=production
-    
-    # Copy application files
-    COPY . .
-    
-    # Copy environment file
-    COPY .env.${environment} .env
-    
-    # Set environment variables
-    ENV NODE_ENV=${environment}
-    ENV PORT=${deploymentPort}  
-    
-    # Create healthcheck endpoint
-    RUN echo "const http=require('http');const server=http.createServer((req,res)=>{if(req.url==='/health'){res.writeHead(200);res.end('OK');}});server.listen(${deploymentPort});" > healthcheck.js  
-    
-    # Add dotenv loading script
-    RUN echo "require('dotenv').config(); require('./healthcheck');" > load-env.js
-    
-    # Start the application
-    CMD ["sh", "-c", "node load-env.js & npm start"]`;
+# Install curl for healthcheck
+RUN apk add --no-cache curl
+
+WORKDIR /app
+
+# Copy package files first for better caching
+COPY package*.json ./
+
+# Install dependencies
+RUN npm ci --only=production
+
+# Copy application files
+COPY . .
+
+# Copy environment file
+COPY .env.${environment} .env
+
+# Set environment variables
+ENV NODE_ENV=${environment}
+ENV PORT=${deploymentPort}
+
+# Create healthcheck endpoint
+RUN echo "const http=require('http');const server=http.createServer((req,res)=>{if(req.url==='/health'){res.writeHead(200);res.end('OK');}});server.listen(${deploymentPort});" > healthcheck.js
+
+# Add dotenv loading script
+RUN echo "require('dotenv').config(); require('./healthcheck');" > load-env.js
+
+# Start the application
+CMD ["sh", "-c", "node load-env.js & npm start"]`;
 
     logger.info("Generated docker-compose.yml:", dockerComposeContent);
     logger.info("Generated Dockerfile:", dockerfileContent);
