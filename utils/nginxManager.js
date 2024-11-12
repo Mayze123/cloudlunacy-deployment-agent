@@ -186,7 +186,13 @@ http {
 
   async configureNginx(domain, hostPort) {
     try {
-      logger.info(`Configuring Nginx for ${domain} on host port ${hostPort}`);
+      logger.info(
+        `Starting Nginx configuration for ${domain} on port ${hostPort}`
+      );
+
+      // Verify directories exist
+      await executeCommand("sudo", ["mkdir", "-p", this.sitesAvailablePath]);
+      await executeCommand("sudo", ["mkdir", "-p", this.sitesEnabledPath]);
 
       // Read template
       const template = await fs.readFile(this.templatePath, "utf-8");
@@ -199,27 +205,81 @@ http {
         .replace(/\{\{domain\}\}/g, domain)
         .replace(/\{\{hostPort\}\}/g, hostPort);
 
-      // Write configuration
+      // Write configuration with explicit logging
       const configPath = path.join(this.sitesAvailablePath, domain);
+      logger.info(`Writing Nginx config to ${configPath}`);
       await executeCommand("sudo", ["tee", configPath], { input: config });
 
-      // Create symlink
+      // Verify the file was written
+      const writtenConfig = await executeCommand("sudo", ["cat", configPath]);
+      if (!writtenConfig.stdout.includes(domain)) {
+        throw new Error("Nginx configuration file was not written correctly");
+      }
+
+      // Create symlink with verification
       const enabledPath = path.join(this.sitesEnabledPath, domain);
       await executeCommand("sudo", ["ln", "-sf", configPath, enabledPath]);
 
-      // Verify configuration before reloading
-      await this.verifyAndReload();
+      // Verify symlink
+      const symlinkExists = await executeCommand("sudo", [
+        "test",
+        "-L",
+        enabledPath,
+      ]);
+      if (symlinkExists.code !== 0) {
+        throw new Error("Nginx symlink was not created correctly");
+      }
 
-      // Verify site is accessible
-      await this.verifySiteAccess(domain, hostPort);
+      // Test configuration before reload
+      await executeCommand("sudo", ["nginx", "-t"]);
 
-      logger.info(
-        `Nginx configuration completed for ${domain} (proxying to port ${hostPort})`
-      );
+      // Reload nginx
+      await executeCommand("sudo", ["systemctl", "reload", "nginx"]);
+
+      logger.info(`Nginx configuration completed for ${domain}`);
     } catch (error) {
       logger.error(`Nginx configuration failed for ${domain}:`, error);
-      await this.collectNginxDiagnostics();
+      // Collect diagnostic information
+      await this.collectDiagnostics(domain);
       throw error;
+    }
+  }
+
+  async collectDiagnostics(domain) {
+    try {
+      const configPath = path.join(this.sitesAvailablePath, domain);
+      const enabledPath = path.join(this.sitesEnabledPath, domain);
+
+      logger.error("Nginx Diagnostics:");
+      logger.error(
+        "1. Configuration file existence:",
+        await executeCommand("sudo", ["test", "-f", configPath])
+          .then(() => "Yes")
+          .catch(() => "No")
+      );
+      logger.error(
+        "2. Symlink existence:",
+        await executeCommand("sudo", ["test", "-L", enabledPath])
+          .then(() => "Yes")
+          .catch(() => "No")
+      );
+      logger.error(
+        "3. Nginx error log:",
+        (
+          await executeCommand("sudo", [
+            "tail",
+            "-n",
+            "20",
+            "/var/log/nginx/error.log",
+          ])
+        ).stdout
+      );
+      logger.error(
+        "4. Nginx configuration test:",
+        (await executeCommand("sudo", ["nginx", "-t"])).stderr
+      );
+    } catch (error) {
+      logger.error("Failed to collect diagnostics:", error);
     }
   }
 
