@@ -265,260 +265,6 @@ install_node() {
 USERNAME="cloudlunacy"
 BASE_DIR="/opt/cloudlunacy"
 
-# Function to install Nginx if not present
-install_nginx() {
-    log "Checking Nginx installation..."
-    if command -v nginx >/dev/null 2>&1; then
-        log "Nginx is already installed."
-    else
-        log "Installing Nginx..."
-        case "$OS_TYPE" in
-            ubuntu | debian | raspbian)
-                apt-get install -y nginx
-                ;;
-            centos | rhel | fedora | rocky | almalinux)
-                if command -v dnf >/dev/null 2>&1; then
-                    dnf install -y nginx
-                else
-                    yum install -y nginx
-                fi
-                ;;
-            *)
-                log_error "Nginx installation not supported on this OS."
-                exit 1
-                ;;
-        esac
-    fi
-}
-
-# Function to set up Nginx configuration and permissions
-setup_nginx() {
-    log "Setting up Nginx configuration and permissions..."
-    
-    # Create required directories
-    mkdir -p /etc/nginx/{sites-available,sites-enabled,conf.d}
-    mkdir -p "$BASE_DIR/templates/nginx"
-    
-    # Remove default nginx site if it exists
-    rm -f /etc/nginx/sites-enabled/default
-    
-    # Set up main nginx configuration
-    cat > /etc/nginx/nginx.conf << 'EOF'
-user www-data;
-worker_processes auto;
-pid /run/nginx.pid;
-include /etc/nginx/modules-enabled/*.conf;
-
-events {
-    worker_connections 768;
-}
-
-http {
-    sendfile on;
-    tcp_nopush on;
-    tcp_nodelay on;
-    keepalive_timeout 65;
-    types_hash_max_size 2048;
-    server_names_hash_bucket_size 128;
-    client_max_body_size 50M;
-
-    include /etc/nginx/mime.types;
-    default_type application/octet-stream;
-
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_prefer_server_ciphers on;
-
-    access_log /var/log/nginx/access.log;
-    error_log /var/log/nginx/error.log;
-
-    gzip on;
-    gzip_vary on;
-    gzip_proxied any;
-    gzip_comp_level 6;
-    gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript;
-
-    include /etc/nginx/conf.d/*.conf;
-    include /etc/nginx/sites-enabled/*;
-}
-EOF
-
-    # Set up Nginx virtual host template
-    cat > "$BASE_DIR/templates/nginx/virtual-host.template" << 'EOF'
-server {
-    listen 80;
-    server_name {{domain}};
-
-    # Security headers
-    add_header X-Frame-Options "SAMEORIGIN" always;
-    add_header X-XSS-Protection "1; mode=block" always;
-    add_header X-Content-Type-Options "nosniff" always;
-    add_header Referrer-Policy "no-referrer-when-downgrade" always;
-    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
-
-    location / {
-        proxy_pass http://127.0.0.1:{{port}};
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-
-        # Add timeout configurations
-        proxy_connect_timeout 60s;
-        proxy_send_timeout 60s;
-        proxy_read_timeout 60s;
-    }
-
-    location /socket.io/ {
-        proxy_pass http://127.0.0.1:{{port}};
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-
-        # WebSocket specific timeouts
-        proxy_connect_timeout 7d;
-        proxy_send_timeout 7d;
-        proxy_read_timeout 7d;
-    }
-
-    # Enable gzip compression
-    gzip on;
-    gzip_vary on;
-    gzip_proxied any;
-    gzip_comp_level 6;
-    gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript;
-}
-EOF
-
-    # Create systemd drop-in directory
-    mkdir -p /etc/systemd/system/nginx.service.d/
-
-    # Create drop-in file for nginx service
-    cat > /etc/systemd/system/nginx.service.d/override.conf << EOF
-[Service]
-User=www-data
-Group=www-data
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-ReadWritePaths=/etc/nginx/sites-available /etc/nginx/sites-enabled
-EOF
-
-    # Set correct ownership and permissions
-    chown -R root:root /etc/nginx
-    chown -R "$USERNAME:www-data" /etc/nginx/sites-available
-    chown -R "$USERNAME:www-data" /etc/nginx/sites-enabled
-    chmod 755 /etc/nginx
-    chmod 775 /etc/nginx/sites-available
-    chmod 775 /etc/nginx/sites-enabled
-    
-    # Set proper permissions on template directory
-    chown -R "$USERNAME:$USERNAME" "$BASE_DIR/templates"
-    chmod -R 750 "$BASE_DIR/templates"
-    chmod 640 "$BASE_DIR/templates/nginx/virtual-host.template"
-
-    # Create sudoers configuration
-    cat > /etc/sudoers.d/cloudlunacy-nginx << EOF
-# Allow cloudlunacy user to manage nginx without password
-$USERNAME ALL=(ALL) NOPASSWD: /usr/sbin/nginx
-$USERNAME ALL=(ALL) NOPASSWD: /usr/sbin/nginx -t
-$USERNAME ALL=(ALL) NOPASSWD: /bin/systemctl reload nginx
-$USERNAME ALL=(ALL) NOPASSWD: /bin/systemctl restart nginx
-$USERNAME ALL=(ALL) NOPASSWD: /usr/bin/tee /etc/nginx/sites-available/*
-$USERNAME ALL=(ALL) NOPASSWD: /usr/bin/tee /etc/nginx/sites-enabled/*
-$USERNAME ALL=(ALL) NOPASSWD: /bin/ln -sf /etc/nginx/sites-available/* /etc/nginx/sites-enabled/*
-$USERNAME ALL=(ALL) NOPASSWD: /bin/rm -f /etc/nginx/sites-available/*
-$USERNAME ALL=(ALL) NOPASSWD: /bin/rm -f /etc/nginx/sites-enabled/*
-$USERNAME ALL=(ALL) NOPASSWD: /bin/mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled
-$USERNAME ALL=(ALL) NOPASSWD: /usr/bin/tail -n 50 /var/log/nginx/error.log
-$USERNAME ALL=(ALL) NOPASSWD: /usr/bin/tail -f /var/log/nginx/error.log
-$USERNAME ALL=(ALL) NOPASSWD: /usr/bin/cat /var/log/nginx/error.log
-$USERNAME ALL=(ALL) NOPASSWD: /usr/bin/cat /etc/nginx/nginx.conf
-$USERNAME ALL=(ALL) NOPASSWD: /usr/bin/test -f /etc/nginx/sites-available/*
-$USERNAME ALL=(ALL) NOPASSWD: /usr/bin/test -L /etc/nginx/sites-enabled/*
-$USERNAME ALL=(ALL) NOPASSWD: /usr/bin/journalctl -xeu nginx.service --no-pager -n 50
-EOF
-
-    # Set proper permissions on sudoers file
-    chmod 440 /etc/sudoers.d/cloudlunacy-nginx
-
-    # Add cloudlunacy user to www-data group
-    usermod -aG www-data "$USERNAME"
-
-    # Export SUDO_COMMAND for non-interactive sudo
-    echo "export SUDO_COMMAND=$(which sudo)" >> /etc/profile.d/cloudlunacy.sh
-    chmod 644 /etc/profile.d/cloudlunacy.sh
-
-    # Reload systemd and restart nginx
-    systemctl daemon-reload
-    systemctl restart nginx
-
-    log "Nginx setup completed successfully"
-}
-
-# Function to verify nginx setup
-verify_nginx_setup() {
-    log "Verifying Nginx setup..."
-    
-    # Check if nginx is running
-    if ! systemctl is-active --quiet nginx; then
-        log_error "Nginx is not running"
-        systemctl status nginx
-        return 1
-    fi
-
-    # Check if nginx configuration is valid
-    if ! sudo -n nginx -t >/dev/null 2>&1; then
-        log_error "Nginx configuration is invalid"
-        sudo -n nginx -t
-        return 1
-    fi
-
-    # Check directory permissions
-    if ! test -w "/etc/nginx/sites-available" || ! test -w "/etc/nginx/sites-enabled"; then
-        log_error "Nginx directories are not writable by $USERNAME"
-        ls -la /etc/nginx/sites-available /etc/nginx/sites-enabled
-        return 1
-    fi
-
-    # Verify sudo permissions work
-    if ! sudo -n nginx -t >/dev/null 2>&1; then
-        log_error "Sudo permissions are not correctly configured"
-        return 1
-    fi
-
-    # Test nginx is responding to requests
-    if ! curl -s --fail http://localhost/ -o /dev/null; then
-        # If main page fails, check if nginx is listening
-        if ! netstat -tlpn | grep -q ':80.*nginx'; then
-            log_error "Nginx is not listening on port 80"
-            netstat -tlpn | grep nginx
-            return 1
-        fi
-        # If nginx is listening but not responding, check logs
-        log_error "Nginx is running but not serving requests. Checking logs..."
-        tail -n 50 /var/log/nginx/error.log
-        return 1
-    fi
-
-    log "Nginx setup verification completed successfully"
-    return 0
-}
-
-# Function to validate nginx configuration
-validate_nginx_config() {
-    if ! sudo -n nginx -t >/dev/null 2>&1; then
-        log_error "Invalid nginx configuration"
-        sudo -n nginx -t
-        return 1
-    fi
-    return 0
-}
-
 # Function to create dedicated user and directories
 setup_user_directories() {
     log "Creating dedicated user and directories..."
@@ -637,24 +383,44 @@ EOF'
     log "SSH setup completed."
 }
 
-# Function to set up Nginx directories and permissions
-setup_nginx() {
-    log "Setting up Nginx configuration and permissions..."
+setup_nginx_proxy() {
+    log "Setting up Nginx Proxy..."
     
-    # Create required directories
-    mkdir -p /etc/nginx/{sites-available,sites-enabled,conf.d}
-    mkdir -p "$BASE_DIR/templates/nginx"
+    # Create dedicated network for proxy
+    docker network create nginx-proxy || true
     
-    # Remove default nginx site if it exists
-    rm -f /etc/nginx/sites-enabled/default
+    # Create nginx proxy container
+    cat > "$BASE_DIR/docker-compose.proxy.yml" << EOF
+version: "3.8"
+services:
+  nginx-proxy:
+    image: nginx:alpine
+    container_name: nginx-proxy
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ${BASE_DIR}/nginx/conf.d:/etc/nginx/conf.d
+      - ${BASE_DIR}/nginx/vhost.d:/etc/nginx/vhost.d
+      - ${BASE_DIR}/nginx/html:/usr/share/nginx/html
+      - ${BASE_DIR}/nginx/certs:/etc/nginx/certs:ro
+    networks:
+      - nginx-proxy
+networks:
+  nginx-proxy:
+    external: true
+EOF
 
-# Add default server configuration
-log "Setting up default server configuration..."
-cat > /etc/nginx/conf.d/default.conf << 'EOF'
+    # Create directory structure
+    mkdir -p "${BASE_DIR}/nginx/"{conf.d,vhost.d,html,certs}
+    
+    # Create default configuration
+    cat > "${BASE_DIR}/nginx/conf.d/default.conf" << EOF
 server {
     listen 80 default_server;
     server_name _;
-
+    
     location / {
         return 200 'Server is running\n';
         add_header Content-Type text/plain;
@@ -662,225 +428,13 @@ server {
 }
 EOF
 
-# Verify the configuration file was written correctly
-if [ ! -f /etc/nginx/conf.d/default.conf ]; then
-    log_error "Failed to create default server configuration"
-    return 1
-fi
-
-# Log the configuration content
-log "Default server configuration:"
-cat /etc/nginx/conf.d/default.conf
-    
-    # Set up main nginx configuration
-    cat > /etc/nginx/nginx.conf << 'EOF'
-user www-data;
-worker_processes auto;
-pid /run/nginx.pid;
-include /etc/nginx/modules-enabled/*.conf;
-
-events {
-    worker_connections 768;
-}
-
-http {
-    sendfile on;
-    tcp_nopush on;
-    tcp_nodelay on;
-    keepalive_timeout 65;
-    types_hash_max_size 2048;
-    server_names_hash_bucket_size 128;
-    client_max_body_size 50M;
-
-    include /etc/nginx/mime.types;
-    default_type application/octet-stream;
-
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_prefer_server_ciphers on;
-
-    access_log /var/log/nginx/access.log;
-    error_log /var/log/nginx/error.log;
-
-    gzip on;
-    gzip_vary on;
-    gzip_proxied any;
-    gzip_comp_level 6;
-    gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript;
-
-    include /etc/nginx/conf.d/*.conf;
-    include /etc/nginx/sites-enabled/*;
-}
-EOF
-
-    # Set up Nginx virtual host template
-    cat > "$BASE_DIR/templates/nginx/virtual-host.template" << 'EOF'
-server {
-    listen 80;
-    server_name {{domain}};
-
-    # Security headers
-    add_header X-Frame-Options "SAMEORIGIN" always;
-    add_header X-XSS-Protection "1; mode=block" always;
-    add_header X-Content-Type-Options "nosniff" always;
-    add_header Referrer-Policy "no-referrer-when-downgrade" always;
-    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
-
-    location / {
-        proxy_pass http://127.0.0.1:{{port}};
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-
-        # Add timeout configurations
-        proxy_connect_timeout 60s;
-        proxy_send_timeout 60s;
-        proxy_read_timeout 60s;
-    }
-
-    location /socket.io/ {
-        proxy_pass http://127.0.0.1:{{port}};
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-
-        # WebSocket specific timeouts
-        proxy_connect_timeout 7d;
-        proxy_send_timeout 7d;
-        proxy_read_timeout 7d;
-    }
-
-    # Enable gzip compression
-    gzip on;
-    gzip_vary on;
-    gzip_proxied any;
-    gzip_comp_level 6;
-    gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript;
-}
-EOF
-
-    # Set correct ownership and permissions
-    chown -R root:root /etc/nginx
-    chown -R "$USERNAME:www-data" /etc/nginx/sites-available
-    chown -R "$USERNAME:www-data" /etc/nginx/sites-enabled
-    chmod 755 /etc/nginx
-    chmod 775 /etc/nginx/sites-available
-    chmod 775 /etc/nginx/sites-enabled
-    
-    # Set proper permissions on template directory
-    chown -R "$USERNAME:$USERNAME" "$BASE_DIR/templates"
-    chmod -R 750 "$BASE_DIR/templates"
-    chmod 640 "$BASE_DIR/templates/nginx/virtual-host.template"
-
-    # Create comprehensive sudoers configuration
-    cat > /etc/sudoers.d/cloudlunacy-nginx << EOF
-# Allow cloudlunacy user to manage nginx without password
-$USERNAME ALL=(ALL) NOPASSWD: /usr/sbin/nginx
-$USERNAME ALL=(ALL) NOPASSWD: /usr/sbin/nginx -t
-$USERNAME ALL=(ALL) NOPASSWD: /bin/systemctl reload nginx
-$USERNAME ALL=(ALL) NOPASSWD: /bin/systemctl restart nginx
-$USERNAME ALL=(ALL) NOPASSWD: /usr/bin/tee /etc/nginx/sites-available/*
-$USERNAME ALL=(ALL) NOPASSWD: /usr/bin/tee /etc/nginx/sites-enabled/*
-$USERNAME ALL=(ALL) NOPASSWD: /bin/ln -sf /etc/nginx/sites-available/* /etc/nginx/sites-enabled/*
-$USERNAME ALL=(ALL) NOPASSWD: /bin/rm -f /etc/nginx/sites-available/*
-$USERNAME ALL=(ALL) NOPASSWD: /bin/rm -f /etc/nginx/sites-enabled/*
-$USERNAME ALL=(ALL) NOPASSWD: /bin/mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled
-$USERNAME ALL=(ALL) NOPASSWD: /usr/bin/tail -n 50 /var/log/nginx/error.log
-$USERNAME ALL=(ALL) NOPASSWD: /usr/bin/tail -f /var/log/nginx/error.log
-$USERNAME ALL=(ALL) NOPASSWD: /usr/bin/cat /var/log/nginx/error.log
-$USERNAME ALL=(ALL) NOPASSWD: /usr/bin/cat /etc/nginx/nginx.conf
-$USERNAME ALL=(ALL) NOPASSWD: /usr/bin/test -f /etc/nginx/sites-available/*
-$USERNAME ALL=(ALL) NOPASSWD: /usr/bin/test -L /etc/nginx/sites-enabled/*
-$USERNAME ALL=(ALL) NOPASSWD: /usr/bin/journalctl -xeu nginx.service --no-pager -n 50
-EOF
-
-    # Set proper permissions on sudoers file
-    chmod 440 /etc/sudoers.d/cloudlunacy-nginx
-
-    # Add cloudlunacy user to www-data group
-    usermod -aG www-data "$USERNAME"
-
-    # Test nginx configuration
-    nginx -t
-
-    # Restart nginx to apply changes
-    systemctl restart nginx
-
-    log "Nginx setup completed successfully"
-}
-
-setup_nginx_templates() {
-    log "Setting up Nginx configuration templates..."
-    
-    # Create templates directory with proper ownership
-    NGINX_TEMPLATE_DIR="$BASE_DIR/templates/nginx"
-    mkdir -p "$NGINX_TEMPLATE_DIR"
-    chown -R "$USERNAME:$USERNAME" "$BASE_DIR/templates"
-    
-    # Create the virtual host template
-    cat > "$NGINX_TEMPLATE_DIR/virtual-host.template" << 'EOF'
-server {
-    listen 80;
-    server_name {{domain}};
-
-    location / {
-        proxy_pass http://127.0.0.1:{{port}};
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-
-    location /socket.io/ {
-        proxy_pass http://127.0.0.1:{{port}};
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-}
-EOF
-
     # Set proper permissions
-    chown "$USERNAME:$USERNAME" "$NGINX_TEMPLATE_DIR/virtual-host.template"
-    chmod 640 "$NGINX_TEMPLATE_DIR/virtual-host.template"
-    
-    log "Nginx templates created successfully"
-}
+    chown -R "$USERNAME:$USERNAME" "${BASE_DIR}/nginx"
+    chmod -R 755 "${BASE_DIR}/nginx"
 
-setup_nginx_permissions() {
-    log "Configuring Nginx sudo permissions..."
-    
-    # Create sudoers.d file for cloudlunacy nginx permissions
-    cat <<EOF > /etc/sudoers.d/cloudlunacy-nginx
-# Allow cloudlunacy user to manage nginx
-cloudlunacy ALL=(ALL) NOPASSWD: /usr/sbin/nginx
-cloudlunacy ALL=(ALL) NOPASSWD: /bin/systemctl reload nginx
-cloudlunacy ALL=(ALL) NOPASSWD: /bin/systemctl restart nginx
-cloudlunacy ALL=(ALL) NOPASSWD: /usr/bin/tee /etc/nginx/sites-available/*
-cloudlunacy ALL=(ALL) NOPASSWD: /usr/bin/tee /etc/nginx/sites-enabled/*
-cloudlunacy ALL=(ALL) NOPASSWD: /bin/ln -sf /etc/nginx/sites-available/* /etc/nginx/sites-enabled/*
-cloudlunacy ALL=(ALL) NOPASSWD: /bin/rm /etc/nginx/sites-available/*
-cloudlunacy ALL=(ALL) NOPASSWD: /bin/rm /etc/nginx/sites-enabled/*
-EOF
-
-    # Set proper permissions on the sudoers file
-    chmod 440 /etc/sudoers.d/cloudlunacy-nginx
-    
-    log "Nginx sudo permissions configured."
+    # Start the proxy
+    docker-compose -f "$BASE_DIR/docker-compose.proxy.yml" up -d
+    log "Nginx Proxy setup completed"
 }
 
 setup_docker_permissions() {
@@ -1024,20 +578,10 @@ main() {
     update_system
     install_dependencies
     install_docker
-    install_nginx
-    setup_nginx
-    verify_nginx_setup || {
-        log_error "Nginx setup verification failed"
-        exit 1
-    }
-    validate_nginx_config || {
-        log_error "Nginx configuration validation failed"
-        exit 1
-    }
+    setup_nginx_proxy
     install_node
     setup_user_directories
     setup_docker_permissions
-    setup_nginx_permissions
     setup_ssh "$GITHUB_SSH_KEY"
     download_agent
     install_agent_dependencies
