@@ -277,17 +277,17 @@ class TemplateHandler {
           context: .
           dockerfile: Dockerfile
         ports:
-          - "${deploymentPort}:${deploymentPort}"  // Changed this
+          - "${deploymentPort}:${deploymentPort}"
         environment:
           - NODE_ENV=${environment}
-          - PORT=${deploymentPort}  // Changed this
+          - PORT=${deploymentPort}
         env_file:
           - .env.${environment}
         restart: unless-stopped
         networks:
           - app-network
         healthcheck:
-          test: ["CMD", "curl", "-f", "http://localhost:${deploymentPort}/health"]  // Changed this
+          test: ["CMD", "curl", "-f", "http://localhost:${deploymentPort}/health"]
           interval: 30s
           timeout: 10s
           retries: 3
