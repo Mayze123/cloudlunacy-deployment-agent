@@ -177,7 +177,7 @@ check_permissions() {
     if [ ! -w "/var/run/docker.sock" ]; then
         log_error "Cannot access Docker socket. Make sure you're running as root or in the docker group"
         exit 1
-    }
+    fi
     
     log "Permission checks passed"
 }
