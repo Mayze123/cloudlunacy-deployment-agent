@@ -397,9 +397,9 @@ setup_nginx_proxy() {
         systemctl disable nginx || true
     fi
 
-    # Create directories with correct ownership
+    # Create all required directories with correct ownership
     log "Creating nginx directories..."
-    mkdir -p "${BASE_DIR}/nginx/"{conf.d,vhost.d,html,certs}
+    mkdir -p "${BASE_DIR}/nginx/"{conf.d,vhost.d,html,certs,temp/{client,proxy,fastcgi,uwsgi,scgi}}
     chown -R "$USERNAME:$USERNAME" "${BASE_DIR}/nginx"
     chmod -R 775 "${BASE_DIR}/nginx"
     
@@ -408,6 +408,43 @@ setup_nginx_proxy() {
     
     # Remove existing proxy container if it exists
     docker rm -f nginx-proxy >/dev/null 2>&1 || true
+
+    # Create base nginx configuration
+    cat > "${BASE_DIR}/nginx/nginx.conf" << EOF
+worker_processes auto;
+pid /tmp/nginx.pid;
+
+events {
+    worker_connections 768;
+}
+
+http {
+    client_body_temp_path /temp/client;
+    proxy_temp_path /temp/proxy;
+    fastcgi_temp_path /temp/fastcgi;
+    uwsgi_temp_path /temp/uwsgi;
+    scgi_temp_path /temp/scgi;
+
+    sendfile on;
+    tcp_nopush on;
+    tcp_nodelay on;
+    keepalive_timeout 65;
+    types_hash_max_size 2048;
+
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers on;
+
+    access_log /dev/stdout;
+    error_log /dev/stderr;
+
+    gzip on;
+
+    include /etc/nginx/conf.d/*.conf;
+}
+EOF
     
     # Create nginx proxy container
     cat > "$BASE_DIR/docker-compose.proxy.yml" << EOF
@@ -421,10 +458,12 @@ services:
       - "80:80"
       - "443:443"
     volumes:
+      - ${BASE_DIR}/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ${BASE_DIR}/nginx/conf.d:/etc/nginx/conf.d
       - ${BASE_DIR}/nginx/vhost.d:/etc/nginx/vhost.d
       - ${BASE_DIR}/nginx/html:/usr/share/nginx/html
       - ${BASE_DIR}/nginx/certs:/etc/nginx/certs:ro
+      - ${BASE_DIR}/nginx/temp:/temp
     networks:
       - nginx-proxy
     user: "${USER_UID}:${USER_GID}"
@@ -432,9 +471,6 @@ networks:
   nginx-proxy:
     external: true
 EOF
-
-    # Set compose file permissions
-    chown "$USERNAME:$USERNAME" "$BASE_DIR/docker-compose.proxy.yml"
     
     # Create default configuration
     cat > "${BASE_DIR}/nginx/conf.d/default.conf" << EOF
@@ -449,16 +485,22 @@ server {
 }
 EOF
 
-    # Ensure proper ownership of default config
+    # Ensure proper ownership of all files
+    chown "$USERNAME:$USERNAME" "$BASE_DIR/docker-compose.proxy.yml"
+    chown "$USERNAME:$USERNAME" "${BASE_DIR}/nginx/nginx.conf"
     chown "$USERNAME:$USERNAME" "${BASE_DIR}/nginx/conf.d/default.conf"
     chmod 664 "${BASE_DIR}/nginx/conf.d/default.conf"
+    chmod 664 "${BASE_DIR}/nginx/nginx.conf"
 
     # Start the proxy
     docker-compose -f "$BASE_DIR/docker-compose.proxy.yml" up -d
 
-    # Verify the proxy started successfully
+    # Wait a moment for the container to start
+    sleep 2
+
+    # Check if container is running
     if ! docker ps | grep -q nginx-proxy; then
-        log_error "Failed to start nginx proxy. Check docker logs."
+        log_error "Failed to start nginx proxy. Check docker logs:"
         docker logs nginx-proxy
         exit 1
     fi
