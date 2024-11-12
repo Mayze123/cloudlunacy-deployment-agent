@@ -80,88 +80,50 @@ http {
 
   async ensureDirectories() {
     try {
-      // Create required directories
-      const dirs = [
-        "/etc/nginx/sites-available",
-        "/etc/nginx/sites-enabled",
-        "/etc/nginx/conf.d",
-        path.dirname(this.templatePath),
-      ];
-
-      for (const dir of dirs) {
-        await executeCommand("sudo", ["mkdir", "-p", dir]).catch(() => {});
+      // Check if we can write to directories directly first
+      try {
+        await fs.access(this.sitesAvailablePath, fs.constants.W_OK);
+        await fs.access(this.sitesEnabledPath, fs.constants.W_OK);
+        logger.info("Direct access to nginx directories confirmed");
+        return true;
+      } catch (error) {
+        logger.warn(
+          "Cannot directly access nginx directories, falling back to sudo"
+        );
       }
 
-      const templateContent = `server {
-    listen 80;
-    server_name {{domain}};
+      // Try using process.env.SUDO_COMMAND if available (set by installation script)
+      if (process.env.SUDO_COMMAND) {
+        await executeCommand(process.env.SUDO_COMMAND, [
+          "mkdir",
+          "-p",
+          this.sitesAvailablePath,
+        ]);
+        await executeCommand(process.env.SUDO_COMMAND, [
+          "mkdir",
+          "-p",
+          this.sitesEnabledPath,
+        ]);
+        return true;
+      }
 
-    # Security headers
-    add_header X-Frame-Options "SAMEORIGIN" always;
-    add_header X-XSS-Protection "1; mode=block" always;
-    add_header X-Content-Type-Options "nosniff" always;
-    add_header Referrer-Policy "no-referrer-when-downgrade" always;
-
-    # Application
-    location / {
-        proxy_pass http://127.0.0.1:{{hostPort}};
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-
-        # Better timeout configuration
-        proxy_connect_timeout 60s;
-        proxy_send_timeout 60s;
-        proxy_read_timeout 60s;
-    }
-
-    # WebSocket support
-    location /socket.io/ {
-        proxy_pass http://127.0.0.1:{{hostPort}};
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-
-        # WebSocket specific timeouts
-        proxy_connect_timeout 7d;
-        proxy_send_timeout 7d;
-        proxy_read_timeout 7d;
-    }
-
-    # Error pages
-    error_page 404 /404.html;
-    error_page 500 502 503 504 /50x.html;
-
-    # Enable gzip compression
-    gzip on;
-    gzip_disable "msie6";
-    gzip_vary on;
-    gzip_proxied any;
-    gzip_comp_level 6;
-    gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript;
-}`;
-
-      await executeCommand("sudo", ["tee", this.templatePath], {
-        input: templateContent,
-      });
-
+      // Last resort: try using sudo with -n flag (non-interactive)
       await executeCommand("sudo", [
-        "chown",
-        "-R",
-        "www-data:www-data",
-        "/etc/nginx",
+        "-n",
+        "mkdir",
+        "-p",
+        this.sitesAvailablePath,
       ]);
+      await executeCommand("sudo", [
+        "-n",
+        "mkdir",
+        "-p",
+        this.sitesEnabledPath,
+      ]);
+      return true;
     } catch (error) {
-      logger.error("Failed to ensure directories:", error);
-      throw error;
+      logger.error("Failed to ensure nginx directories:", error);
+      return false;
     }
   }
 
@@ -186,61 +148,74 @@ http {
 
   async configureNginx(domain, hostPort) {
     try {
-      logger.info(
-        `Starting Nginx configuration for ${domain} on port ${hostPort}`
-      );
+      logger.info(`Configuring Nginx for ${domain} on port ${hostPort}`);
 
-      // Verify directories exist
-      await executeCommand("sudo", ["mkdir", "-p", this.sitesAvailablePath]);
-      await executeCommand("sudo", ["mkdir", "-p", this.sitesEnabledPath]);
+      // Ensure we can access required directories
+      if (!(await this.ensureDirectories())) {
+        throw new Error("Cannot access required nginx directories");
+      }
 
       // Read template
-      const template = await fs.readFile(this.templatePath, "utf-8");
-      if (!template) {
+      let template;
+      try {
+        template = await fs.readFile(this.templatePath, "utf-8");
+      } catch (error) {
+        logger.error("Failed to read nginx template:", error);
         throw new Error("Nginx template not found");
       }
 
       // Replace variables
       const config = template
         .replace(/\{\{domain\}\}/g, domain)
-        .replace(/\{\{hostPort\}\}/g, hostPort);
+        .replace(/\{\{port\}\}/g, hostPort);
 
-      // Write configuration with explicit logging
+      // Determine available write method
+      const writeConfig = async (content, targetPath) => {
+        try {
+          // Try direct write first
+          await fs.writeFile(targetPath, content);
+        } catch (error) {
+          // Fall back to echo and redirect
+          await executeCommand("bash", [
+            "-c",
+            `echo '${content}' > ${targetPath}`,
+          ]);
+        }
+      };
+
+      // Write configuration
       const configPath = path.join(this.sitesAvailablePath, domain);
-      logger.info(`Writing Nginx config to ${configPath}`);
-      await executeCommand("sudo", ["tee", configPath], { input: config });
-
-      // Verify the file was written
-      const writtenConfig = await executeCommand("sudo", ["cat", configPath]);
-      if (!writtenConfig.stdout.includes(domain)) {
-        throw new Error("Nginx configuration file was not written correctly");
-      }
-
-      // Create symlink with verification
       const enabledPath = path.join(this.sitesEnabledPath, domain);
-      await executeCommand("sudo", ["ln", "-sf", configPath, enabledPath]);
 
-      // Verify symlink
-      const symlinkExists = await executeCommand("sudo", [
-        "test",
-        "-L",
-        enabledPath,
-      ]);
-      if (symlinkExists.code !== 0) {
-        throw new Error("Nginx symlink was not created correctly");
+      await writeConfig(config, configPath);
+
+      // Create symlink if it doesn't exist
+      try {
+        await fs.symlink(configPath, enabledPath);
+      } catch (error) {
+        if (error.code !== "EEXIST") {
+          throw error;
+        }
       }
 
-      // Test configuration before reload
-      await executeCommand("sudo", ["nginx", "-t"]);
-
-      // Reload nginx
-      await executeCommand("sudo", ["systemctl", "reload", "nginx"]);
+      // Try to reload nginx through systemctl
+      try {
+        await executeCommand("systemctl", ["reload", "nginx"]);
+      } catch (error) {
+        logger.warn("Failed to reload nginx through systemctl:", error);
+        // Fall back to direct nginx reload
+        try {
+          await executeCommand("nginx", ["-s", "reload"]);
+        } catch (reloadError) {
+          logger.error("Failed to reload nginx:", reloadError);
+          throw new Error("Failed to reload nginx configuration");
+        }
+      }
 
       logger.info(`Nginx configuration completed for ${domain}`);
+      return true;
     } catch (error) {
       logger.error(`Nginx configuration failed for ${domain}:`, error);
-      // Collect diagnostic information
-      await this.collectDiagnostics(domain);
       throw error;
     }
   }
@@ -359,23 +334,34 @@ http {
 
   async removeConfig(domain) {
     try {
-      const configExists = await this.getExistingConfig(domain);
-      if (!configExists) {
-        logger.info(`No existing Nginx configuration found for ${domain}`);
-        return;
+      const configPath = path.join(this.sitesAvailablePath, domain);
+      const enabledPath = path.join(this.sitesEnabledPath, domain);
+
+      try {
+        await fs.unlink(enabledPath);
+      } catch (error) {
+        if (error.code !== "ENOENT") {
+          logger.warn(`Failed to remove enabled config for ${domain}:`, error);
+        }
       }
 
-      await executeCommand("sudo", [
-        "rm",
-        "-f",
-        path.join(this.sitesAvailablePath, domain),
-      ]);
-      await executeCommand("sudo", [
-        "rm",
-        "-f",
-        path.join(this.sitesEnabledPath, domain),
-      ]);
-      await this.verifyAndReload();
+      try {
+        await fs.unlink(configPath);
+      } catch (error) {
+        if (error.code !== "ENOENT") {
+          logger.warn(
+            `Failed to remove available config for ${domain}:`,
+            error
+          );
+        }
+      }
+
+      // Try to reload nginx configuration
+      try {
+        await executeCommand("systemctl", ["reload", "nginx"]);
+      } catch (error) {
+        await executeCommand("nginx", ["-s", "reload"]);
+      }
 
       logger.info(`Removed Nginx configuration for ${domain}`);
     } catch (error) {
