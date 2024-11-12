@@ -2,7 +2,6 @@ const { executeCommand } = require("./executor");
 const logger = require("./logger");
 const fs = require("fs").promises;
 const path = require("path");
-const shelljs = require("shelljs");
 
 class NginxManager {
   constructor() {
@@ -17,8 +16,9 @@ class NginxManager {
 
   async initialize() {
     try {
-      // Create directories if they don't exist
       await this.ensureDirectories();
+      await this.setupMainConfig();
+      await this.startNginx();
       logger.info("NginxManager initialized successfully");
     } catch (error) {
       logger.error("NginxManager initialization failed:", error);
@@ -26,13 +26,72 @@ class NginxManager {
     }
   }
 
+  async setupMainConfig() {
+    try {
+      const mainConfig = `
+user www-data;
+worker_processes auto;
+pid /run/nginx.pid;
+include /etc/nginx/modules-enabled/*.conf;
+
+events {
+    worker_connections 768;
+}
+
+http {
+    sendfile on;
+    tcp_nopush on;
+    tcp_nodelay on;
+    keepalive_timeout 65;
+    types_hash_max_size 2048;
+
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers on;
+
+    access_log /var/log/nginx/access.log;
+    error_log /var/log/nginx/error.log;
+
+    gzip on;
+
+    include /etc/nginx/conf.d/*.conf;
+    include /etc/nginx/sites-enabled/*;
+
+    server_names_hash_bucket_size 64;
+    client_max_body_size 50M;
+}`;
+
+      await executeCommand("sudo", ["tee", "/etc/nginx/nginx.conf"], {
+        input: mainConfig,
+      });
+
+      await executeCommand("sudo", [
+        "rm",
+        "-f",
+        "/etc/nginx/sites-enabled/default",
+      ]).catch(() => {});
+    } catch (error) {
+      logger.error("Failed to setup main Nginx config:", error);
+      throw error;
+    }
+  }
+
   async ensureDirectories() {
     try {
-      await fs
-        .mkdir(path.dirname(this.templatePath), { recursive: true })
-        .catch(() => {});
+      // Create required directories
+      const dirs = [
+        "/etc/nginx/sites-available",
+        "/etc/nginx/sites-enabled",
+        "/etc/nginx/conf.d",
+        path.dirname(this.templatePath),
+      ];
 
-      // Updated template to include better headers and security
+      for (const dir of dirs) {
+        await executeCommand("sudo", ["mkdir", "-p", dir]).catch(() => {});
+      }
+
       const templateContent = `server {
     listen 80;
     server_name {{domain}};
@@ -89,11 +148,38 @@ class NginxManager {
     gzip_comp_level 6;
     gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript;
 }`;
-      await fs
-        .writeFile(this.templatePath, templateContent, "utf8")
-        .catch(() => {});
+
+      await executeCommand("sudo", ["tee", this.templatePath], {
+        input: templateContent,
+      });
+
+      await executeCommand("sudo", [
+        "chown",
+        "-R",
+        "www-data:www-data",
+        "/etc/nginx",
+      ]);
     } catch (error) {
       logger.error("Failed to ensure directories:", error);
+      throw error;
+    }
+  }
+
+  async startNginx() {
+    try {
+      await executeCommand("sudo", ["systemctl", "enable", "nginx"]);
+      await executeCommand("sudo", ["systemctl", "start", "nginx"]);
+
+      const { stdout } = await executeCommand("sudo", [
+        "systemctl",
+        "is-active",
+        "nginx",
+      ]);
+      if (stdout.trim() !== "active") {
+        throw new Error("Nginx failed to start");
+      }
+    } catch (error) {
+      logger.error("Failed to start Nginx:", error);
       throw error;
     }
   }
@@ -108,7 +194,7 @@ class NginxManager {
         throw new Error("Nginx template not found");
       }
 
-      // Replace variables (renamed port to hostPort for clarity)
+      // Replace variables
       const config = template
         .replace(/\{\{domain\}\}/g, domain)
         .replace(/\{\{hostPort\}\}/g, hostPort);
@@ -124,12 +210,43 @@ class NginxManager {
       // Verify configuration before reloading
       await this.verifyAndReload();
 
+      // Verify site is accessible
+      await this.verifySiteAccess(domain, hostPort);
+
       logger.info(
         `Nginx configuration completed for ${domain} (proxying to port ${hostPort})`
       );
     } catch (error) {
       logger.error(`Nginx configuration failed for ${domain}:`, error);
       await this.collectNginxDiagnostics();
+      throw error;
+    }
+  }
+
+  async verifySiteAccess(domain, hostPort) {
+    try {
+      // Wait for nginx to fully start
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+
+      // Check if nginx is listening
+      const { stdout: listeners } = await executeCommand("sudo", [
+        "ss",
+        "-tlnp",
+      ]);
+      if (!listeners.includes(":80")) {
+        throw new Error("Nginx is not listening on port 80");
+      }
+
+      // Test local access
+      await executeCommand("curl", [
+        "--fail",
+        "--silent",
+        `http://localhost:${hostPort}`,
+      ]);
+
+      logger.info(`Site verification completed for ${domain}`);
+    } catch (error) {
+      logger.error(`Site verification failed for ${domain}:`, error);
       throw error;
     }
   }
