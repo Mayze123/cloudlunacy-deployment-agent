@@ -743,23 +743,23 @@ verify_nginx_setup() {
     fi
 
     # Check if nginx configuration is valid
-    if ! nginx -t; then
+    if ! sudo nginx -t; then
         log_error "Nginx configuration is invalid"
         return 1
-    }
+    fi
 
     # Check directory permissions
-    if [ ! -w "/etc/nginx/sites-available" ] || [ ! -w "/etc/nginx/sites-enabled" ]; then
+    if ! test -w "/etc/nginx/sites-available" || ! test -w "/etc/nginx/sites-enabled"; then
         log_error "Nginx directories are not writable by $USERNAME"
         ls -la /etc/nginx/sites-available /etc/nginx/sites-enabled
         return 1
-    }
+    fi
 
     # Verify sudo permissions
     if ! sudo -n nginx -t >/dev/null 2>&1; then
         log_error "Sudo permissions are not correctly configured"
         return 1
-    }
+    fi
 
     log "Nginx setup verification completed successfully"
     return 0
