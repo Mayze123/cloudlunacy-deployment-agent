@@ -352,4 +352,79 @@ function sendLogs(ws, deploymentId, log) {
   }
 }
 
+async function retrieveEnvironmentVariables(deploymentId, envVarsToken) {
+  try {
+    logger.info(`Fetching env vars for deployment ${deploymentId}`);
+    const { data } = await apiClient.post(
+      `/api/deploy/env-vars/${deploymentId}`,
+      {
+        token: envVarsToken,
+      }
+    );
+
+    if (!data || !data.variables) {
+      throw new Error("Invalid response format for environment variables");
+    }
+
+    logger.info("Successfully retrieved environment variables");
+    return data.variables;
+  } catch (error) {
+    logger.error("Environment variables setup failed:", error);
+    throw new Error(`Environment variables setup failed: ${error.message}`);
+  }
+}
+
+async function getContainerLogs(serviceName) {
+  try {
+    const { stdout: logs } = await executeCommand("docker", [
+      "logs",
+      serviceName,
+    ]);
+    return logs;
+  } catch (error) {
+    throw new Error(`Failed to get container logs: ${error.message}`);
+  }
+}
+
+async function ensureTraefikNetwork() {
+  try {
+    // Check if network exists
+    const { stdout: networks } = await executeCommand("docker", [
+      "network",
+      "ls",
+      "--format",
+      "{{.Name}}",
+    ]);
+    if (!networks.includes("traefik-public")) {
+      logger.info("Creating traefik-public network...");
+      await executeCommand("docker", ["network", "create", "traefik-public"]);
+      logger.info("Created traefik-public network");
+    }
+  } catch (error) {
+    throw new Error(`Failed to ensure Traefik network: ${error.message}`);
+  }
+}
+
+async function writeDeploymentFiles(files) {
+  try {
+    await Promise.all([
+      fs.writeFile("Dockerfile", files.dockerfile),
+      fs.writeFile("docker-compose.yml", files.dockerCompose),
+    ]);
+    logger.info("Deployment files written successfully");
+  } catch (error) {
+    throw new Error(`Failed to write deployment files: ${error.message}`);
+  }
+}
+
+async function validateDockerCompose() {
+  try {
+    const { stdout } = await executeCommand("docker-compose", ["config"]);
+    logger.info("Docker Compose configuration validated");
+    return true;
+  } catch (error) {
+    throw new Error(`Invalid docker-compose configuration: ${error.message}`);
+  }
+}
+
 module.exports = deployApp;
