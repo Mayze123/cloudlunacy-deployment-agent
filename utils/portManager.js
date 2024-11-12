@@ -1,4 +1,4 @@
-const { logger } = require("handlebars");
+const logger = require("./logger");
 
 class PortManager {
   constructor() {
