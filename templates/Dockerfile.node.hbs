@@ -1,6 +1,6 @@
-// templates/Dockerfile.node.hbs FROM node:{{nodeVersion}}-alpine # Install
-health check dependencies RUN apk add --no-cache wget curl WORKDIR /app #
-Install dependencies first (better layer caching) COPY package*.json ./
+FROM node:{{nodeVersion}}-alpine # Install health check dependencies RUN apk add
+--no-cache wget curl WORKDIR /app # Install dependencies first (better layer
+caching) COPY package*.json ./
 
 {{#if useYarn}}
   RUN yarn install --production
