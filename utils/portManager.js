@@ -1,3 +1,5 @@
+const { logger } = require("handlebars");
+
 class PortManager {
   constructor() {
     this.portsFile = "/opt/cloudlunacy/config/ports.json";
