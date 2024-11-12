@@ -5,28 +5,20 @@
 # Author: Mahamadou Taibou
 # Date: 2024-11-02
 #
-# Description:
-# This script installs and configures the CloudLunacy Deployment Agent on a VPS.
-# It performs the following tasks:
-#   - Detects the operating system and version
-#   - Updates system packages
-#   - Installs necessary dependencies (Docker, Node.js, Git, jq)
-#   - Creates a dedicated user with a home directory and correct permissions
-#   - Downloads the latest version of the Deployment Agent from GitHub
-#   - Installs Node.js dependencies
-#   - Configures environment variables
-#   - Sets up the Deployment Agent as a systemd service
-#   - Generates SSH keys for private repository access
-#   - Provides post-installation verification and feedback
-#
 # Usage:
-#   sudo ./install-agent.sh <AGENT_TOKEN> <SERVER_ID> [BACKEND_BASE_URL] [GITHUB_SSH_KEY]
+#   sudo DOMAIN=example.com ADMIN_EMAIL=admin@example.com ./install-agent.sh <AGENT_TOKEN> <SERVER_ID> [BACKEND_BASE_URL] [GITHUB_SSH_KEY]
 #
-# Arguments:
+# Required Environment Variables:
 #   AGENT_TOKEN      - Unique token for agent authentication
 #   SERVER_ID        - Unique identifier for the server
-#   BACKEND_BASE_URL - (Optional) Backend base URL; defaults to https://your-default-backend-url
-#   GITHUB_SSH_KEY   - (Optional) Path to existing SSH private key for accessing private repos
+#
+# Optional Environment Variables:
+#   BACKEND_BASE_URL - Backend base URL; defaults to https://your-default-backend-url
+#   GITHUB_SSH_KEY   - Path to existing SSH private key for accessing private repos
+#   DOMAIN          - Domain for Traefik dashboard (defaults to server IP)
+#   ADMIN_EMAIL     - Email for Let's Encrypt certificates
+#   ADMIN_USER      - Traefik dashboard username (defaults to "admin")
+#   ADMIN_PASSWORD  - Traefik dashboard password (auto-generated if not provided)
 # ------------------------------------------------------------------------------
 
 set -euo pipefail
@@ -436,13 +428,20 @@ providers:
 certificatesResolvers:
   letsencrypt:
     acme:
-      email: ${ADMIN_EMAIL:-admin@yourdomain.com}
+      email: ${ADMIN_EMAIL:-admin@example.com}
       storage: /etc/traefik/acme.json
       httpChallenge:
         entryPoint: web
 EOF
 
     # Create docker-compose file for Traefik
+    TRAEFIK_DOMAIN=${DOMAIN:-traefik.localhost}
+    ADMIN_USER=${ADMIN_USER:-admin}
+    # Generate a random password if not provided
+    ADMIN_PASSWORD=${ADMIN_PASSWORD:-$(openssl rand -base64 12)}
+    # Generate htpasswd string
+    HTPASSWD=$(docker run --rm httpd:2.4-alpine htpasswd -nb "${ADMIN_USER}" "${ADMIN_PASSWORD}" | sed -e s/\\$/\\$\\$/g)
+    
     cat > "$BASE_DIR/docker-compose.proxy.yml" << EOF
 version: "3.8"
 services:
@@ -467,10 +466,10 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.traefik-secure.entrypoints=websecure"
-      - "traefik.http.routers.traefik-secure.rule=Host(\`traefik.$DOMAIN\`)"
+      - "traefik.http.routers.traefik-secure.rule=Host(\`${TRAEFIK_DOMAIN}\`)"
       - "traefik.http.routers.traefik-secure.service=api@internal"
       - "traefik.http.routers.traefik-secure.middlewares=admin-auth"
-      - "traefik.http.middlewares.admin-auth.basicauth.users=admin:$$apr1$$9AY0gkTk$$SecretHashHere"
+      - "traefik.http.middlewares.admin-auth.basicauth.users=${HTPASSWD}"
 
 networks:
   traefik-public:
@@ -493,7 +492,22 @@ EOF
         exit 1
     fi
 
+    # Save credentials to a file
+    cat > "${TRAEFIK_DIR}/credentials.txt" << EOF
+Traefik Dashboard Credentials:
+URL: https://${TRAEFIK_DOMAIN}
+Username: ${ADMIN_USER}
+Password: ${ADMIN_PASSWORD}
+EOF
+
+    chmod 600 "${TRAEFIK_DIR}/credentials.txt"
+    chown "$USERNAME:$USERNAME" "${TRAEFIK_DIR}/credentials.txt"
+
     log "Traefik Proxy setup completed successfully"
+    log "Dashboard credentials saved to: ${TRAEFIK_DIR}/credentials.txt"
+    log "Dashboard URL: https://${TRAEFIK_DOMAIN}"
+    log "Username: ${ADMIN_USER}"
+    log "Password: ${ADMIN_PASSWORD}"
 }
 
 setup_docker_permissions() {
@@ -628,6 +642,12 @@ main() {
     SERVER_ID="$2"
     BACKEND_BASE_URL="${3:-https://your-default-backend-url}"
     GITHUB_SSH_KEY="${4:-}"
+
+    # Set default values for Traefik configuration
+    DOMAIN=${DOMAIN:-$(curl -s https://api.ipify.org || echo "localhost")}
+    ADMIN_EMAIL=${ADMIN_EMAIL:-"admin@${DOMAIN}"}
+    ADMIN_USER=${ADMIN_USER:-"admin"}
+    ADMIN_PASSWORD=${ADMIN_PASSWORD:-$(openssl rand -base64 12)}
 
     BACKEND_URL="${BACKEND_BASE_URL}"
 
