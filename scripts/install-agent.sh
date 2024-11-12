@@ -386,6 +386,10 @@ EOF'
 setup_nginx_proxy() {
     log "Setting up Nginx Proxy..."
     
+    # Get user's UID and GID
+    USER_UID=$(id -u "$USERNAME")
+    USER_GID=$(id -g "$USERNAME")
+    
     # Check if anything is using port 80
     if lsof -i :80 >/dev/null 2>&1; then
         log_warn "Port 80 is in use. Stopping system nginx if running..."
@@ -393,11 +397,11 @@ setup_nginx_proxy() {
         systemctl disable nginx || true
     fi
 
-    # Create directories with correct ownership from the start
+    # Create directories with correct ownership
     log "Creating nginx directories..."
     mkdir -p "${BASE_DIR}/nginx/"{conf.d,vhost.d,html,certs}
     chown -R "$USERNAME:$USERNAME" "${BASE_DIR}/nginx"
-    chmod -R 775 "${BASE_DIR}/nginx"  # More permissive
+    chmod -R 775 "${BASE_DIR}/nginx"
     
     # Create dedicated network for proxy
     docker network create nginx-proxy || true
@@ -423,7 +427,7 @@ services:
       - ${BASE_DIR}/nginx/certs:/etc/nginx/certs:ro
     networks:
       - nginx-proxy
-    user: "${USERNAME}"  # Run nginx as cloudlunacy user
+    user: "${USER_UID}:${USER_GID}"
 networks:
   nginx-proxy:
     external: true
@@ -449,8 +453,8 @@ EOF
     chown "$USERNAME:$USERNAME" "${BASE_DIR}/nginx/conf.d/default.conf"
     chmod 664 "${BASE_DIR}/nginx/conf.d/default.conf"
 
-    # Start the proxy as the cloudlunacy user
-    sudo -u "$USERNAME" docker-compose -f "$BASE_DIR/docker-compose.proxy.yml" up -d
+    # Start the proxy
+    docker-compose -f "$BASE_DIR/docker-compose.proxy.yml" up -d
 
     # Verify the proxy started successfully
     if ! docker ps | grep -q nginx-proxy; then
