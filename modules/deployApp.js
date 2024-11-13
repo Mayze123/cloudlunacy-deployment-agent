@@ -143,7 +143,7 @@ async function deployApp(payload, ws) {
       environment,
       port: deploymentPort, // Pass the explicit port
       envFile: path.basename(envFilePath),
-      domain: domain || `${serviceName}.cloudlunacy.uk`,
+      domain: domain,
     });
 
     // Write deployment files

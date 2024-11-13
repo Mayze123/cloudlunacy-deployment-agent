@@ -317,7 +317,7 @@ class TemplateHandler {
         this.deployConfig[appType].defaults.envVars ||
         {},
       traefik: {
-        domain: domain || `${sanitizedAppName}.localhost`,
+        domain: domain,
         middlewares: "security-headers@file,rate-limit@file,compress@file",
       },
     };
