@@ -104,32 +104,31 @@ class TemplateHandler {
   }
 
   registerHelpers() {
-    // Helper for JSON stringification
     Handlebars.registerHelper("json", function (context) {
       return JSON.stringify(context, null, 2);
     });
 
-    // Helper for environment variables formatting
     Handlebars.registerHelper("envVar", function (name, value) {
       if (typeof value === "object") {
         value = JSON.stringify(value);
       }
-      // Escape quotes in value if it's a string
       if (typeof value === "string") {
         value = value.replace(/"/g, '\\"');
       }
       return `${name}=${value}`;
     });
 
-    // Helper for string concatenation
     Handlebars.registerHelper("concat", function (...args) {
       args.pop(); // Remove last argument (Handlebars options)
       return args.join("");
     });
 
-    // Helper for conditional expressions
     Handlebars.registerHelper("ifEquals", function (arg1, arg2, options) {
       return arg1 === arg2 ? options.fn(this) : options.inverse(this);
+    });
+
+    Handlebars.registerHelper("sanitize", function (text) {
+      return text.toLowerCase().replace(/[^a-z0-9-]/g, "-");
     });
   }
 
@@ -228,14 +227,7 @@ class TemplateHandler {
   async generateDeploymentFiles(appConfig) {
     logger.info(
       "Starting file generation with detailed config:",
-      JSON.stringify(
-        {
-          ...appConfig,
-          githubToken: "[REDACTED]",
-        },
-        null,
-        2
-      )
+      JSON.stringify(appConfig, null, 2)
     );
 
     const {
@@ -249,19 +241,8 @@ class TemplateHandler {
     } = appConfig;
 
     // Get or allocate port
-    let deploymentPort = requestedPort;
-    if (!deploymentPort) {
-      deploymentPort = await portManager.allocatePort(appName, environment);
-      logger.info(
-        `Allocated host port ${deploymentPort} for ${appName}-${environment}`
-      );
-    } else {
-      logger.info(
-        `Using requested host port ${deploymentPort} for ${appName}-${environment}`
-      );
-    }
-
     const CONTAINER_PORT = 8080;
+    let deploymentPort = requestedPort;
 
     const config = this.mergeDefaults(appType, buildConfig);
     logger.info("Merged configuration:", JSON.stringify(config, null, 2));
@@ -270,113 +251,74 @@ class TemplateHandler {
       .toLowerCase()
       .replace(/[^a-z0-9-]/g, "-");
 
-    // Generate docker-compose.yml without duplicate networks
-    const dockerComposeContent = `version: "3.8"
-    services:
-      ${serviceName}:
-        container_name: ${serviceName}
-        build:
-          context: .
-          dockerfile: Dockerfile
-        expose:
-          - "${CONTAINER_PORT}"
-        environment:
-          - NODE_ENV=${environment}
-          - PORT=${CONTAINER_PORT}
-        env_file:
-          - .env.${environment}
-        restart: unless-stopped
-        networks:
-          - app-network
-          - traefik-proxy
-        labels:
-          - "traefik.enable=true"
-          - "traefik.http.routers.${serviceName}.rule=Host(\`${domain}\`)"
-          - "traefik.http.services.${serviceName}.loadbalancer.server.port=${CONTAINER_PORT}"
-          - "traefik.http.routers.${serviceName}.middlewares=security-headers@file,rate-limit@file,compress@file"
-          - "traefik.http.routers.${serviceName}.tls=true"
-          - "traefik.http.routers.${serviceName}.tls.certresolver=letsencrypt"
-          - "traefik.http.routers.${serviceName}.entrypoints=websecure"
-        healthcheck:
-          test: ["CMD", "curl", "-f", "http://localhost:${CONTAINER_PORT}/health"]
-          interval: 30s
-          timeout: 10s
-          retries: 3
-          start_period: 40s
-        logging:
-          driver: "json-file"
-          options:
-            max-size: "10m"
-            max-file: "3"
-    
-    networks:
-      app-network:
-        name: ${serviceName}-network
-      traefik-proxy:
-        external: true`;
+    // Load the templates
+    const dockerComposeTemplate = await this.loadTemplate(
+      "docker-compose.node.hbs"
+    );
+    const dockerfileTemplate = await this.loadTemplate("Dockerfile.node.hbs");
 
-    // Generate Dockerfile with curl for healthcheck
-    const dockerfileContent = `FROM node:18-alpine
-# Install curl for healthcheck
-RUN apk add --no-cache curl
+    // Prepare template context
+    const templateContext = {
+      appName: serviceName,
+      environment,
+      port: CONTAINER_PORT,
+      containerPort: CONTAINER_PORT,
+      hostPort: deploymentPort,
+      domain,
+      nodeVersion: config.nodeVersion || "18",
+      startCommand: config.startCommand || "npm start",
+      healthCheckEndpoint: config.healthCheckEndpoint || "/health",
+      useYarn: config.useYarn || false,
+      usePnpm: config.usePnpm || false,
+      buildCommand: config.buildCommand,
+      volumes: config.volumes || [],
+      dependencies: config.dependencies || [],
+      envVars: config.envVars || {},
+      sanitizedAppName: serviceName,
+      traefik: {
+        enable: true,
+        network: "traefik-proxy",
+        domain: domain,
+        middlewares: "security-headers@file,rate-limit@file,compress@file",
+      },
+    };
 
-WORKDIR /app
+    // Generate configurations using templates
+    const dockerComposeContent = dockerComposeTemplate(templateContext);
+    const dockerfileContent = dockerfileTemplate(templateContext);
 
-# Copy package files first for better caching
-COPY package*.json ./
-
-# Install dependencies
-RUN npm ci --only=production
-
-# Copy application files
-COPY . .
-
-# Copy environment file
-COPY .env.${environment} .env
-
-# Set environment variables
-ENV NODE_ENV=${environment}
-ENV PORT=${CONTAINER_PORT}
-
-# Create healthcheck endpoint
-RUN echo "const http=require('http');const server=http.createServer((req,res)=>{if(req.url==='/health'){res.writeHead(200);res.end('OK');}});server.listen(${deploymentPort});" > healthcheck.js
-
-# Add dotenv loading script
-RUN echo "require('dotenv').config(); require('./healthcheck');" > load-env.js
-
-# Expose container port
-EXPOSE ${CONTAINER_PORT}
-
-# Start the application
-CMD ["sh", "-c", "node load-env.js & npm start"]`;
-
+    // Log generated content
     logger.info("Generated docker-compose.yml:", dockerComposeContent);
     logger.info("Generated Dockerfile:", dockerfileContent);
 
     // Validate the generated files
-    const tempValidationDir = `/tmp/validate-${Date.now()}`;
+    const tempDir = `/tmp/deploy-validate-${Date.now()}`;
     try {
-      await fs.mkdir(tempValidationDir, { recursive: true });
-      await fs.writeFile(
-        path.join(tempValidationDir, "docker-compose.yml"),
-        dockerComposeContent
-      );
-      await fs.writeFile(
-        path.join(tempValidationDir, "Dockerfile"),
-        dockerfileContent
-      );
-      await fs.writeFile(
-        path.join(tempValidationDir, `.env.${environment}`),
-        "NODE_ENV=production\n"
-      );
+      await fs.mkdir(tempDir, { recursive: true });
+
+      // Write files for validation
+      const composePath = path.join(tempDir, "docker-compose.yml");
+      const dockerfilePath = path.join(tempDir, "Dockerfile");
+      const envPath = path.join(tempDir, `.env.${environment}`);
+
+      await Promise.all([
+        fs.writeFile(composePath, dockerComposeContent, "utf8"),
+        fs.writeFile(dockerfilePath, dockerfileContent, "utf8"),
+        fs.writeFile(envPath, "NODE_ENV=production\n", "utf8"),
+      ]);
 
       // Validate docker-compose file
-      const { stdout: validationOutput } = await executeCommand(
+      const { stdout, stderr } = await executeCommand(
         "docker-compose",
         ["config"],
-        { cwd: tempValidationDir }
+        { cwd: tempDir }
       );
-      logger.info("Docker compose validation output:", validationOutput);
+
+      if (stderr) {
+        throw new Error(`Docker compose validation failed: ${stderr}`);
+      }
+
+      logger.info("Docker compose validation succeeded:", stdout);
 
       return {
         dockerCompose: dockerComposeContent,
@@ -387,10 +329,12 @@ CMD ["sh", "-c", "node load-env.js & npm start"]`;
       logger.error("File validation failed:", error);
       throw error;
     } finally {
-      // Cleanup temporary directory
-      await fs
-        .rm(tempValidationDir, { recursive: true, force: true })
-        .catch(() => {});
+      // Cleanup
+      try {
+        await fs.rm(tempDir, { recursive: true, force: true });
+      } catch (cleanupError) {
+        logger.warn("Error cleaning up temp directory:", cleanupError);
+      }
     }
   }
 

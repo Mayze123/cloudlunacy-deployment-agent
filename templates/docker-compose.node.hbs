@@ -1,15 +1,17 @@
 // templates/docker-compose.node.hbs
 version: '3.8'
+
 services:
-  {{appName}}:
-    container_name: {{appName}}
+  {{sanitizedAppName}}:
+    container_name: {{sanitizedAppName}}
     build:
       context: .
       dockerfile: Dockerfile
     expose:
-      - "{{port}}"
+      - "{{containerPort}}"
     environment:
       - NODE_ENV={{environment}}
+      - PORT={{containerPort}}
       {{
 #if
  envVars}}
@@ -23,6 +25,8 @@ services:
       {{
 /if
 }}
+    env_file:
+      - .env.{{environment}}
     restart: unless-stopped
     {{
 #if
@@ -55,36 +59,21 @@ services:
     networks:
       - app-network
       - traefik-proxy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik-proxy"
+      - "traefik.http.routers.{{sanitizedAppName}}.rule=Host(`{{traefik.domain}}`)"
+      - "traefik.http.routers.{{sanitizedAppName}}.entrypoints=websecure"
+      - "traefik.http.routers.{{sanitizedAppName}}.tls=true"
+      - "traefik.http.routers.{{sanitizedAppName}}.tls.certresolver=letsencrypt"
+      - "traefik.http.services.{{sanitizedAppName}}.loadbalancer.server.port={{containerPort}}"
+      - "traefik.http.routers.{{sanitizedAppName}}.middlewares={{traefik.middlewares}}"
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:{{port}}{{healthCheckEndpoint}}"]
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:{{containerPort}}{{healthCheckEndpoint}}"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 15s
-    labels:
-      - "traefik.enable=true"
-      - "traefik.docker.network=traefik-proxy"
-      {{
-#if
- domain}}
-      - "traefik.http.routers.{{sanitizedAppName}}.rule=Host(`{{domain}}`)"
-      - "traefik.http.routers.{{sanitizedAppName}}.entrypoints=websecure"
-      - "traefik.http.routers.{{sanitizedAppName}}.tls=true"
-      - "traefik.http.routers.{{sanitizedAppName}}.tls.certresolver=letsencrypt"
-      - "traefik.http.services.{{sanitizedAppName}}.loadbalancer.server.port={{port}}"
-      - "traefik.http.routers.{{sanitizedAppName}}.middlewares=security-headers@file,rate-limit@file,compress@file"
-      {{
-/if
-}}
-      {{
-#if
- websocket}}
-      - "traefik.http.middlewares.{{sanitizedAppName}}-ws.headers.customrequestheaders.Connection=upgrade"
-      - "traefik.http.middlewares.{{sanitizedAppName}}-ws.headers.customrequestheaders.Upgrade=websocket"
-      - "traefik.http.routers.{{sanitizedAppName}}.middlewares={{sanitizedAppName}}-ws"
-      {{
-/if
-}}
     logging:
       driver: "json-file"
       options:
@@ -93,7 +82,7 @@ services:
 
 networks:
   app-network:
-    name: {{appName}}-network
+    name: {{sanitizedAppName}}-network
     driver: bridge
   traefik-proxy:
     external: true

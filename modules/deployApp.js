@@ -474,38 +474,67 @@ async function checkDeploymentHealth(port, containerName, domain) {
 
 async function cleanupExistingDeployment(serviceName) {
   try {
-    // Stop and remove existing container
-    await executeCommand("docker", ["stop", serviceName]).catch(() => {});
-    await executeCommand("docker", ["rm", serviceName]).catch(() => {});
-
-    // Kill any process using the required port
-    const { stdout: netstatOutput } = await executeCommand("netstat", [
-      "-tlpn",
+    // Check if container exists first
+    const { stdout: containerList } = await executeCommand("docker", [
+      "ps",
+      "-a",
+      "--format",
+      "{{.Names}}",
     ]);
-    const portProcesses = netstatOutput
-      .split("\n")
-      .filter((line) => line.includes(":3000 "))
-      .map((line) => {
-        const match = line.match(/LISTEN\s+(\d+)/);
-        return match ? match[1] : null;
-      })
-      .filter(Boolean);
+    if (containerList.includes(serviceName)) {
+      // Stop container if it exists
+      await executeCommand("docker", ["stop", serviceName]).catch((error) => {
+        logger.warn(`Failed to stop container ${serviceName}:`, error.message);
+      });
 
-    for (const pid of portProcesses) {
-      try {
-        await executeCommand("kill", ["-9", pid]);
-        logger.info(`Killed process ${pid} using port 3000`);
-      } catch (error) {
-        logger.warn(`Failed to kill process ${pid}: ${error.message}`);
-      }
+      // Remove container if it exists
+      await executeCommand("docker", ["rm", serviceName]).catch((error) => {
+        logger.warn(
+          `Failed to remove container ${serviceName}:`,
+          error.message
+        );
+      });
     }
 
-    // Remove network
-    await executeCommand("docker", ["network", "rm", "app-network"]).catch(
-      () => {}
-    );
+    // Check if network exists first
+    const { stdout: networkList } = await executeCommand("docker", [
+      "network",
+      "ls",
+      "--format",
+      "{{.Name}}",
+    ]);
+    const networkName = `${serviceName}-network`;
+    if (networkList.includes(networkName)) {
+      // Remove network if it exists
+      await executeCommand("docker", ["network", "rm", networkName]).catch(
+        (error) => {
+          logger.warn(
+            `Failed to remove network ${networkName}:`,
+            error.message
+          );
+        }
+      );
+    }
+
+    // Remove any dangling images
+    const { stdout: imageList } = await executeCommand("docker", [
+      "images",
+      "-q",
+      "-f",
+      "dangling=true",
+    ]);
+    if (imageList) {
+      await executeCommand("docker", ["rmi", ...imageList.split("\n")]).catch(
+        (error) => {
+          logger.warn("Failed to remove dangling images:", error.message);
+        }
+      );
+    }
+
+    return true;
   } catch (error) {
     logger.warn("Cleanup warning:", error);
+    return false;
   }
 }
 

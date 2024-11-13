@@ -34,7 +34,7 @@ RUN {{{buildCommand}}}
 }}
 
 # Set up health check endpoint
-RUN echo "const http=require('http');const server=http.createServer((req,res)=>{if(req.url==='/health'){res.writeHead(200);res.end('OK');}});server.listen({{port}});" > healthcheck.js
+RUN echo "const http=require('http');const server=http.createServer((req,res)=>{if(req.url==='/health'){res.writeHead(200);res.end('OK');}});server.listen({{containerPort}});" > healthcheck.js
 
 # Add dotenv loading script with improved error handling
 RUN echo 'require("dotenv").config();
@@ -56,7 +56,7 @@ RUN chown -R appuser:appgroup /app
 USER appuser
 
 # Expose port
-EXPOSE {{port}}
+EXPOSE {{containerPort}}
 
 {{
 #if

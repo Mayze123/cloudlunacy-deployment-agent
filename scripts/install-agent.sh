@@ -712,6 +712,24 @@ EOF
     log "Dashboard credentials saved to: ${BASE_DIR}/traefik/dashboard_credentials.txt"
 }
 
+setup_deployment_templates() {
+    log "Setting up deployment templates..."
+    
+    # Create templates directory
+    TEMPLATES_DIR="${BASE_DIR}/templates"
+    mkdir -p "$TEMPLATES_DIR"
+
+    # Copy templates from the cloned repository
+    cp -r "${BASE_DIR}/templates/"* "$TEMPLATES_DIR/"
+
+    # Set proper permissions
+    chown -R "$USERNAME:$USERNAME" "$TEMPLATES_DIR"
+    chmod 755 "$TEMPLATES_DIR"
+    chmod 644 "${TEMPLATES_DIR}"/*
+
+    log "Deployment templates setup completed"
+}
+
 setup_docker_permissions() {
     log "Setting up Docker permissions..."
     
@@ -860,6 +878,7 @@ main() {
     setup_ssh "$GITHUB_SSH_KEY"
     download_agent
     install_agent_dependencies
+    setup_deployment_templates
     configure_env
     setup_service
     verify_installation
