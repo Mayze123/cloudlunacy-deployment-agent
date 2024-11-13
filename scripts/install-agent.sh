@@ -508,8 +508,6 @@ EOF
     log "Nginx Proxy setup completed successfully"
 }
 
-# Add this function to your install-agent.sh script, replacing the setup_nginx_proxy function
-
 setup_traefik_proxy() {
     log "Setting up Traefik Proxy..."
     
@@ -524,23 +522,27 @@ setup_traefik_proxy() {
         systemctl disable nginx || true
     fi
 
+    # First remove any existing Traefik setup
+    rm -rf "${BASE_DIR}/traefik"
+
     # Create all required directories with correct ownership
     log "Creating Traefik directories..."
-    mkdir -p "${BASE_DIR}/traefik/"{dynamic,acme,logs}
-    chown -R "$USERNAME:$USERNAME" "${BASE_DIR}/traefik"
-    chmod -R 775 "${BASE_DIR}/traefik"
+    mkdir -p "${BASE_DIR}/traefik"/{dynamic,acme,logs}
     
-    # Create acme.json with restricted permissions
+    # Create base configuration file
+    CONFIG_FILE="${BASE_DIR}/traefik/traefik.yml"
+    touch "$CONFIG_FILE"
+    
+    # Create and secure acme.json
     touch "${BASE_DIR}/traefik/acme/acme.json"
     chmod 600 "${BASE_DIR}/traefik/acme/acme.json"
-    chown "$USERNAME:$USERNAME" "${BASE_DIR}/traefik/acme/acme.json"
     
     # Generate secure credentials for Traefik dashboard
     DASHBOARD_PASSWORD=$(openssl rand -base64 32)
     HASHED_PASSWORD=$(openssl passwd -apr1 "$DASHBOARD_PASSWORD")
     
-    # Create traefik.yml configuration
-    cat > "${BASE_DIR}/traefik/traefik.yml" << EOF
+    # Write Traefik configuration
+    cat > "$CONFIG_FILE" << 'EOF'
 global:
   checkNewVersion: true
   sendAnonymousUsage: false
@@ -590,9 +592,9 @@ certificatesResolvers:
         entryPoint: web
 EOF
 
-    # Create dynamic configuration for middlewares
-    mkdir -p "${BASE_DIR}/traefik/dynamic"
-    cat > "${BASE_DIR}/traefik/dynamic/middleware.yml" << EOF
+    # Create middleware configuration
+    MIDDLEWARE_FILE="${BASE_DIR}/traefik/dynamic/middleware.yml"
+    cat > "$MIDDLEWARE_FILE" << 'EOF'
 http:
   middlewares:
     security-headers:
@@ -618,14 +620,9 @@ http:
       compress: {}
 EOF
 
-    # Create dedicated network for proxy
-    docker network create traefik-proxy || true
-    
-    # Remove existing proxy container if it exists
-    docker rm -f traefik-proxy >/dev/null 2>&1 || true
-
-    # Create traefik proxy container
-    cat > "$BASE_DIR/docker-compose.proxy.yml" << EOF
+    # Create docker-compose file for Traefik
+    COMPOSE_FILE="${BASE_DIR}/docker-compose.proxy.yml"
+    cat > "$COMPOSE_FILE" << EOF
 version: "3.8"
 services:
   traefik-proxy:
@@ -640,6 +637,7 @@ services:
     volumes:
       - /etc/localtime:/etc/localtime:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ${BASE_DIR}/traefik/traefik.yml:/etc/traefik/traefik.yml:ro
       - ${BASE_DIR}/traefik/dynamic:/etc/traefik/dynamic:ro
       - ${BASE_DIR}/traefik/acme:/etc/traefik/acme
       - ${BASE_DIR}/traefik/logs:/etc/traefik/logs
@@ -659,29 +657,43 @@ networks:
     external: true
 EOF
 
-    # Ensure proper ownership of all files
-    chown "$USERNAME:$USERNAME" "$BASE_DIR/docker-compose.proxy.yml"
-    chown "$USERNAME:$USERNAME" "${BASE_DIR}/traefik/traefik.yml"
-    chown -R "$USERNAME:$USERNAME" "${BASE_DIR}/traefik/dynamic"
-    chmod 644 "$BASE_DIR/docker-compose.proxy.yml"
-    chmod 644 "${BASE_DIR}/traefik/traefik.yml"
-    chmod 644 "${BASE_DIR}/traefik/dynamic/middleware.yml"
+    # Set correct permissions
+    chown -R "$USERNAME:$USERNAME" "${BASE_DIR}/traefik"
+    chmod 755 "${BASE_DIR}/traefik"
+    chmod 755 "${BASE_DIR}/traefik/dynamic"
+    chmod 755 "${BASE_DIR}/traefik/logs"
+    chmod 700 "${BASE_DIR}/traefik/acme"
+    chmod 644 "$CONFIG_FILE"
+    chmod 644 "$MIDDLEWARE_FILE"
+    chmod 644 "$COMPOSE_FILE"
 
-    # Start the proxy
-    docker-compose -f "$BASE_DIR/docker-compose.proxy.yml" up -d
+    # Create docker network if it doesn't exist
+    docker network create traefik-proxy 2>/dev/null || true
+
+    # Remove existing container if it exists
+    docker rm -f traefik-proxy 2>/dev/null || true
+
+    # Start Traefik
+    log "Starting Traefik proxy..."
+    if ! docker-compose -f "$COMPOSE_FILE" up -d; then
+        log_error "Failed to start Traefik proxy"
+        docker-compose -f "$COMPOSE_FILE" logs
+        exit 1
+    fi
 
     # Wait for container to start
     sleep 5
 
-    # Check if container is running
+    # Verify Traefik is running
     if ! docker ps | grep -q traefik-proxy; then
-        log_error "Failed to start Traefik proxy. Check docker logs:"
+        log_error "Traefik proxy failed to start. Logs:"
         docker logs traefik-proxy
         exit 1
     fi
 
-    # Save dashboard credentials to a secure file
-    cat > "${BASE_DIR}/traefik/dashboard_credentials.txt" << EOF
+    # Save dashboard credentials
+    CREDS_FILE="${BASE_DIR}/traefik/dashboard_credentials.txt"
+    cat > "$CREDS_FILE" << EOF
 Traefik Dashboard Credentials
 ============================
 Username: ${USERNAME}
@@ -693,8 +705,8 @@ Access the dashboard at: https://traefik.localhost
 These credentials are generated during installation and should be kept secure.
 EOF
 
-    chmod 600 "${BASE_DIR}/traefik/dashboard_credentials.txt"
-    chown "$USERNAME:$USERNAME" "${BASE_DIR}/traefik/dashboard_credentials.txt"
+    chmod 600 "$CREDS_FILE"
+    chown "$USERNAME:$USERNAME" "$CREDS_FILE"
 
     log "Traefik Proxy setup completed successfully"
     log "Dashboard credentials saved to: ${BASE_DIR}/traefik/dashboard_credentials.txt"
