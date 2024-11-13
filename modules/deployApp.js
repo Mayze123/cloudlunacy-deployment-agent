@@ -27,6 +27,7 @@ async function deployApp(payload, ws) {
     envVarsToken,
   } = payload;
 
+  // Create service name once and use it consistently
   const serviceName = `${appName}`
     .toLowerCase()
     .replace(/[^a-z0-9-]/g, "-")
@@ -38,10 +39,7 @@ async function deployApp(payload, ws) {
 
   const deployDir = path.join("/opt/cloudlunacy/deployments", deploymentId);
   const currentDir = process.cwd();
-
-  logger.info(
-    `Starting deployment ${deploymentId} for ${appType} app: ${appName}`
-  );
+  let deploymentPort = null; // Track the port throughout the deployment
 
   try {
     // Initialize port manager early
@@ -108,44 +106,39 @@ async function deployApp(payload, ws) {
     envFilePath = await envManager.writeEnvFile(envVars, environment);
     await fs.copyFile(envFilePath, path.join(deployDir, ".env"));
 
-    // Get or allocate port
-    let deploymentPort;
+    // Port allocation with better error handling
     if (requestedPort) {
-      // If a specific port is requested, try to use it
+      logger.info(`Checking availability of requested port ${requestedPort}`);
       const isAvailable = await portManager.ensurePortAvailable(requestedPort);
       if (!isAvailable) {
         logger.warn(
           `Requested port ${requestedPort} is not available, allocating a new port`
         );
-        const portAllocation = await portManager.allocatePort(
-          appName,
-          environment
-        );
+        const portAllocation = await portManager.allocatePort(serviceName);
+        if (!portAllocation || !portAllocation.hostPort) {
+          throw new Error("Failed to allocate new port");
+        }
         deploymentPort = portAllocation.hostPort;
       } else {
-        deploymentPort = requestedPort;
-        // Register the requested port
-        await portManager.releasePort(appName, environment); // Clear any existing allocation
-        const portAllocation = await portManager.allocatePort(
-          appName,
-          environment
-        );
-        if (portAllocation.hostPort !== requestedPort) {
+        deploymentPort = parseInt(requestedPort, 10);
+        await portManager.releasePort(serviceName);
+        const portAllocation = await portManager.allocatePort(serviceName);
+        if (portAllocation.hostPort !== deploymentPort) {
           throw new Error(`Failed to allocate requested port ${requestedPort}`);
         }
       }
     } else {
-      // If no specific port is requested, allocate a new one
-      const portAllocation = await portManager.allocatePort(
-        appName,
-        environment
-      );
+      logger.info(`Allocating port for ${serviceName}`);
+      const portAllocation = await portManager.allocatePort(serviceName);
+      if (!portAllocation || !portAllocation.hostPort) {
+        throw new Error("Failed to allocate port");
+      }
       deploymentPort = portAllocation.hostPort;
     }
 
     logger.info(`Using port ${deploymentPort} for ${serviceName}`);
 
-    // Generate deployment files with allocated port
+    // Generate deployment files with consistent naming and port
     sendLogs(ws, deploymentId, "Generating deployment configuration...");
     const files = await templateHandler.generateDeploymentFiles({
       appType,
@@ -159,15 +152,6 @@ async function deployApp(payload, ws) {
         cacheControl: "public, max-age=31536000",
       },
       domain: domain || `${serviceName}.cloudlunacy.uk`,
-    });
-
-    // Log the template context
-    logger.info("Template context:", {
-      appType,
-      appName,
-      environment,
-      port: deploymentPort,
-      domain: domain || `${appName}-${environment}.yourdomain.com`,
     });
 
     // Write deployment files
@@ -225,6 +209,11 @@ async function deployApp(payload, ws) {
             retryCount++;
             if (retryCount < maxRetries) {
               await new Promise((resolve) => setTimeout(resolve, 5000));
+              sendLogs(
+                ws,
+                deploymentId,
+                `Waiting for domain to become accessible (attempt ${retryCount}/${maxRetries})...`
+              );
             }
           }
         }
@@ -290,24 +279,32 @@ async function deployApp(payload, ws) {
         logger.warn("Could not retrieve container logs:", logError);
       }
 
-      // Release allocated port
-      await portManager.releasePort(appName, environment);
+      // Release allocated port using consistent service name
+      if (deploymentPort) {
+        await portManager.releasePort(serviceName);
+        logger.info(`Released port ${deploymentPort} for ${serviceName}`);
+      }
 
       // Remove Traefik configuration if created
       if (domain) {
         await traefikManager.removeService(domain, serviceName);
+        logger.info(`Removed Traefik configuration for ${domain}`);
       }
 
       // Clean up containers and networks
       await cleanupExistingDeployment(serviceName);
+      logger.info(`Cleaned up containers and networks for ${serviceName}`);
 
       // Remove deployment directory
       await fs.rm(deployDir, { recursive: true, force: true });
+      logger.info(`Removed deployment directory ${deployDir}`);
     } catch (cleanupError) {
       logger.error("Cleanup failed:", cleanupError);
     }
   } finally {
+    // Always ensure we return to the original directory
     process.chdir(currentDir);
+    logger.info(`Deployment process completed for ${serviceName}`);
   }
 }
 

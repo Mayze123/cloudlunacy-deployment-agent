@@ -25,7 +25,7 @@ services:
       - "traefik.http.routers.{{sanitizedAppName}}.tls=true"
       - "traefik.http.routers.{{sanitizedAppName}}.tls.certresolver=letsencrypt"
       - "traefik.http.services.{{sanitizedAppName}}.loadbalancer.server.port=8080"
-      - "traefik.http.routers.{{sanitizedAppName}}.middlewares=security-headers@file,rate-limit@file,compress@file"
+      - "traefik.http.routers.{{sanitizedAppName}}.middlewares={{traefik.middlewares}}"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 30s

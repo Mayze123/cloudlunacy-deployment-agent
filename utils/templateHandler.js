@@ -293,22 +293,25 @@ class TemplateHandler {
       appType,
       appName,
       environment,
-      port: requestedPort,
+      port, // Changed from requestedPort to port
       domain,
       buildConfig = {},
     } = appConfig;
 
-    const CONTAINER_PORT = 8080;
+    if (!port) {
+      throw new Error("Port must be provided for deployment");
+    }
 
+    const CONTAINER_PORT = 8080;
     const sanitizedAppName = appName.toLowerCase().replace(/[^a-z0-9-]/g, "-");
 
-    // Prepare template context
+    // Prepare template context with corrected port variables
     const templateContext = {
       appName,
       sanitizedAppName,
       environment,
       containerPort: CONTAINER_PORT,
-      hostPort: requestedPort,
+      port: port.toString(), // This matches the template's {{port}} variable
       nodeVersion: buildConfig.nodeVersion || "18",
       startCommand: buildConfig.startCommand || "npm start",
       healthCheckEndpoint: buildConfig.healthCheckEndpoint || "/health",
@@ -387,7 +390,7 @@ class TemplateHandler {
         return {
           dockerCompose: dockerComposeContent,
           dockerfile: dockerfileContent,
-          allocatedPort: requestedPort,
+          allocatedPort: port, // Return the actual port used
         };
       } catch (validationError) {
         throw new Error(`Validation error: ${validationError.message}`);
