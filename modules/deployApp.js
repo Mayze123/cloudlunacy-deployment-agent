@@ -11,12 +11,13 @@ const apiClient = require("../utils/apiClient");
 const EnvironmentManager = require("../utils/environmentManager");
 const portManager = require("../utils/portManager");
 const traefikManager = require("../utils/traefikManager");
+const net = require("net");
 
 async function deployApp(payload, ws) {
   const {
     deploymentId,
     appType,
-    appName,
+    appName, // This is now the complete service name from the backend
     repositoryOwner,
     repositoryName,
     branch,
@@ -27,19 +28,16 @@ async function deployApp(payload, ws) {
     envVarsToken,
   } = payload;
 
-  // Create service name once and use it consistently
-  const serviceName = `${appName}`
-    .toLowerCase()
-    .replace(/[^a-z0-9-]/g, "-")
-    .concat(`-${environment}`);
+  // Use appName directly as it's already properly formatted from the backend
+  const serviceName = appName;
 
   logger.info(
-    `Starting deployment ${deploymentId} for ${appType} app: ${appName} in ${environment} environment`
+    `Starting deployment ${deploymentId} for ${appType} app: ${serviceName} in ${environment} environment`
   );
 
   const deployDir = path.join("/opt/cloudlunacy/deployments", deploymentId);
   const currentDir = process.cwd();
-  let deploymentPort = null; // Track the port throughout the deployment
+  let deploymentPort = null;
 
   try {
     // Initialize port manager early
@@ -138,11 +136,11 @@ async function deployApp(payload, ws) {
 
     logger.info(`Using port ${deploymentPort} for ${serviceName}`);
 
-    // Generate deployment files with consistent naming and port
+    // Generate deployment files
     sendLogs(ws, deploymentId, "Generating deployment configuration...");
     const files = await templateHandler.generateDeploymentFiles({
       appType,
-      appName: serviceName,
+      appName: serviceName, // Use the standardized service name
       environment,
       port: deploymentPort,
       envFile: path.basename(envFilePath),
@@ -302,7 +300,6 @@ async function deployApp(payload, ws) {
       logger.error("Cleanup failed:", cleanupError);
     }
   } finally {
-    // Always ensure we return to the original directory
     process.chdir(currentDir);
     logger.info(`Deployment process completed for ${serviceName}`);
   }
