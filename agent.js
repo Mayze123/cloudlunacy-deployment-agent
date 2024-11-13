@@ -265,6 +265,10 @@ async function init() {
       );
     }
 
+    // Initialize and verify Traefik
+    const traefikManager = require("./utils/traefikManager");
+    await traefikManager.initialize();
+
     // Continue with normal initialization
     await authenticateAndConnect();
     setInterval(collectMetrics, 60000);

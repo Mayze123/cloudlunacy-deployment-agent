@@ -247,8 +247,8 @@ networks:
         }
       });
 
-      // Update container labels
-      const labels = [
+      // Update container labels - Fixed syntax for docker container update
+      for (const label of [
         `traefik.enable=true`,
         `traefik.http.routers.${serviceName}.rule=Host(\`${domain}\`)`,
         `traefik.http.services.${serviceName}.loadbalancer.server.port=8080`,
@@ -256,15 +256,20 @@ networks:
         `traefik.http.routers.${serviceName}.tls=true`,
         `traefik.http.routers.${serviceName}.tls.certresolver=letsencrypt`,
         `traefik.http.routers.${serviceName}.entrypoints=websecure`,
-      ];
+      ]) {
+        await executeCommand("docker", [
+          "container",
+          "update",
+          "--label-rm",
+          `traefik.enable`,
+          "--label-add",
+          label,
+          serviceName,
+        ]);
+      }
 
-      await executeCommand("docker", [
-        "container",
-        "update",
-        "--label-add",
-        ...labels.map((label) => label),
-        serviceName,
-      ]);
+      // Verify Traefik is running before checking configuration
+      await this.ensureProxyRunning();
 
       await this.verifyConfiguration();
 
@@ -295,14 +300,36 @@ networks:
 
   async verifyConfiguration() {
     try {
+      // First check if container is running
+      const { stdout: containerStatus } = await executeCommand("docker", [
+        "container",
+        "inspect",
+        "-f",
+        "{{.State.Running}}",
+        this.proxyContainer,
+      ]);
+
+      if (containerStatus.trim() !== "true") {
+        throw new Error("Traefik container is not running");
+      }
+
+      // Then check configuration
       const { stdout: configCheck } = await executeCommand("docker", [
         "exec",
         this.proxyContainer,
         "traefik",
         "healthcheck",
       ]);
-      return configCheck.includes("OK");
+
+      if (!configCheck.includes("OK")) {
+        throw new Error("Traefik configuration check failed");
+      }
+
+      return true;
     } catch (error) {
+      logger.error("Failed to verify Traefik configuration:", error);
+      // Attempt to restart the proxy
+      await this.restartProxy();
       throw new Error(
         `Failed to verify Traefik configuration: ${error.message}`
       );
@@ -326,13 +353,58 @@ networks:
 
   async restartProxy() {
     try {
+      logger.info("Attempting to restart Traefik proxy...");
+
+      // Stop the container first
+      await executeCommand("docker", ["stop", this.proxyContainer]).catch(
+        () => {}
+      );
+
+      // Remove the container
+      await executeCommand("docker", ["rm", this.proxyContainer]).catch(
+        () => {}
+      );
+
+      // Start it again using docker-compose
       await executeCommand("docker-compose", [
         "-f",
         path.join(this.baseDir, "docker-compose.proxy.yml"),
-        "restart",
+        "up",
+        "-d",
       ]);
+
+      // Wait for container to be ready
+      let attempts = 0;
+      const maxAttempts = 5;
+
+      while (attempts < maxAttempts) {
+        try {
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+          const { stdout } = await executeCommand("docker", [
+            "exec",
+            this.proxyContainer,
+            "traefik",
+            "healthcheck",
+          ]);
+
+          if (stdout.includes("OK")) {
+            logger.info("Traefik proxy restarted successfully");
+            return;
+          }
+        } catch (error) {
+          logger.warn(
+            `Attempt ${
+              attempts + 1
+            }/${maxAttempts} to verify Traefik health failed`
+          );
+        }
+        attempts++;
+      }
+
+      throw new Error("Failed to verify Traefik health after restart");
     } catch (error) {
-      throw new Error(`Failed to restart Traefik proxy: ${error.message}`);
+      logger.error("Failed to restart Traefik proxy:", error);
+      throw error;
     }
   }
 }
