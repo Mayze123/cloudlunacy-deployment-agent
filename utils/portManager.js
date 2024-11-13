@@ -40,130 +40,46 @@ class PortManager {
   }
 
   async isPortInUse(port) {
-    try {
-      // Check Docker containers first
-      try {
-        const { stdout: dockerPorts } = await executeCommand("docker", [
-          "ps",
-          "--format",
-          "{{.Ports}}",
-        ]);
-        if (dockerPorts.includes(`:${port}`)) {
-          logger.debug(`Port ${port} is in use by a Docker container`);
-          return true;
-        }
-      } catch (dockerError) {
-        logger.warn("Error checking Docker ports:", dockerError);
-      }
-
-      // Check system ports using netstat
-      const { stdout } = await executeCommand("netstat", ["-tuln"]);
-      if (stdout.includes(`:${port} `)) {
-        logger.debug(`Port ${port} is in use according to netstat`);
-        return true;
-      }
-
-      // Final check with direct socket connection
-      return new Promise((resolve) => {
-        const socket = net.createServer();
-
-        socket.once("error", (err) => {
-          socket.close();
-          if (err.code === "EADDRINUSE") {
-            logger.debug(`Port ${port} is in use (socket check)`);
-            resolve(true);
-          } else {
-            resolve(false);
-          }
-        });
-
-        socket.once("listening", () => {
-          socket.close();
-          logger.debug(`Port ${port} is available`);
+    return new Promise((resolve) => {
+      const server = net.createServer();
+      server.once("error", (err) => {
+        server.close();
+        if (err.code === "EADDRINUSE") {
+          resolve(true);
+        } else {
           resolve(false);
-        });
-
-        socket.listen(port);
+        }
       });
-    } catch (error) {
-      logger.warn(`Error checking port ${port}:`, error);
-      return true; // Assume port is in use if we can't check it
-    }
+
+      server.once("listening", () => {
+        server.close();
+        resolve(false);
+      });
+
+      server.listen(port);
+    });
   }
 
   async isPortSafeToUse(port) {
-    try {
-      // Check reserved ports
-      if (this.reservedPorts.has(port)) {
-        logger.debug(`Port ${port} is reserved`);
-        return false;
-      }
-
-      // Check running processes
-      const { stdout } = await executeCommand("lsof", ["-i", `:${port}`]);
-      const processes = stdout
-        .split("\n")
-        .filter((line) => line.trim())
-        .map((line) => {
-          const [command] = line.split(/\s+/);
-          return command;
-        });
-
-      const criticalProcesses = [
-        "traefik",
-        "nginx",
-        "apache",
-        "mysql",
-        "postgresql",
-        "redis",
-        "docker",
-        "containerd",
-      ];
-
-      const isSafe = !processes.some((proc) =>
-        criticalProcesses.some((critical) =>
-          proc.toLowerCase().includes(critical)
-        )
-      );
-
-      logger.debug(`Port ${port} safe to use: ${isSafe}`);
-      return isSafe;
-    } catch (error) {
-      logger.warn(`Error checking port safety for ${port}:`, error);
-      return true; // If we can't check, assume it's safe
+    if (this.reservedPorts.has(port)) {
+      return false;
     }
+    return true;
   }
 
   async findNextAvailablePort(startPort) {
     let port = startPort;
     let attempts = 0;
-    const maxAttempts = 100; // Prevent infinite loops
+    const maxAttempts = 100;
 
     while (port <= this.portRangeEnd && attempts < maxAttempts) {
       logger.debug(`Checking port ${port} availability...`);
       const inUse = await this.isPortInUse(port);
       const isSafe = await this.isPortSafeToUse(port);
 
-      if (!inUse && isSafe && !this.reservedPorts.has(port)) {
-        // Verify not in use by Traefik
-        try {
-          const { stdout } = await executeCommand("docker", [
-            "exec",
-            "traefik-proxy",
-            "traefik",
-            "healthcheck",
-          ]);
-          if (!stdout.includes(`:${port}`)) {
-            logger.debug(`Found available port: ${port}`);
-            return port;
-          }
-        } catch (error) {
-          // If we can't check Traefik, assume port is available
-          logger.debug(
-            `Traefik check failed, assuming port ${port} is available`
-          );
-          return port;
-        }
+      if (!inUse && isSafe) {
+        logger.debug(`Found available port: ${port}`);
+        return port;
       }
       port++;
       attempts++;
@@ -174,46 +90,43 @@ class PortManager {
     );
   }
 
-  async allocatePort(appName, environment) {
-    const appId = `${appName}-${environment}`.toLowerCase();
-    logger.info(`Allocating port for ${appId}`);
+  async allocatePort(serviceName) {
+    logger.info(`Allocating port for ${serviceName}`);
 
     // Check existing allocation
-    if (this.portMap[appId]) {
-      const currentPort = this.portMap[appId];
+    if (this.portMap[serviceName]) {
+      const currentPort = this.portMap[serviceName];
       const inUse = await this.isPortInUse(currentPort);
       const isSafe = await this.isPortSafeToUse(currentPort);
 
       if (!inUse && isSafe) {
-        logger.info(`Reusing existing port ${currentPort} for ${appId}`);
+        logger.info(`Reusing existing port ${currentPort} for ${serviceName}`);
         return {
           hostPort: currentPort,
           containerPort: this.containerPort,
-          appId,
         };
       } else {
         logger.warn(
-          `Previously allocated port ${currentPort} for ${appId} is ${
+          `Previously allocated port ${currentPort} for ${serviceName} is ${
             inUse ? "in use" : "not safe"
           }, finding new port`
         );
-        delete this.portMap[appId];
+        delete this.portMap[serviceName];
       }
     }
 
     try {
       const hostPort = await this.findNextAvailablePort(this.portRangeStart);
-      this.portMap[appId] = hostPort;
+      this.portMap[serviceName] = hostPort;
       await this.savePorts();
 
       logger.info(
-        `Allocated new port mapping for ${appId}: ${hostPort} -> ${this.containerPort}`
+        `Allocated new port mapping for ${serviceName}: ${hostPort} -> ${this.containerPort}`
       );
 
       return {
         hostPort,
         containerPort: this.containerPort,
-        appId,
       };
     } catch (error) {
       logger.error("Port allocation failed:", error);
@@ -221,15 +134,14 @@ class PortManager {
     }
   }
 
-  async releasePort(appName, environment) {
-    const appId = `${appName}-${environment}`.toLowerCase();
-    logger.info(`Releasing port for ${appId}`);
+  async releasePort(serviceName) {
+    logger.info(`Releasing port for ${serviceName}`);
 
-    if (this.portMap[appId]) {
-      const port = this.portMap[appId];
-      delete this.portMap[appId];
+    if (this.portMap[serviceName]) {
+      const port = this.portMap[serviceName];
+      delete this.portMap[serviceName];
       await this.savePorts();
-      logger.info(`Released port ${port} for ${appId}`);
+      logger.info(`Released port ${port} for ${serviceName}`);
 
       // Kill any processes still using this port
       await this.killProcessOnPort(port).catch((error) => {
