@@ -299,14 +299,13 @@ class TemplateHandler {
     } = appConfig;
 
     const CONTAINER_PORT = 8080;
-    const serviceName = `${appName}-${environment}`
-      .toLowerCase()
-      .replace(/[^a-z0-9-]/g, "-");
+
+    const sanitizedAppName = appName.toLowerCase().replace(/[^a-z0-9-]/g, "-");
 
     // Prepare template context
     const templateContext = {
       appName,
-      sanitizedAppName: serviceName,
+      sanitizedAppName,
       environment,
       containerPort: CONTAINER_PORT,
       hostPort: requestedPort,
@@ -317,7 +316,7 @@ class TemplateHandler {
       dependencies: buildConfig.dependencies || [],
       envVars: buildConfig.envVars || {},
       traefik: {
-        domain: domain || `${serviceName}.localhost`,
+        domain: domain || `${sanitizedAppName}.localhost`,
         middlewares: "security-headers@file,rate-limit@file,compress@file",
       },
     };

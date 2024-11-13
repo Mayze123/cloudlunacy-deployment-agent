@@ -27,9 +27,15 @@ async function deployApp(payload, ws) {
     envVarsToken,
   } = payload;
 
-  const serviceName = `${appName}-${environment}`
+  const serviceName = `${appName}`
     .toLowerCase()
-    .replace(/[^a-z0-9-]/g, "-");
+    .replace(/[^a-z0-9-]/g, "-")
+    .concat(`-${environment}`);
+
+  logger.info(
+    `Starting deployment ${deploymentId} for ${appType} app: ${appName} in ${environment} environment`
+  );
+
   const deployDir = path.join("/opt/cloudlunacy/deployments", deploymentId);
   const currentDir = process.cwd();
 
@@ -103,14 +109,47 @@ async function deployApp(payload, ws) {
     await fs.copyFile(envFilePath, path.join(deployDir, ".env"));
 
     // Get or allocate port
-    const deploymentPort = await portManager.allocatePort(appName, environment);
+    let deploymentPort;
+    if (requestedPort) {
+      // If a specific port is requested, try to use it
+      const isAvailable = await portManager.ensurePortAvailable(requestedPort);
+      if (!isAvailable) {
+        logger.warn(
+          `Requested port ${requestedPort} is not available, allocating a new port`
+        );
+        const portAllocation = await portManager.allocatePort(
+          appName,
+          environment
+        );
+        deploymentPort = portAllocation.hostPort;
+      } else {
+        deploymentPort = requestedPort;
+        // Register the requested port
+        await portManager.releasePort(appName, environment); // Clear any existing allocation
+        const portAllocation = await portManager.allocatePort(
+          appName,
+          environment
+        );
+        if (portAllocation.hostPort !== requestedPort) {
+          throw new Error(`Failed to allocate requested port ${requestedPort}`);
+        }
+      }
+    } else {
+      // If no specific port is requested, allocate a new one
+      const portAllocation = await portManager.allocatePort(
+        appName,
+        environment
+      );
+      deploymentPort = portAllocation.hostPort;
+    }
+
     logger.info(`Using port ${deploymentPort} for ${serviceName}`);
 
     // Generate deployment files with allocated port
     sendLogs(ws, deploymentId, "Generating deployment configuration...");
     const files = await templateHandler.generateDeploymentFiles({
       appType,
-      appName,
+      appName: serviceName,
       environment,
       port: deploymentPort,
       envFile: path.basename(envFilePath),
@@ -119,6 +158,15 @@ async function deployApp(payload, ws) {
         buildOutputDir: "build",
         cacheControl: "public, max-age=31536000",
       },
+      domain: domain || `${serviceName}.cloudlunacy.uk`,
+    });
+
+    // Log the template context
+    logger.info("Template context:", {
+      appType,
+      appName,
+      environment,
+      port: deploymentPort,
       domain: domain || `${appName}-${environment}.yourdomain.com`,
     });
 
@@ -219,6 +267,7 @@ async function deployApp(payload, ws) {
       status: "success",
       message: "Deployment completed successfully",
       domain,
+      port: deploymentPort,
     });
   } catch (error) {
     logger.error(`Deployment ${deploymentId} failed:`, error);
