@@ -24,61 +24,35 @@ class TemplateHandler {
     logger.info("Ensuring all required templates exist...");
 
     try {
-      // Create base templates directory
+      // Create base templates directory and nginx directory
       await fs.mkdir(this.templatesDir, { recursive: true });
+      await fs.mkdir(path.join(this.templatesDir, "nginx"), {
+        recursive: true,
+      });
 
-      // Create nginx templates directory
-      const nginxTemplateDir = path.join(this.templatesDir, "nginx");
-      await fs.mkdir(nginxTemplateDir, { recursive: true });
+      // Check that required templates exist
+      const requiredTemplates = [
+        "Dockerfile.node.hbs",
+        "docker-compose.node.hbs",
+      ];
 
-      const virtualHostTemplate = `server {
-    listen 80;
-    server_name {{domain}};
+      for (const template of requiredTemplates) {
+        const templatePath = path.join(this.templatesDir, template);
+        try {
+          await fs.access(templatePath);
+          logger.info(`Template ${template} exists`);
+        } catch (error) {
+          logger.error(
+            `Required template ${template} not found at ${templatePath}`
+          );
+          throw new Error(`Required template ${template} not found`);
+        }
+      }
 
-    location / {
-        proxy_pass http://127.0.0.1:{{port}};
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-
-        # Add timeout configurations
-        proxy_connect_timeout 60s;
-        proxy_send_timeout 60s;
-        proxy_read_timeout 60s;
-    }
-
-    location /socket.io/ {
-        proxy_pass http://127.0.0.1:{{port}};
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-
-        # WebSocket specific timeouts
-        proxy_connect_timeout 7d;
-        proxy_send_timeout 7d;
-        proxy_read_timeout 7d;
-    }
-}`;
-
-      // Write the template file
-      const virtualHostPath = path.join(
-        nginxTemplateDir,
-        "virtual-host.template"
-      );
-      await fs.writeFile(virtualHostPath, virtualHostTemplate, "utf8");
-
-      logger.info("Templates created successfully");
+      logger.info("Templates verified successfully");
       return true;
     } catch (error) {
-      logger.error("Failed to create templates:", error);
+      logger.error("Failed to verify templates:", error);
       throw error;
     }
   }
@@ -293,7 +267,7 @@ class TemplateHandler {
       appType,
       appName,
       environment,
-      port, // Changed from requestedPort to port
+      port,
       domain,
       buildConfig = {},
     } = appConfig;
@@ -305,19 +279,43 @@ class TemplateHandler {
     const CONTAINER_PORT = 8080;
     const sanitizedAppName = appName.toLowerCase().replace(/[^a-z0-9-]/g, "-");
 
-    // Prepare template context with corrected port variables
+    // Get correct template names from deployConfig
+    const dockerComposeTemplate =
+      this.deployConfig[appType].dockerComposeTemplate;
+    const dockerfileTemplate = this.deployConfig[appType].dockerfileTemplate;
+
+    // Prepare template context
     const templateContext = {
       appName,
       sanitizedAppName,
       environment,
       containerPort: CONTAINER_PORT,
-      port: port.toString(), // This matches the template's {{port}} variable
-      nodeVersion: buildConfig.nodeVersion || "18",
-      startCommand: buildConfig.startCommand || "npm start",
-      healthCheckEndpoint: buildConfig.healthCheckEndpoint || "/health",
-      volumes: buildConfig.volumes || [],
-      dependencies: buildConfig.dependencies || [],
-      envVars: buildConfig.envVars || {},
+      hostPort: port.toString(),
+      port: port.toString(),
+      nodeVersion:
+        buildConfig.nodeVersion ||
+        this.deployConfig[appType].defaults.nodeVersion ||
+        "18",
+      startCommand:
+        buildConfig.startCommand ||
+        this.deployConfig[appType].defaults.startCommand ||
+        "npm start",
+      healthCheckEndpoint:
+        buildConfig.healthCheckEndpoint ||
+        this.deployConfig[appType].defaults.healthCheckEndpoint ||
+        "/health",
+      volumes:
+        buildConfig.volumes ||
+        this.deployConfig[appType].defaults.volumes ||
+        [],
+      dependencies:
+        buildConfig.dependencies ||
+        this.deployConfig[appType].defaults.dependencies ||
+        [],
+      envVars:
+        buildConfig.envVars ||
+        this.deployConfig[appType].defaults.envVars ||
+        {},
       traefik: {
         domain: domain || `${sanitizedAppName}.localhost`,
         middlewares: "security-headers@file,rate-limit@file,compress@file",
@@ -327,17 +325,15 @@ class TemplateHandler {
     logger.info("Template context:", JSON.stringify(templateContext, null, 2));
 
     try {
-      // Load templates
-      const dockerComposeTemplate = await this.loadTemplate(
-        "docker-compose.node.hbs"
+      // Load templates using the correct template names from deployConfig
+      const dockerComposeContent = (
+        await this.loadTemplate(dockerComposeTemplate)
+      )(templateContext);
+      const dockerfileContent = (await this.loadTemplate(dockerfileTemplate))(
+        templateContext
       );
-      const dockerfileTemplate = await this.loadTemplate("Dockerfile.node.hbs");
 
-      // Generate configurations
-      const dockerComposeContent = dockerComposeTemplate(templateContext);
-      const dockerfileContent = dockerfileTemplate(templateContext);
-
-      // Log EXACT generated content for debugging
+      // Log generated content for debugging
       logger.info("=== BEGIN GENERATED DOCKER-COMPOSE.YML ===");
       logger.info(dockerComposeContent);
       logger.info("=== END GENERATED DOCKER-COMPOSE.YML ===");
@@ -390,7 +386,7 @@ class TemplateHandler {
         return {
           dockerCompose: dockerComposeContent,
           dockerfile: dockerfileContent,
-          allocatedPort: port, // Return the actual port used
+          allocatedPort: port,
         };
       } catch (validationError) {
         throw new Error(`Validation error: ${validationError.message}`);

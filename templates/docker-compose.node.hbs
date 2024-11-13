@@ -7,10 +7,10 @@ services:
       context: .
       dockerfile: Dockerfile
     ports:
-      - "{{port}}:8080"
+      - "{{hostPort}}:{{containerPort}}"
     environment:
       - NODE_ENV={{environment}}
-      - PORT=8080
+      - PORT={{containerPort}}
     env_file:
       - .env.{{environment}}
     restart: unless-stopped
@@ -24,10 +24,10 @@ services:
       - "traefik.http.routers.{{sanitizedAppName}}.entrypoints=websecure"
       - "traefik.http.routers.{{sanitizedAppName}}.tls=true"
       - "traefik.http.routers.{{sanitizedAppName}}.tls.certresolver=letsencrypt"
-      - "traefik.http.services.{{sanitizedAppName}}.loadbalancer.server.port=8080"
+      - "traefik.http.services.{{sanitizedAppName}}.loadbalancer.server.port={{containerPort}}"
       - "traefik.http.routers.{{sanitizedAppName}}.middlewares={{traefik.middlewares}}"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:{{containerPort}}/health"]
       interval: 30s
       timeout: 5s
       retries: 3

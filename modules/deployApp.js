@@ -113,24 +113,23 @@ async function deployApp(payload, ws) {
           `Requested port ${requestedPort} is not available, allocating a new port`
         );
         const portAllocation = await portManager.allocatePort(serviceName);
-        if (!portAllocation || !portAllocation.hostPort) {
-          throw new Error("Failed to allocate new port");
-        }
         deploymentPort = portAllocation.hostPort;
       } else {
         deploymentPort = parseInt(requestedPort, 10);
-        await portManager.releasePort(serviceName);
+        await portManager.releasePort(serviceName); // Release any existing port first
         const portAllocation = await portManager.allocatePort(serviceName);
         if (portAllocation.hostPort !== deploymentPort) {
           throw new Error(`Failed to allocate requested port ${requestedPort}`);
         }
+        logger.info(
+          `Using requested port ${deploymentPort} for ${serviceName}`
+        );
       }
     } else {
-      logger.info(`Allocating port for ${serviceName}`);
+      logger.info(
+        `No specific port requested for ${serviceName}, allocating new port`
+      );
       const portAllocation = await portManager.allocatePort(serviceName);
-      if (!portAllocation || !portAllocation.hostPort) {
-        throw new Error("Failed to allocate port");
-      }
       deploymentPort = portAllocation.hostPort;
     }
 
@@ -140,15 +139,10 @@ async function deployApp(payload, ws) {
     sendLogs(ws, deploymentId, "Generating deployment configuration...");
     const files = await templateHandler.generateDeploymentFiles({
       appType,
-      appName: serviceName, // Use the standardized service name
+      appName: serviceName,
       environment,
-      port: deploymentPort,
+      port: deploymentPort, // Pass the explicit port
       envFile: path.basename(envFilePath),
-      buildConfig: {
-        nodeVersion: "18",
-        buildOutputDir: "build",
-        cacheControl: "public, max-age=31536000",
-      },
       domain: domain || `${serviceName}.cloudlunacy.uk`,
     });
 
