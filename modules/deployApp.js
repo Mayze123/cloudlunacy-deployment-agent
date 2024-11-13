@@ -9,8 +9,8 @@ const deployConfig = require("../deployConfig.json");
 const { ensureDeploymentPermissions } = require("../utils/permissionCheck");
 const apiClient = require("../utils/apiClient");
 const EnvironmentManager = require("../utils/environmentManager");
-const nginxManager = require("../utils/nginxManager");
 const portManager = require("../utils/portManager");
+const traefikManager = require("../utils/traefikManager");
 
 async function deployApp(payload, ws) {
   const {
@@ -148,11 +148,14 @@ async function deployApp(payload, ws) {
     sendLogs(ws, deploymentId, "Starting application...");
     await executeCommand("docker-compose", ["up", "-d", "--force-recreate"]);
 
-    // Configure Nginx if domain is provided
     if (domain) {
       try {
         sendLogs(ws, deploymentId, `Configuring domain: ${domain}`);
-        await nginxManager.configureNginx(domain, deploymentPort, deployDir);
+        await traefikManager.configureService(
+          domain,
+          serviceName,
+          deploymentPort
+        );
 
         // Verify domain accessibility
         const maxRetries = 5;
@@ -165,7 +168,8 @@ async function deployApp(payload, ws) {
               "--max-time",
               "5",
               "-I",
-              `http://${domain}`,
+              "--insecure", // Allow self-signed certs during check
+              `https://${domain}`,
             ]);
             domainAccessible = true;
             sendLogs(ws, deploymentId, `Domain ${domain} is accessible`);
@@ -175,6 +179,17 @@ async function deployApp(payload, ws) {
               await new Promise((resolve) => setTimeout(resolve, 5000));
             }
           }
+        }
+
+        if (!domainAccessible) {
+          logger.warn(
+            `Domain ${domain} is not accessible after ${maxRetries} attempts`
+          );
+          sendLogs(
+            ws,
+            deploymentId,
+            `Warning: Domain ${domain} is not yet accessible. DNS may need time to propagate.`
+          );
         }
       } catch (error) {
         logger.error(`Failed to configure domain ${domain}:`, error);
@@ -208,14 +223,12 @@ async function deployApp(payload, ws) {
   } catch (error) {
     logger.error(`Deployment ${deploymentId} failed:`, error);
 
-    // Send detailed error message
     sendStatus(ws, {
       deploymentId,
       status: "failed",
       message: error.message || "Deployment failed",
     });
 
-    // Cleanup on failure
     try {
       // Get container logs before cleanup
       try {
@@ -231,9 +244,9 @@ async function deployApp(payload, ws) {
       // Release allocated port
       await portManager.releasePort(appName, environment);
 
-      // Remove Nginx config if created
+      // Remove Traefik configuration if created
       if (domain) {
-        await nginxManager.removeConfig(domain);
+        await traefikManager.removeService(domain, serviceName);
       }
 
       // Clean up containers and networks

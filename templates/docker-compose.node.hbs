@@ -1,31 +1,99 @@
+// templates/docker-compose.node.hbs
+version: '3.8'
+services:
+  {{appName}}:
+    container_name: {{appName}}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    expose:
+      - "{{port}}"
+    environment:
+      - NODE_ENV={{environment}}
+      {{
+#if
+ envVars}}
+        {{
+#each
+ envVars}}
+      - {{@key}}={{{this}}}
+        {{
+/each
+}}
+      {{
+/if
+}}
+    restart: unless-stopped
+    {{
+#if
+ volumes}}
+    volumes:
+      {{
+#each
+ volumes}}
+      - {{this}}
+      {{
+/each
+}}
+    {{
+/if
+}}
+    {{
+#if
+ dependencies}}
+    depends_on:
+      {{
+#each
+ dependencies}}
+      - {{this}}
+      {{
+/each
+}}
+    {{
+/if
+}}
+    networks:
+      - app-network
+      - traefik-proxy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:{{port}}{{healthCheckEndpoint}}"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik-proxy"
+      {{
+#if
+ domain}}
+      - "traefik.http.routers.{{sanitizedAppName}}.rule=Host(`{{domain}}`)"
+      - "traefik.http.routers.{{sanitizedAppName}}.entrypoints=websecure"
+      - "traefik.http.routers.{{sanitizedAppName}}.tls=true"
+      - "traefik.http.routers.{{sanitizedAppName}}.tls.certresolver=letsencrypt"
+      - "traefik.http.services.{{sanitizedAppName}}.loadbalancer.server.port={{port}}"
+      - "traefik.http.routers.{{sanitizedAppName}}.middlewares=security-headers@file,rate-limit@file,compress@file"
+      {{
+/if
+}}
+      {{
+#if
+ websocket}}
+      - "traefik.http.middlewares.{{sanitizedAppName}}-ws.headers.customrequestheaders.Connection=upgrade"
+      - "traefik.http.middlewares.{{sanitizedAppName}}-ws.headers.customrequestheaders.Upgrade=websocket"
+      - "traefik.http.routers.{{sanitizedAppName}}.middlewares={{sanitizedAppName}}-ws"
+      {{
+/if
+}}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
-// templates/docker-compose.node.hbs version: '3.8' services:
-{{appName}}: container_name:
-{{appName}}
-build: context: . dockerfile: Dockerfile ports: - "{{port}}:{{port}}"
-environment: - NODE_ENV={{environment}}
-{{#if envVars}}
-  {{#each envVars}}
-    -
-    {{@key}}={{{this}}}
-  {{/each}}
-{{/if}}
-restart: unless-stopped
-{{#if volumes}}
-  volumes:
-  {{#each volumes}}
-    -
-    {{this}}
-  {{/each}}
-{{/if}}
-{{#if dependencies}}
-  depends_on:
-  {{#each dependencies}}
-    -
-    {{this}}
-  {{/each}}
-{{/if}}
-networks: - app-network healthcheck: test: ["CMD", "wget", "--spider", "-q",
-"http://localhost:{{port}}{{healthCheckEndpoint}}"] interval: 30s timeout: 5s
-retries: 3 start_period: 15s networks: app-network: name:
-{{appName}}-network driver: bridge
+networks:
+  app-network:
+    name: {{appName}}-network
+    driver: bridge
+  traefik-proxy:
+    external: true

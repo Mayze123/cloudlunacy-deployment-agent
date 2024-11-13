@@ -272,38 +272,48 @@ class TemplateHandler {
 
     // Generate docker-compose.yml without duplicate networks
     const dockerComposeContent = `version: "3.8"
-services:
-  ${serviceName}:
-    container_name: ${serviceName}
-    build:
-      context: .
-      dockerfile: Dockerfile
-    ports:
-      - "${deploymentPort}:${CONTAINER_PORT}"
-    environment:
-      - NODE_ENV=${environment}
-      - PORT=${CONTAINER_PORT}
-    env_file:
-      - .env.${environment}
-    restart: unless-stopped
+    services:
+      ${serviceName}:
+        container_name: ${serviceName}
+        build:
+          context: .
+          dockerfile: Dockerfile
+        expose:
+          - "${CONTAINER_PORT}"
+        environment:
+          - NODE_ENV=${environment}
+          - PORT=${CONTAINER_PORT}
+        env_file:
+          - .env.${environment}
+        restart: unless-stopped
+        networks:
+          - app-network
+          - traefik-proxy
+        labels:
+          - "traefik.enable=true"
+          - "traefik.http.routers.${serviceName}.rule=Host(\`${domain}\`)"
+          - "traefik.http.services.${serviceName}.loadbalancer.server.port=${CONTAINER_PORT}"
+          - "traefik.http.routers.${serviceName}.middlewares=security-headers@file,rate-limit@file,compress@file"
+          - "traefik.http.routers.${serviceName}.tls=true"
+          - "traefik.http.routers.${serviceName}.tls.certresolver=letsencrypt"
+          - "traefik.http.routers.${serviceName}.entrypoints=websecure"
+        healthcheck:
+          test: ["CMD", "curl", "-f", "http://localhost:${CONTAINER_PORT}/health"]
+          interval: 30s
+          timeout: 10s
+          retries: 3
+          start_period: 40s
+        logging:
+          driver: "json-file"
+          options:
+            max-size: "10m"
+            max-file: "3"
+    
     networks:
-      - app-network
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:${CONTAINER_PORT}/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
-
-networks:
-  app-network:
-    driver: bridge
-    name: ${serviceName}-network`;
+      app-network:
+        name: ${serviceName}-network
+      traefik-proxy:
+        external: true`;
 
     // Generate Dockerfile with curl for healthcheck
     const dockerfileContent = `FROM node:18-alpine

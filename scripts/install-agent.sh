@@ -508,6 +508,198 @@ EOF
     log "Nginx Proxy setup completed successfully"
 }
 
+# Add this function to your install-agent.sh script, replacing the setup_nginx_proxy function
+
+setup_traefik_proxy() {
+    log "Setting up Traefik Proxy..."
+    
+    # Get user's UID and GID
+    USER_UID=$(id -u "$USERNAME")
+    USER_GID=$(id -g "$USERNAME")
+    
+    # Check if anything is using required ports
+    if lsof -i :80 >/dev/null 2>&1 || lsof -i :443 >/dev/null 2>&1; then
+        log_warn "Port 80 or 443 is in use. Stopping system nginx if running..."
+        systemctl stop nginx || true
+        systemctl disable nginx || true
+    fi
+
+    # Create all required directories with correct ownership
+    log "Creating Traefik directories..."
+    mkdir -p "${BASE_DIR}/traefik/"{dynamic,acme,logs}
+    chown -R "$USERNAME:$USERNAME" "${BASE_DIR}/traefik"
+    chmod -R 775 "${BASE_DIR}/traefik"
+    
+    # Create acme.json with restricted permissions
+    touch "${BASE_DIR}/traefik/acme/acme.json"
+    chmod 600 "${BASE_DIR}/traefik/acme/acme.json"
+    chown "$USERNAME:$USERNAME" "${BASE_DIR}/traefik/acme/acme.json"
+    
+    # Generate secure credentials for Traefik dashboard
+    DASHBOARD_PASSWORD=$(openssl rand -base64 32)
+    HASHED_PASSWORD=$(openssl passwd -apr1 "$DASHBOARD_PASSWORD")
+    
+    # Create traefik.yml configuration
+    cat > "${BASE_DIR}/traefik/traefik.yml" << EOF
+global:
+  checkNewVersion: true
+  sendAnonymousUsage: false
+
+log:
+  level: INFO
+  filePath: "/etc/traefik/logs/traefik.log"
+
+accessLog:
+  filePath: "/etc/traefik/logs/access.log"
+  bufferingSize: 100
+
+api:
+  dashboard: true
+  insecure: false
+
+entryPoints:
+  web:
+    address: ":80"
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+  websecure:
+    address: ":443"
+    http:
+      tls:
+        certResolver: letsencrypt
+
+providers:
+  docker:
+    endpoint: "unix:///var/run/docker.sock"
+    watch: true
+    exposedByDefault: false
+    network: traefik-proxy
+  file:
+    directory: "/etc/traefik/dynamic"
+    watch: true
+
+certificatesResolvers:
+  letsencrypt:
+    acme:
+      email: "admin@example.com"
+      storage: "/etc/traefik/acme/acme.json"
+      httpChallenge:
+        entryPoint: web
+EOF
+
+    # Create dynamic configuration for middlewares
+    mkdir -p "${BASE_DIR}/traefik/dynamic"
+    cat > "${BASE_DIR}/traefik/dynamic/middleware.yml" << EOF
+http:
+  middlewares:
+    security-headers:
+      headers:
+        frameDeny: true
+        sslRedirect: true
+        browserXssFilter: true
+        contentTypeNosniff: true
+        stsIncludeSubdomains: true
+        stsPreload: true
+        stsSeconds: 31536000
+        customResponseHeaders:
+          X-Robots-Tag: "noindex,nofollow,nosnippet,noarchive,notranslate,noimageindex"
+          Server: ""
+    
+    rate-limit:
+      rateLimit:
+        average: 100
+        burst: 50
+        period: 1s
+    
+    compress:
+      compress: {}
+EOF
+
+    # Create dedicated network for proxy
+    docker network create traefik-proxy || true
+    
+    # Remove existing proxy container if it exists
+    docker rm -f traefik-proxy >/dev/null 2>&1 || true
+
+    # Create traefik proxy container
+    cat > "$BASE_DIR/docker-compose.proxy.yml" << EOF
+version: "3.8"
+services:
+  traefik-proxy:
+    image: traefik:v2.10
+    container_name: traefik-proxy
+    restart: always
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ${BASE_DIR}/traefik/dynamic:/etc/traefik/dynamic:ro
+      - ${BASE_DIR}/traefik/acme:/etc/traefik/acme
+      - ${BASE_DIR}/traefik/logs:/etc/traefik/logs
+    networks:
+      - traefik-proxy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.dashboard.rule=Host(\`traefik.localhost\`)"
+      - "traefik.http.routers.dashboard.service=api@internal"
+      - "traefik.http.routers.dashboard.middlewares=auth-middleware"
+      - "traefik.http.middlewares.auth-middleware.basicauth.users=${USERNAME}:${HASHED_PASSWORD}"
+    environment:
+      - TZ=UTC
+
+networks:
+  traefik-proxy:
+    external: true
+EOF
+
+    # Ensure proper ownership of all files
+    chown "$USERNAME:$USERNAME" "$BASE_DIR/docker-compose.proxy.yml"
+    chown "$USERNAME:$USERNAME" "${BASE_DIR}/traefik/traefik.yml"
+    chown -R "$USERNAME:$USERNAME" "${BASE_DIR}/traefik/dynamic"
+    chmod 644 "$BASE_DIR/docker-compose.proxy.yml"
+    chmod 644 "${BASE_DIR}/traefik/traefik.yml"
+    chmod 644 "${BASE_DIR}/traefik/dynamic/middleware.yml"
+
+    # Start the proxy
+    docker-compose -f "$BASE_DIR/docker-compose.proxy.yml" up -d
+
+    # Wait for container to start
+    sleep 5
+
+    # Check if container is running
+    if ! docker ps | grep -q traefik-proxy; then
+        log_error "Failed to start Traefik proxy. Check docker logs:"
+        docker logs traefik-proxy
+        exit 1
+    fi
+
+    # Save dashboard credentials to a secure file
+    cat > "${BASE_DIR}/traefik/dashboard_credentials.txt" << EOF
+Traefik Dashboard Credentials
+============================
+Username: ${USERNAME}
+Password: ${DASHBOARD_PASSWORD}
+
+Access the dashboard at: https://traefik.localhost
+(Add this domain to your hosts file pointing to your server IP)
+
+These credentials are generated during installation and should be kept secure.
+EOF
+
+    chmod 600 "${BASE_DIR}/traefik/dashboard_credentials.txt"
+    chown "$USERNAME:$USERNAME" "${BASE_DIR}/traefik/dashboard_credentials.txt"
+
+    log "Traefik Proxy setup completed successfully"
+    log "Dashboard credentials saved to: ${BASE_DIR}/traefik/dashboard_credentials.txt"
+}
+
 setup_docker_permissions() {
     log "Setting up Docker permissions..."
     
@@ -649,7 +841,7 @@ main() {
     update_system
     install_dependencies
     install_docker
-    setup_nginx_proxy
+    setup_traefik_proxy
     install_node
     setup_user_directories
     setup_docker_permissions
