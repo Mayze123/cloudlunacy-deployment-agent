@@ -227,7 +227,14 @@ class TemplateHandler {
   async generateDeploymentFiles(appConfig) {
     logger.info(
       "Starting file generation with detailed config:",
-      JSON.stringify(appConfig, null, 2)
+      JSON.stringify(
+        {
+          ...appConfig,
+          githubToken: "[REDACTED]",
+        },
+        null,
+        2
+      )
     );
 
     const {
@@ -235,106 +242,99 @@ class TemplateHandler {
       appName,
       environment,
       port: requestedPort,
-      envFile,
-      buildConfig = {},
       domain,
+      buildConfig = {},
     } = appConfig;
 
-    // Get or allocate port
     const CONTAINER_PORT = 8080;
-    let deploymentPort = requestedPort;
-
-    const config = this.mergeDefaults(appType, buildConfig);
-    logger.info("Merged configuration:", JSON.stringify(config, null, 2));
-
     const serviceName = `${appName}-${environment}`
       .toLowerCase()
       .replace(/[^a-z0-9-]/g, "-");
 
-    // Load the templates
-    const dockerComposeTemplate = await this.loadTemplate(
-      "docker-compose.node.hbs"
-    );
-    const dockerfileTemplate = await this.loadTemplate("Dockerfile.node.hbs");
-
     // Prepare template context
     const templateContext = {
-      appName: serviceName,
-      environment,
-      port: CONTAINER_PORT,
-      containerPort: CONTAINER_PORT,
-      hostPort: deploymentPort,
-      domain,
-      nodeVersion: config.nodeVersion || "18",
-      startCommand: config.startCommand || "npm start",
-      healthCheckEndpoint: config.healthCheckEndpoint || "/health",
-      useYarn: config.useYarn || false,
-      usePnpm: config.usePnpm || false,
-      buildCommand: config.buildCommand,
-      volumes: config.volumes || [],
-      dependencies: config.dependencies || [],
-      envVars: config.envVars || {},
+      appName,
       sanitizedAppName: serviceName,
+      environment,
+      containerPort: CONTAINER_PORT,
+      hostPort: requestedPort,
+      nodeVersion: buildConfig.nodeVersion || "18",
+      startCommand: buildConfig.startCommand || "npm start",
+      healthCheckEndpoint: buildConfig.healthCheckEndpoint || "/health",
+      volumes: buildConfig.volumes || [],
+      dependencies: buildConfig.dependencies || [],
+      envVars: buildConfig.envVars || {},
       traefik: {
-        enable: true,
-        network: "traefik-proxy",
-        domain: domain,
+        domain: domain || `${serviceName}.localhost`,
         middlewares: "security-headers@file,rate-limit@file,compress@file",
       },
     };
 
-    // Generate configurations using templates
-    const dockerComposeContent = dockerComposeTemplate(templateContext);
-    const dockerfileContent = dockerfileTemplate(templateContext);
+    logger.info("Template context:", JSON.stringify(templateContext, null, 2));
 
-    // Log generated content
-    logger.info("Generated docker-compose.yml:", dockerComposeContent);
-    logger.info("Generated Dockerfile:", dockerfileContent);
-
-    // Validate the generated files
-    const tempDir = `/tmp/deploy-validate-${Date.now()}`;
     try {
-      await fs.mkdir(tempDir, { recursive: true });
-
-      // Write files for validation
-      const composePath = path.join(tempDir, "docker-compose.yml");
-      const dockerfilePath = path.join(tempDir, "Dockerfile");
-      const envPath = path.join(tempDir, `.env.${environment}`);
-
-      await Promise.all([
-        fs.writeFile(composePath, dockerComposeContent, "utf8"),
-        fs.writeFile(dockerfilePath, dockerfileContent, "utf8"),
-        fs.writeFile(envPath, "NODE_ENV=production\n", "utf8"),
-      ]);
-
-      // Validate docker-compose file
-      const { stdout, stderr } = await executeCommand(
-        "docker-compose",
-        ["config"],
-        { cwd: tempDir }
+      // Load templates
+      const dockerComposeTemplate = await this.loadTemplate(
+        "docker-compose.node.hbs"
       );
+      logger.info("Docker compose template loaded");
 
-      if (stderr) {
-        throw new Error(`Docker compose validation failed: ${stderr}`);
-      }
+      const dockerfileTemplate = await this.loadTemplate("Dockerfile.node.hbs");
+      logger.info("Dockerfile template loaded");
 
-      logger.info("Docker compose validation succeeded:", stdout);
+      // Generate configurations
+      const dockerComposeContent = dockerComposeTemplate(templateContext);
+      const dockerfileContent = dockerfileTemplate(templateContext);
 
-      return {
-        dockerCompose: dockerComposeContent,
-        dockerfile: dockerfileContent,
-        allocatedPort: deploymentPort,
-      };
-    } catch (error) {
-      logger.error("File validation failed:", error);
-      throw error;
-    } finally {
-      // Cleanup
+      // Log generated content for debugging
+      logger.info("Generated docker-compose.yml:", dockerComposeContent);
+      logger.info("Generated Dockerfile:", dockerfileContent);
+
+      // Validate configurations
       try {
-        await fs.rm(tempDir, { recursive: true, force: true });
-      } catch (cleanupError) {
-        logger.warn("Error cleaning up temp directory:", cleanupError);
+        const tempDir = `/tmp/deploy-validate-${Date.now()}`;
+        await fs.mkdir(tempDir, { recursive: true });
+
+        await fs.writeFile(
+          path.join(tempDir, "docker-compose.yml"),
+          dockerComposeContent,
+          "utf8"
+        );
+        await fs.writeFile(
+          path.join(tempDir, "Dockerfile"),
+          dockerfileContent,
+          "utf8"
+        );
+        await fs.writeFile(
+          path.join(tempDir, `.env.${environment}`),
+          "NODE_ENV=production\n",
+          "utf8"
+        );
+
+        const { stdout, stderr } = await executeCommand(
+          "docker-compose",
+          ["config"],
+          { cwd: tempDir }
+        );
+
+        if (stderr) {
+          throw new Error(`Docker compose validation failed: ${stderr}`);
+        }
+
+        logger.info("Configuration validation successful");
+
+        return {
+          dockerCompose: dockerComposeContent,
+          dockerfile: dockerfileContent,
+          allocatedPort: requestedPort,
+        };
+      } catch (validationError) {
+        logger.error("Validation error:", validationError);
+        throw validationError;
       }
+    } catch (error) {
+      logger.error("Template processing error:", error);
+      throw error;
     }
   }
 

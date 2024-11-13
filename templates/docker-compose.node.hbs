@@ -1,88 +1,38 @@
-// templates/docker-compose.node.hbs
-version: '3.8'
-
-services:
-  {{sanitizedAppName}}:
-    container_name: {{sanitizedAppName}}
-    build:
-      context: .
-      dockerfile: Dockerfile
-    expose:
-      - "{{containerPort}}"
-    environment:
-      - NODE_ENV={{environment}}
-      - PORT={{containerPort}}
-      {{
-#if
- envVars}}
-        {{
-#each
- envVars}}
-      - {{@key}}={{{this}}}
-        {{
-/each
-}}
-      {{
-/if
-}}
-    env_file:
-      - .env.{{environment}}
-    restart: unless-stopped
-    {{
-#if
- volumes}}
-    volumes:
-      {{
-#each
- volumes}}
-      - {{this}}
-      {{
-/each
-}}
-    {{
-/if
-}}
-    {{
-#if
- dependencies}}
-    depends_on:
-      {{
-#each
- dependencies}}
-      - {{this}}
-      {{
-/each
-}}
-    {{
-/if
-}}
-    networks:
-      - app-network
-      - traefik-proxy
-    labels:
-      - "traefik.enable=true"
-      - "traefik.docker.network=traefik-proxy"
-      - "traefik.http.routers.{{sanitizedAppName}}.rule=Host(`{{traefik.domain}}`)"
-      - "traefik.http.routers.{{sanitizedAppName}}.entrypoints=websecure"
-      - "traefik.http.routers.{{sanitizedAppName}}.tls=true"
-      - "traefik.http.routers.{{sanitizedAppName}}.tls.certresolver=letsencrypt"
-      - "traefik.http.services.{{sanitizedAppName}}.loadbalancer.server.port={{containerPort}}"
-      - "traefik.http.routers.{{sanitizedAppName}}.middlewares={{traefik.middlewares}}"
-    healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:{{containerPort}}{{healthCheckEndpoint}}"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 15s
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
-
-networks:
-  app-network:
-    name: {{sanitizedAppName}}-network
-    driver: bridge
-  traefik-proxy:
-    external: true
+version: '3.8' services:
+{{sanitizedAppName}}: container_name:
+{{sanitizedAppName}}
+build: context: . dockerfile: Dockerfile expose: - "{{containerPort}}"
+environment: - NODE_ENV={{environment}}
+- PORT={{containerPort}}
+{{#if envVars}}
+  {{#each envVars}}
+    -
+    {{@key}}={{{this}}}
+  {{/each}}
+{{/if}}
+env_file: - .env.{{environment}}
+restart: unless-stopped
+{{#if volumes}}
+  volumes:
+  {{#each volumes}}
+    -
+    {{this}}
+  {{/each}}
+{{/if}}
+{{#if dependencies}}
+  depends_on:
+  {{#each dependencies}}
+    -
+    {{this}}
+  {{/each}}
+{{/if}}
+networks: - app-network - traefik-proxy labels: - "traefik.enable=true" -
+"traefik.docker.network=traefik-proxy" - "traefik.http.routers.{{sanitizedAppName}}.rule=Host(`{{traefik.domain}}`)"
+- "traefik.http.routers.{{sanitizedAppName}}.entrypoints=websecure" -
+"traefik.http.routers.{{sanitizedAppName}}.tls=true" - "traefik.http.routers.{{sanitizedAppName}}.tls.certresolver=letsencrypt"
+- "traefik.http.services.{{sanitizedAppName}}.loadbalancer.server.port={{containerPort}}"
+- "traefik.http.routers.{{sanitizedAppName}}.middlewares={{traefik.middlewares}}"
+healthcheck: test: ["CMD", "wget", "--spider", "-q", "http://localhost:{{containerPort}}{{healthCheckEndpoint}}"]
+interval: 30s timeout: 5s retries: 3 start_period: 15s logging: driver:
+"json-file" options: max-size: "10m" max-file: "3" networks: app-network: name:
+{{sanitizedAppName}}-network driver: bridge traefik-proxy: external: true
