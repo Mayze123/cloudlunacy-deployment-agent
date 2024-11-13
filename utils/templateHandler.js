@@ -137,14 +137,66 @@ class TemplateHandler {
       if (!this.templates[templateName]) {
         const templatePath = path.join(this.templatesDir, templateName);
         const templateContent = await fs.readFile(templatePath, "utf-8");
-        this.templates[templateName] = Handlebars.compile(templateContent);
-        logger.info(`Template ${templateName} loaded successfully`);
+
+        // Validate template syntax before compiling
+        try {
+          const ast = Handlebars.parse(templateContent);
+          if (!ast) {
+            throw new Error("Invalid template syntax");
+          }
+        } catch (parseError) {
+          logger.error(`Template parse error in ${templateName}:`, parseError);
+          throw new Error(
+            `Failed to parse template ${templateName}: ${parseError.message}`
+          );
+        }
+
+        this.templates[templateName] = Handlebars.compile(templateContent, {
+          strict: true,
+          assumeObjects: true,
+          preventIndent: true,
+          noEscape: false,
+        });
+
+        logger.info(
+          `Template ${templateName} loaded and validated successfully`
+        );
       }
       return this.templates[templateName];
     } catch (error) {
       logger.error(`Error loading template ${templateName}:`, error);
+      throw error;
+    }
+  }
+
+  async validateTemplate(name, content, context) {
+    try {
+      // Parse template to check syntax
+      const ast = Handlebars.parse(content);
+      if (!ast) {
+        throw new Error("Invalid template syntax");
+      }
+
+      // Try to compile and render with sample context
+      const template = Handlebars.compile(content, {
+        strict: true,
+        assumeObjects: true,
+        preventIndent: true,
+      });
+
+      const result = template(context);
+
+      // For docker-compose templates, validate YAML
+      if (name.includes("docker-compose")) {
+        const yaml = require("js-yaml");
+        yaml.load(result);
+      }
+
+      return true;
+    } catch (error) {
+      logger.error(`Template validation error in ${name}:`, error);
       throw new Error(
-        `Failed to load template ${templateName}: ${error.message}`
+        `Template validation failed for ${name}: ${error.message}`
       );
     }
   }
