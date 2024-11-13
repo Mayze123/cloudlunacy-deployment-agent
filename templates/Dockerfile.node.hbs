@@ -1,36 +1,56 @@
-FROM node:{{nodeVersion}}-alpine # Install health check dependencies and common
-tools RUN apk add --no-cache wget curl bash nano # Set working directory WORKDIR
-/app # Install dependencies first (better layer caching) COPY package*.json ./
+FROM node:{{nodeVersion}}-alpine
+
+# Install health check dependencies and common tools
+RUN apk add --no-cache wget curl bash nano
+
+# Set working directory
+WORKDIR /app
+
+# Install dependencies first (better layer caching)
+COPY package*.json ./
 
 {{#if useYarn}}
-  RUN yarn install --production --frozen-lockfile
+RUN yarn install --production --frozen-lockfile
 {{else if usePnpm}}
-  RUN npm install -g pnpm && pnpm install --frozen-lockfile --prod
+RUN npm install -g pnpm && pnpm install --frozen-lockfile --prod
 {{else}}
-  RUN npm ci --only=production
+RUN npm ci --only=production
 {{/if}}
 
-# Copy application code COPY . .
+# Copy application code
+COPY . .
 
 {{#if buildCommand}}
-  RUN
-  {{{buildCommand}}}
+RUN {{{buildCommand}}}
 {{/if}}
 
-# Set up health check endpoint RUN echo "const http=require('http');const
-server=http.createServer((req,res)=>{if(req.url==='/health'){res.writeHead(200);res.end('OK');}});server.listen({{containerPort}});"
-> healthcheck.js # Add dotenv loading script with improved error handling RUN
-echo 'require("dotenv").config(); process.on("uncaughtException", (error) => {
-console.error("Uncaught Exception:", error); process.exit(1); });
-process.on("unhandledRejection", (reason, promise) => { console.error("Unhandled
-Rejection at:", promise, "reason:", reason); process.exit(1); });
-require("./healthcheck");' > load-env.js # Create non-root user RUN addgroup -S
-appgroup && adduser -S appuser -G appgroup RUN chown -R appuser:appgroup /app #
-Switch to non-root user USER appuser # Expose port EXPOSE
-{{containerPort}}
+# Set up health check endpoint
+RUN echo "const http=require('http');const server=http.createServer((req,res)=>{if(req.url==='/health'){res.writeHead(200);res.end('OK');}});server.listen({{containerPort}});" > healthcheck.js
+
+# Add dotenv loading script with improved error handling
+RUN echo 'require("dotenv").config();
+process.on("uncaughtException", (error) => {
+  console.error("Uncaught Exception:", error);
+  process.exit(1);
+});
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("Unhandled Rejection at:", promise, "reason:", reason);
+  process.exit(1);
+});
+require("./healthcheck");' > load-env.js
+
+# Create non-root user
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+RUN chown -R appuser:appgroup /app
+
+# Switch to non-root user
+USER appuser
+
+# Expose port
+EXPOSE {{containerPort}}
 
 {{#if startCommand}}
-  CMD ["sh", "-c", "{{{startCommand}}}"]
+CMD ["sh", "-c", "{{{startCommand}}}"]
 {{else}}
-  CMD ["sh", "-c", "node load-env.js & npm start"]
+CMD ["sh", "-c", "node load-env.js & npm start"]
 {{/if}}

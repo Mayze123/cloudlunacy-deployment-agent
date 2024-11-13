@@ -329,40 +329,51 @@ class TemplateHandler {
       const dockerComposeTemplate = await this.loadTemplate(
         "docker-compose.node.hbs"
       );
-      logger.info("Docker compose template loaded");
-
       const dockerfileTemplate = await this.loadTemplate("Dockerfile.node.hbs");
-      logger.info("Dockerfile template loaded");
 
       // Generate configurations
       const dockerComposeContent = dockerComposeTemplate(templateContext);
       const dockerfileContent = dockerfileTemplate(templateContext);
 
-      // Log generated content for debugging
-      logger.info("Generated docker-compose.yml:", dockerComposeContent);
-      logger.info("Generated Dockerfile:", dockerfileContent);
+      // Log EXACT generated content for debugging
+      logger.info("=== BEGIN GENERATED DOCKER-COMPOSE.YML ===");
+      logger.info(dockerComposeContent);
+      logger.info("=== END GENERATED DOCKER-COMPOSE.YML ===");
 
-      // Validate configurations
+      logger.info("=== BEGIN GENERATED DOCKERFILE ===");
+      logger.info(dockerfileContent);
+      logger.info("=== END GENERATED DOCKERFILE ===");
+
+      // Create validation directory
+      const tempDir = `/tmp/deploy-validate-${Date.now()}`;
+      await fs.mkdir(tempDir, { recursive: true });
+
       try {
-        const tempDir = `/tmp/deploy-validate-${Date.now()}`;
-        await fs.mkdir(tempDir, { recursive: true });
-
+        // Write files with explicit encoding and line endings
+        const composePath = path.join(tempDir, "docker-compose.yml");
         await fs.writeFile(
-          path.join(tempDir, "docker-compose.yml"),
-          dockerComposeContent,
-          "utf8"
-        );
-        await fs.writeFile(
-          path.join(tempDir, "Dockerfile"),
-          dockerfileContent,
-          "utf8"
-        );
-        await fs.writeFile(
-          path.join(tempDir, `.env.${environment}`),
-          "NODE_ENV=production\n",
+          composePath,
+          dockerComposeContent.replace(/\r\n/g, "\n"),
           "utf8"
         );
 
+        const dockerfilePath = path.join(tempDir, "Dockerfile");
+        await fs.writeFile(
+          dockerfilePath,
+          dockerfileContent.replace(/\r\n/g, "\n"),
+          "utf8"
+        );
+
+        const envPath = path.join(tempDir, `.env.${environment}`);
+        await fs.writeFile(envPath, "NODE_ENV=production\n", "utf8");
+
+        // Read back the written docker-compose file for verification
+        const writtenContent = await fs.readFile(composePath, "utf8");
+        logger.info("=== WRITTEN DOCKER-COMPOSE.YML CONTENT ===");
+        logger.info(writtenContent);
+        logger.info("=== END WRITTEN CONTENT ===");
+
+        // Validate docker-compose file
         const { stdout, stderr } = await executeCommand(
           "docker-compose",
           ["config"],
@@ -374,15 +385,20 @@ class TemplateHandler {
         }
 
         logger.info("Configuration validation successful");
-
         return {
           dockerCompose: dockerComposeContent,
           dockerfile: dockerfileContent,
           allocatedPort: requestedPort,
         };
       } catch (validationError) {
-        logger.error("Validation error:", validationError);
-        throw validationError;
+        throw new Error(`Validation error: ${validationError.message}`);
+      } finally {
+        // Cleanup
+        await fs
+          .rm(tempDir, { recursive: true, force: true })
+          .catch((error) => {
+            logger.warn("Cleanup error:", error);
+          });
       }
     } catch (error) {
       logger.error("Template processing error:", error);

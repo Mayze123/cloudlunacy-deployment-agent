@@ -1,0 +1,4 @@
+# Handlebars templates
+*.hbs
+templates/*
+/templates/**/*
