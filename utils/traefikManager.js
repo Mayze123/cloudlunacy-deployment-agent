@@ -226,35 +226,47 @@ networks:
     try {
       logger.info(`Configuring Traefik for ${domain} on port ${port}`);
 
-      // Generate labels for the service
-      const labels = {
-        "traefik.enable": "true",
-        [`traefik.http.routers.${serviceName}.rule`]: `Host(\`${domain}\`)`,
-        [`traefik.http.services.${serviceName}.loadbalancer.server.port`]:
-          port.toString(),
-        [`traefik.http.routers.${serviceName}.middlewares`]:
-          "security-headers@file,rate-limit@file,compress@file",
-        [`traefik.http.routers.${serviceName}.tls`]: "true",
-        [`traefik.http.routers.${serviceName}.tls.certresolver`]: "letsencrypt",
-        [`traefik.http.routers.${serviceName}.entrypoints`]: "websecure",
-      };
+      // Try to disconnect from network first (ignore errors)
+      await executeCommand("docker", [
+        "network",
+        "disconnect",
+        this.proxyNetwork,
+        serviceName,
+      ]).catch(() => {});
 
-      // Add the service to the network
+      // Connect to traefik network
       await executeCommand("docker", [
         "network",
         "connect",
         this.proxyNetwork,
         serviceName,
-      ]).catch(() => {});
+      ]).catch((error) => {
+        // Only throw if error is not "already connected"
+        if (!error.message.includes("already exists")) {
+          throw error;
+        }
+      });
 
-      // Update service with labels
+      // Update container labels
+      const labels = [
+        `traefik.enable=true`,
+        `traefik.http.routers.${serviceName}.rule=Host(\`${domain}\`)`,
+        `traefik.http.services.${serviceName}.loadbalancer.server.port=8080`,
+        `traefik.http.routers.${serviceName}.middlewares=security-headers@file,rate-limit@file,compress@file`,
+        `traefik.http.routers.${serviceName}.tls=true`,
+        `traefik.http.routers.${serviceName}.tls.certresolver=letsencrypt`,
+        `traefik.http.routers.${serviceName}.entrypoints=websecure`,
+      ];
+
       await executeCommand("docker", [
-        "service",
+        "container",
         "update",
         "--label-add",
-        ...Object.entries(labels).map(([k, v]) => `${k}=${v}`),
+        ...labels.map((label) => label),
         serviceName,
       ]);
+
+      await this.verifyConfiguration();
 
       logger.info(`Traefik configuration completed for ${domain}`);
       return true;

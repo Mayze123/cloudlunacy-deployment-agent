@@ -288,6 +288,135 @@ function sendLogs(ws, deploymentId, log) {
   }
 }
 
+async function checkPort(port) {
+  return new Promise((resolve) => {
+    const server = net.createServer();
+
+    server.once("error", (err) => {
+      server.close();
+      if (err.code === "EADDRINUSE") {
+        logger.debug(`Host port ${port} is in use`);
+        resolve(false);
+      } else {
+        logger.error(`Error checking host port ${port}:`, err);
+        resolve(false);
+      }
+    });
+
+    server.once("listening", () => {
+      server.close();
+      logger.debug(`Host port ${port} is available`);
+      resolve(true);
+    });
+
+    server.listen(port, "127.0.0.1");
+  });
+}
+
+async function checkContainerPort(containerName, port) {
+  try {
+    // First check if container is running
+    const { stdout: status } = await executeCommand("docker", [
+      "inspect",
+      "--format",
+      "{{.State.Running}}",
+      containerName,
+    ]);
+    if (status.trim() !== "true") {
+      logger.error(`Container ${containerName} is not running`);
+      return false;
+    }
+
+    // Try to execute curl inside the container to check the port
+    await executeCommand("docker", [
+      "exec",
+      containerName,
+      "curl",
+      "-s",
+      "--retry",
+      "1",
+      "--max-time",
+      "2",
+      `http://localhost:${port}/health`,
+    ]);
+
+    logger.debug(`Container port ${port} is accessible in ${containerName}`);
+    return true;
+  } catch (error) {
+    logger.error(
+      `Error checking container port ${port} in ${containerName}:`,
+      error
+    );
+    return false;
+  }
+}
+
+async function cleanupExistingDeployment(serviceName) {
+  try {
+    // Check if container exists first
+    const { stdout: containerList } = await executeCommand("docker", [
+      "ps",
+      "-a",
+      "--format",
+      "{{.Names}}",
+    ]);
+    if (containerList.includes(serviceName)) {
+      // Stop container if it exists
+      await executeCommand("docker", ["stop", serviceName]).catch((error) => {
+        logger.warn(`Failed to stop container ${serviceName}:`, error.message);
+      });
+
+      // Remove container if it exists
+      await executeCommand("docker", ["rm", serviceName]).catch((error) => {
+        logger.warn(
+          `Failed to remove container ${serviceName}:`,
+          error.message
+        );
+      });
+    }
+
+    // Check if network exists first
+    const { stdout: networkList } = await executeCommand("docker", [
+      "network",
+      "ls",
+      "--format",
+      "{{.Name}}",
+    ]);
+    const networkName = `${serviceName}-network`;
+    if (networkList.includes(networkName)) {
+      // Remove network if it exists
+      await executeCommand("docker", ["network", "rm", networkName]).catch(
+        (error) => {
+          logger.warn(
+            `Failed to remove network ${networkName}:`,
+            error.message
+          );
+        }
+      );
+    }
+
+    // Remove any dangling images
+    const { stdout: imageList } = await executeCommand("docker", [
+      "images",
+      "-q",
+      "-f",
+      "dangling=true",
+    ]);
+    if (imageList) {
+      await executeCommand("docker", ["rmi", ...imageList.split("\n")]).catch(
+        (error) => {
+          logger.warn("Failed to remove dangling images:", error.message);
+        }
+      );
+    }
+
+    return true;
+  } catch (error) {
+    logger.warn("Cleanup warning:", error);
+    return false;
+  }
+}
+
 async function checkDeploymentHealth(port, containerName, domain) {
   try {
     logger.info(
@@ -311,7 +440,6 @@ async function checkDeploymentHealth(port, containerName, domain) {
       logger.info("Container state:", JSON.stringify(containerState, null, 2));
 
       if (!containerState.Running) {
-        // Get container logs if not running
         const { stdout: logs } = await executeCommand("docker", [
           "logs",
           containerName,
@@ -339,6 +467,11 @@ async function checkDeploymentHealth(port, containerName, domain) {
 
     logger.info("Network configuration:", networkInfo);
 
+    // Check if container is connected to traefik network
+    if (!networkInfo.includes("traefik-proxy")) {
+      throw new Error("Container is not connected to traefik-proxy network");
+    }
+
     // Get detailed port bindings
     logger.info(`Checking port bindings for ${containerName}...`);
     const { stdout: portBindings } = await executeCommand("docker", [
@@ -350,38 +483,23 @@ async function checkDeploymentHealth(port, containerName, domain) {
 
     logger.info("Port bindings:", portBindings);
 
-    // Check port accessibility using netcat
-    logger.info(`Checking port ${port} availability...`);
-    const portCheck = await new Promise((resolve) => {
-      const net = require("net");
-      const socket = net.createConnection(port);
+    // Check both host port and container port accessibility
+    logger.info(`Checking ports accessibility...`);
 
-      const timeout = setTimeout(() => {
-        socket.destroy();
-        logger.warn(`Port ${port} connection timed out`);
-        resolve(false);
-      }, 5000);
+    // Check host port
+    const hostPortCheck = await checkPort(port);
+    logger.info(`Host port ${port} accessible: ${hostPortCheck}`);
 
-      socket.on("connect", () => {
-        clearTimeout(timeout);
-        socket.end();
-        logger.info(`Successfully connected to port ${port}`);
-        resolve(true);
-      });
+    // Check container port internally
+    const containerPortCheck = await checkContainerPort(containerName, "8080");
+    logger.info(`Container port 8080 accessible: ${containerPortCheck}`);
 
-      socket.on("error", (error) => {
-        clearTimeout(timeout);
-        logger.error("Port connection error:", error);
-        resolve(false);
-      });
-    });
-
-    if (!portCheck) {
+    if (!hostPortCheck && !containerPortCheck) {
       // Get netstat information for debugging
       const { stdout: netstatOutput } = await executeCommand("netstat", [
         "-tulpn",
       ]);
-      logger.error("Port not accessible. Current port usage:", netstatOutput);
+      logger.error("Ports not accessible. Current port usage:", netstatOutput);
 
       // Get recent container logs
       const { stdout: logs } = await executeCommand("docker", [
@@ -392,48 +510,38 @@ async function checkDeploymentHealth(port, containerName, domain) {
       ]);
       logger.error("Recent container logs:", logs);
 
-      throw new Error(`Port ${port} is not accessible`);
+      throw new Error(
+        `Neither host port ${port} nor container port 8080 is accessible`
+      );
     }
 
-    // Check application health endpoint
-    try {
-      logger.info(`Checking application health endpoint on port ${port}...`);
-      const { stdout: healthCheck } = await executeCommand("curl", [
-        "--max-time",
-        "5",
-        "-i",
-        `http://localhost:${port}/health`,
-      ]);
-      logger.info("Health endpoint response:", healthCheck);
-    } catch (error) {
-      logger.warn("Health endpoint check failed:", error.message);
-    }
-
-    // Check nginx configuration if domain is provided
+    // Check application health endpoint through Traefik if domain provided
     if (domain) {
-      logger.info(`Verifying domain configuration for ${domain}`);
+      logger.info(`Verifying Traefik configuration for ${domain}`);
 
-      // Test nginx configuration
-      const { stdout: nginxStatus } = await executeCommand("sudo", [
-        "nginx",
-        "-t",
-      ]);
-      logger.info("Nginx configuration status:", nginxStatus);
+      // Check Traefik router status
+      const { stdout: traefikStatus } = await executeCommand("docker", [
+        "exec",
+        "traefik-proxy",
+        "traefik",
+        "healthcheck",
+      ]).catch(() => ({ stdout: "Traefik healthcheck failed" }));
+      logger.info("Traefik status:", traefikStatus);
 
-      // Test domain resolution locally
+      // Test domain through Traefik
       try {
-        logger.info(`Testing local domain access for ${domain}...`);
-        const { stdout: localCheck } = await executeCommand("curl", [
+        logger.info(`Testing domain access through Traefik: ${domain}`);
+        await executeCommand("curl", [
           "--max-time",
           "5",
-          "--verbose",
+          "-k", // Allow self-signed certificates during check
           "-H",
-          `"Host: ${domain}"`,
-          `http://localhost:${port}`,
+          `Host: ${domain}`,
+          "https://localhost/health",
         ]);
-        logger.info("Local domain check response:", localCheck);
+        logger.info("Domain is accessible through Traefik");
       } catch (error) {
-        logger.warn("Local domain check failed:", error.message);
+        logger.warn("Domain check through Traefik failed:", error.message);
       }
     }
 
