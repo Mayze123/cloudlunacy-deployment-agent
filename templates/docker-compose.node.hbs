@@ -1,8 +1,9 @@
-version: '3.8' services:
-{{serviceName}}: container_name:
-{{serviceName}}
-build: context: . dockerfile: Dockerfile environment: - NODE_ENV={{environment}}
-- PORT={{port}}
+
+// templates/docker-compose.node.hbs version: '3.8' services:
+{{appName}}: container_name:
+{{appName}}
+build: context: . dockerfile: Dockerfile ports: - "{{port}}:{{port}}"
+environment: - NODE_ENV={{environment}}
 {{#if envVars}}
   {{#each envVars}}
     -
@@ -24,11 +25,7 @@ restart: unless-stopped
     {{this}}
   {{/each}}
 {{/if}}
-expose: - "{{port}}" networks: - traefik-public labels: - "traefik.enable=true"
-- "traefik.docker.network=traefik-public" - "traefik.http.routers.{{serviceName}}.rule=Host(`{{domain}}`)"
-- "traefik.http.routers.{{serviceName}}.entrypoints=websecure" -
-"traefik.http.routers.{{serviceName}}.tls.certresolver=letsencrypt" -
-"traefik.http.services.{{serviceName}}.loadbalancer.server.port={{port}}"
-healthcheck: test: ["CMD", "curl", "-f", "http://localhost:{{port}}{{healthCheckEndpoint}}"]
-interval: 30s timeout: 5s retries: 3 start_period: 15s networks: traefik-public:
-external: true
+networks: - app-network healthcheck: test: ["CMD", "wget", "--spider", "-q",
+"http://localhost:{{port}}{{healthCheckEndpoint}}"] interval: 30s timeout: 5s
+retries: 3 start_period: 15s networks: app-network: name:
+{{appName}}-network driver: bridge

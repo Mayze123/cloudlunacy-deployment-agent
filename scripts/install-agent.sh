@@ -5,20 +5,28 @@
 # Author: Mahamadou Taibou
 # Date: 2024-11-02
 #
-# Usage:
-#   sudo DOMAIN=example.com ADMIN_EMAIL=admin@example.com ./install-agent.sh <AGENT_TOKEN> <SERVER_ID> [BACKEND_BASE_URL] [GITHUB_SSH_KEY]
+# Description:
+# This script installs and configures the CloudLunacy Deployment Agent on a VPS.
+# It performs the following tasks:
+#   - Detects the operating system and version
+#   - Updates system packages
+#   - Installs necessary dependencies (Docker, Node.js, Git, jq)
+#   - Creates a dedicated user with a home directory and correct permissions
+#   - Downloads the latest version of the Deployment Agent from GitHub
+#   - Installs Node.js dependencies
+#   - Configures environment variables
+#   - Sets up the Deployment Agent as a systemd service
+#   - Generates SSH keys for private repository access
+#   - Provides post-installation verification and feedback
 #
-# Required Environment Variables:
+# Usage:
+#   sudo ./install-agent.sh <AGENT_TOKEN> <SERVER_ID> [BACKEND_BASE_URL] [GITHUB_SSH_KEY]
+#
+# Arguments:
 #   AGENT_TOKEN      - Unique token for agent authentication
 #   SERVER_ID        - Unique identifier for the server
-#
-# Optional Environment Variables:
-#   BACKEND_BASE_URL - Backend base URL; defaults to https://your-default-backend-url
-#   GITHUB_SSH_KEY   - Path to existing SSH private key for accessing private repos
-#   DOMAIN          - Domain for Traefik dashboard (defaults to server IP)
-#   ADMIN_EMAIL     - Email for Let's Encrypt certificates
-#   ADMIN_USER      - Traefik dashboard username (defaults to "admin")
-#   ADMIN_PASSWORD  - Traefik dashboard password (auto-generated if not provided)
+#   BACKEND_BASE_URL - (Optional) Backend base URL; defaults to https://your-default-backend-url
+#   GITHUB_SSH_KEY   - (Optional) Path to existing SSH private key for accessing private repos
 # ------------------------------------------------------------------------------
 
 set -euo pipefail
@@ -155,31 +163,6 @@ install_dependencies() {
             ;;
     esac
     log "Dependencies installed."
-}
-
-check_permissions() {
-    log "Checking system permissions..."
-    
-    # Check if we can write to BASE_DIR
-    if [ ! -w "$BASE_DIR" ]; then
-        log_error "Cannot write to $BASE_DIR"
-        exit 1
-    fi
-
-    # Check if we can create directories
-    if ! mkdir -p "$BASE_DIR/test" 2>/dev/null; then
-        log_error "Cannot create directories in $BASE_DIR"
-        exit 1
-    fi
-    rm -rf "$BASE_DIR/test"
-
-    # Check if Docker socket is accessible
-    if [ ! -w "/var/run/docker.sock" ]; then
-        log_error "Cannot access Docker socket. Make sure you're running as root or in the docker group"
-        exit 1
-    fi
-    
-    log "Permission checks passed"
 }
 
 # Function to install Docker
@@ -400,154 +383,129 @@ EOF'
     log "SSH setup completed."
 }
 
-setup_traefik_proxy() {
-    log "Setting up Traefik Proxy..."
+setup_nginx_proxy() {
+    log "Setting up Nginx Proxy..."
     
     # Get user's UID and GID
     USER_UID=$(id -u "$USERNAME")
     USER_GID=$(id -g "$USERNAME")
     
-    # Check if anything is using port 80/443
-    if lsof -i :80 >/dev/null 2>&1 || lsof -i :443 >/dev/null 2>&1; then
-        log_warn "Port 80/443 is in use. Stopping system nginx if running..."
+    # Check if anything is using port 80
+    if lsof -i :80 >/dev/null 2>&1; then
+        log_warn "Port 80 is in use. Stopping system nginx if running..."
         systemctl stop nginx || true
         systemctl disable nginx || true
     fi
 
-    # First remove any existing Traefik setup
-    rm -rf "${BASE_DIR}/traefik"
+    # Create all required directories with correct ownership
+    log "Creating nginx directories..."
+    mkdir -p "${BASE_DIR}/nginx/"{conf.d,vhost.d,html,certs,temp/{client,proxy,fastcgi,uwsgi,scgi}}
+    chown -R "$USERNAME:$USERNAME" "${BASE_DIR}/nginx"
+    chmod -R 775 "${BASE_DIR}/nginx"
+    
+    # Create dedicated network for proxy
+    docker network create nginx-proxy || true
+    
+    # Remove existing proxy container if it exists
+    docker rm -f nginx-proxy >/dev/null 2>&1 || true
 
-    # Create directory structure
-    TRAEFIK_DIR="${BASE_DIR}/traefik"
-    mkdir -p "${TRAEFIK_DIR}"/{config,certs}
+    # Create base nginx configuration
+    cat > "${BASE_DIR}/nginx/nginx.conf" << EOF
+worker_processes auto;
+pid /tmp/nginx.pid;
 
-    log "Creating Traefik configuration files..."
+events {
+    worker_connections 768;
+}
 
-    # Create acme.json file with proper permissions
-    touch "${TRAEFIK_DIR}/acme.json"
-    chmod 600 "${TRAEFIK_DIR}/acme.json"
+http {
+    client_body_temp_path /temp/client;
+    proxy_temp_path /temp/proxy;
+    fastcgi_temp_path /temp/fastcgi;
+    uwsgi_temp_path /temp/uwsgi;
+    scgi_temp_path /temp/scgi;
 
-    # Create traefik.yml configuration file
-    tee "${TRAEFIK_DIR}/traefik.yml" > /dev/null << EOF
-api:
-  dashboard: true
-  insecure: false
+    sendfile on;
+    tcp_nopush on;
+    tcp_nodelay on;
+    keepalive_timeout 65;
+    types_hash_max_size 2048;
 
-entryPoints:
-  web:
-    address: ":80"
-    http:
-      redirections:
-        entryPoint:
-          to: websecure
-          scheme: https
-  websecure:
-    address: ":443"
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
 
-providers:
-  docker:
-    endpoint: "unix:///var/run/docker.sock"
-    exposedByDefault: false
-    network: traefik-public
-  file:
-    directory: /etc/traefik/config
-    watch: true
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers on;
 
-certificatesResolvers:
-  letsencrypt:
-    acme:
-      email: ${ADMIN_EMAIL:-admin@example.com}
-      storage: /etc/traefik/acme.json
-      httpChallenge:
-        entryPoint: web
+    access_log /dev/stdout;
+    error_log /dev/stderr;
+
+    gzip on;
+
+    include /etc/nginx/conf.d/*.conf;
+}
 EOF
-
-    # Set proper permissions
-    chown -R "$USERNAME:$USERNAME" "${TRAEFIK_DIR}"
-    chmod 644 "${TRAEFIK_DIR}/traefik.yml"
     
-    # Create docker-compose file for Traefik
-    TRAEFIK_DOMAIN=${DOMAIN:-$(curl -s https://api.ipify.org || echo "localhost")}
-    ADMIN_USER=${ADMIN_USER:-admin}
-    # Generate a random password if not provided
-    ADMIN_PASSWORD=${ADMIN_PASSWORD:-$(openssl rand -base64 12)}
-    
-    # Generate htpasswd string
-    HTPASSWD=$(docker run --rm httpd:2.4-alpine htpasswd -nb "${ADMIN_USER}" "${ADMIN_PASSWORD}" | sed -e s/\\$/\\$\\$/g)
-    
-    COMPOSE_FILE="${BASE_DIR}/docker-compose.proxy.yml"
-    tee "${COMPOSE_FILE}" > /dev/null << EOF
+    # Create nginx proxy container
+    cat > "$BASE_DIR/docker-compose.proxy.yml" << EOF
 version: "3.8"
 services:
-  traefik:
-    image: traefik:v2.10
-    container_name: traefik
+  nginx-proxy:
+    image: nginx:alpine
+    container_name: nginx-proxy
     restart: always
-    security_opt:
-      - no-new-privileges:true
     ports:
       - "80:80"
       - "443:443"
     volumes:
-      - /etc/timezone:/etc/timezone:ro
-      - /etc/localtime:/etc/localtime:ro
-      - ${TRAEFIK_DIR}/traefik.yml:/etc/traefik/traefik.yml:ro
-      - ${TRAEFIK_DIR}/acme.json:/etc/traefik/acme.json
-      - ${TRAEFIK_DIR}/config:/etc/traefik/config
-      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ${BASE_DIR}/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ${BASE_DIR}/nginx/conf.d:/etc/nginx/conf.d
+      - ${BASE_DIR}/nginx/vhost.d:/etc/nginx/vhost.d
+      - ${BASE_DIR}/nginx/html:/usr/share/nginx/html
+      - ${BASE_DIR}/nginx/certs:/etc/nginx/certs:ro
+      - ${BASE_DIR}/nginx/temp:/temp
     networks:
-      - traefik-public
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.traefik-secure.entrypoints=websecure"
-      - "traefik.http.routers.traefik-secure.rule=Host(\`${TRAEFIK_DOMAIN}\`)"
-      - "traefik.http.routers.traefik-secure.service=api@internal"
-      - "traefik.http.routers.traefik-secure.middlewares=admin-auth"
-      - "traefik.http.middlewares.admin-auth.basicauth.users=${HTPASSWD}"
-
+      - nginx-proxy
+    user: "${USER_UID}:${USER_GID}"
 networks:
-  traefik-public:
+  nginx-proxy:
     external: true
 EOF
-
-    # Create Traefik network if it doesn't exist
-    if ! docker network ls | grep -q "traefik-public"; then
-        docker network create traefik-public || true
-    fi
-
-    # Start Traefik
-    log "Starting Traefik..."
-    if ! docker-compose -f "${COMPOSE_FILE}" up -d; then
-        log_error "Failed to start Traefik. Check logs:"
-        docker-compose -f "${COMPOSE_FILE}" logs
-        exit 1
-    fi
-
-    # Wait for container to start and verify
-    sleep 5
-    if ! docker ps | grep -q traefik; then
-        log_error "Failed to start Traefik proxy. Check docker logs:"
-        docker logs traefik
-        exit 1
-    fi
-
-    # Save credentials
-    CREDS_FILE="${TRAEFIK_DIR}/credentials.txt"
-    tee "${CREDS_FILE}" > /dev/null << EOF
-Traefik Dashboard Credentials:
-URL: https://${TRAEFIK_DOMAIN}
-Username: ${ADMIN_USER}
-Password: ${ADMIN_PASSWORD}
+    
+    # Create default configuration
+    cat > "${BASE_DIR}/nginx/conf.d/default.conf" << EOF
+server {
+    listen 80 default_server;
+    server_name _;
+    
+    location / {
+        return 200 'Server is running\n';
+        add_header Content-Type text/plain;
+    }
+}
 EOF
 
-    chmod 600 "${CREDS_FILE}"
-    chown "$USERNAME:$USERNAME" "${CREDS_FILE}"
+    # Ensure proper ownership of all files
+    chown "$USERNAME:$USERNAME" "$BASE_DIR/docker-compose.proxy.yml"
+    chown "$USERNAME:$USERNAME" "${BASE_DIR}/nginx/nginx.conf"
+    chown "$USERNAME:$USERNAME" "${BASE_DIR}/nginx/conf.d/default.conf"
+    chmod 664 "${BASE_DIR}/nginx/conf.d/default.conf"
+    chmod 664 "${BASE_DIR}/nginx/nginx.conf"
 
-    log "Traefik Proxy setup completed successfully"
-    log "Dashboard credentials saved to: ${CREDS_FILE}"
-    log "Dashboard URL: https://${TRAEFIK_DOMAIN}"
-    log "Username: ${ADMIN_USER}"
-    log "Password: ${ADMIN_PASSWORD}"
+    # Start the proxy
+    docker-compose -f "$BASE_DIR/docker-compose.proxy.yml" up -d
+
+    # Wait a moment for the container to start
+    sleep 2
+
+    # Check if container is running
+    if ! docker ps | grep -q nginx-proxy; then
+        log_error "Failed to start nginx proxy. Check docker logs:"
+        docker logs nginx-proxy
+        exit 1
+    fi
+
+    log "Nginx Proxy setup completed successfully"
 }
 
 setup_docker_permissions() {
@@ -683,12 +641,6 @@ main() {
     BACKEND_BASE_URL="${3:-https://your-default-backend-url}"
     GITHUB_SSH_KEY="${4:-}"
 
-    # Set default values for Traefik configuration
-    DOMAIN=${DOMAIN:-$(curl -s https://api.ipify.org || echo "localhost")}
-    ADMIN_EMAIL=${ADMIN_EMAIL:-"admin@${DOMAIN}"}
-    ADMIN_USER=${ADMIN_USER:-"admin"}
-    ADMIN_PASSWORD=${ADMIN_PASSWORD:-$(openssl rand -base64 12)}
-
     BACKEND_URL="${BACKEND_BASE_URL}"
 
     detect_os
@@ -696,9 +648,8 @@ main() {
 
     update_system
     install_dependencies
-    check_permissions
     install_docker
-    setup_traefik_proxy
+    setup_nginx_proxy
     install_node
     setup_user_directories
     setup_docker_permissions
