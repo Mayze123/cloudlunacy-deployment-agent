@@ -715,19 +715,20 @@ EOF
 setup_deployment_templates() {
     log "Setting up deployment templates..."
     
-    # Create templates directory
+    # Templates directory is already at BASE_DIR/templates
     TEMPLATES_DIR="${BASE_DIR}/templates"
-    mkdir -p "$TEMPLATES_DIR"
 
-    # Copy templates from the cloned repository
-    cp -r "${BASE_DIR}/templates/"* "$TEMPLATES_DIR/"
-
-    # Set proper permissions
-    chown -R "$USERNAME:$USERNAME" "$TEMPLATES_DIR"
-    chmod 755 "$TEMPLATES_DIR"
-    chmod 644 "${TEMPLATES_DIR}"/*
-
-    log "Deployment templates setup completed"
+    # No need to copy, just set proper permissions
+    if [ -d "$TEMPLATES_DIR" ]; then
+        # Set proper permissions
+        chown -R "$USERNAME:$USERNAME" "$TEMPLATES_DIR"
+        chmod 755 "$TEMPLATES_DIR"
+        find "$TEMPLATES_DIR" -type f -exec chmod 644 {} \;
+        log "Deployment templates permissions updated"
+    else
+        log_error "Templates directory not found at ${TEMPLATES_DIR}"
+        exit 1
+    fi
 }
 
 setup_docker_permissions() {
