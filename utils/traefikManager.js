@@ -13,6 +13,18 @@ class TraefikManager {
     this.configDir = `${this.baseDir}/traefik`;
     this.proxyNetwork = "traefik-proxy";
     this.proxyContainer = "traefik-proxy";
+
+    // Get UID and GID
+    try {
+      this.uid = parseInt(execSync("id -u cloudlunacy").toString());
+      this.gid = parseInt(
+        execSync("getent group docker | cut -d: -f3").toString()
+      );
+      logger.info(`Using UID:GID = ${this.uid}:${this.gid}`);
+    } catch (error) {
+      logger.error("Failed to get UID/GID:", error);
+      throw error;
+    }
   }
 
   async initialize() {
@@ -49,134 +61,22 @@ class TraefikManager {
   async ensureDirectories() {
     try {
       const dirs = [
+        this.configDir,
         `${this.configDir}/dynamic`,
         `${this.configDir}/acme`,
         `${this.configDir}/logs`,
       ];
 
-      // First ensure base directory exists with correct permissions
-      await fs.mkdir(this.configDir, { recursive: true });
-      await executeCommand("chown", [
-        "-R",
-        "cloudlunacy:docker",
-        this.configDir,
-      ]);
-      await executeCommand("chmod", ["775", this.configDir]);
-
       for (const dir of dirs) {
-        try {
-          await fs.access(dir);
-        } catch {
-          await fs.mkdir(dir, { recursive: true });
-        }
-        // Use executeCommand instead of fs.chmod for elevated privileges
-        await executeCommand("chown", ["-R", "cloudlunacy:docker", dir]);
+        await fs.mkdir(dir, { recursive: true });
+        await executeCommand("chown", [`${this.uid}:${this.gid}`, dir]);
         await executeCommand("chmod", ["775", dir]);
       }
-
-      // Create initial traefik.yml configuration
-      const traefikConfig = `
-global:
-  checkNewVersion: true
-  sendAnonymousUsage: false
-
-log:
-  level: INFO
-  filePath: "/etc/traefik/logs/traefik.log"
-
-accessLog:
-  filePath: "/etc/traefik/logs/access.log"
-  bufferingSize: 100
-
-api:
-  dashboard: true
-  insecure: false
-
-entryPoints:
-  web:
-    address: ":80"
-    http:
-      redirections:
-        entryPoint:
-          to: websecure
-          scheme: https
-  websecure:
-    address: ":443"
-    http:
-      tls:
-        certResolver: letsencrypt
-
-providers:
-  docker:
-    endpoint: "unix:///var/run/docker.sock"
-    watch: true
-    exposedByDefault: false
-    network: ${this.proxyNetwork}
-  file:
-    directory: "/etc/traefik/dynamic"
-    watch: true
-
-certificatesResolvers:
-  letsencrypt:
-    acme:
-      email: "admin@example.com"  # Will be replaced during setup
-      storage: "/etc/traefik/acme/acme.json"
-      httpChallenge:
-        entryPoint: web
-`;
-
-      await fs.writeFile(
-        path.join(this.configDir, "traefik.yml"),
-        traefikConfig,
-        { mode: 0o644 }
-      );
-
-      // Generate secure password for admin user
-      const adminPassword = await this.generateSecurePassword();
-
-      const middlewareConfig = `
-http:
-  middlewares:
-    auth-basic:
-      basicAuth:
-        users:
-          - "${adminPassword}"  # Generated during installation
-    
-    security-headers:
-      headers:
-        frameDeny: true
-        sslRedirect: true
-        browserXssFilter: true
-        contentTypeNosniff: true
-        stsIncludeSubdomains: true
-        stsPreload: true
-        stsSeconds: 31536000
-        customResponseHeaders:
-          X-Robots-Tag: "noindex,nofollow,nosnippet,noarchive,notranslate,noimageindex"
-          Server: ""
-    
-    rate-limit:
-      rateLimit:
-        average: 100
-        burst: 50
-        period: 1s
-    
-    compress:
-      compress: {}
-`;
-
-      await fs.writeFile(
-        path.join(this.configDir, "dynamic/middleware.yml"),
-        middlewareConfig,
-        { mode: 0o644 }
-      );
-
-      // Save admin credentials securely
-      await this.saveAdminCredentials();
 
       // Create empty acme.json with correct permissions
       const acmeFile = path.join(this.configDir, "acme/acme.json");
       await fs.writeFile(acmeFile, "{}", { mode: 0o600 });
+      await executeCommand("chown", [`${this.uid}:${this.gid}`, acmeFile]);
 
       return true;
     } catch (error) {
@@ -411,11 +311,11 @@ http:
       );
 
       // Ensure network exists
-      await executeCommand("docker", [
-        "network",
-        "create",
-        "traefik-proxy",
-      ]).catch(() => {});
+      try {
+        await executeCommand("docker", ["network", "inspect", "traefik-proxy"]);
+      } catch {
+        await executeCommand("docker", ["network", "create", "traefik-proxy"]);
+      }
 
       // Get compose file path
       const composeFile = path.join(this.baseDir, "docker-compose.proxy.yml");
@@ -429,6 +329,8 @@ http:
             ...process.env,
             PATH: process.env.PATH,
             HOME: this.baseDir,
+            USER_UID: this.uid.toString(),
+            USER_GID: this.gid.toString(),
           },
         }
       );
@@ -459,7 +361,7 @@ http:
       const { stdout: logs } = await executeCommand("docker", [
         "logs",
         this.proxyContainer,
-      ]);
+      ]).catch(() => ({ stdout: "Could not retrieve logs" }));
       logger.error("Traefik proxy failed to start. Logs:", logs);
       throw new Error("Failed to start Traefik proxy after 30 seconds");
     } catch (error) {
@@ -480,7 +382,7 @@ http:
 
       // Ensure directory exists with correct permissions
       await fs.mkdir(composeDir, { recursive: true });
-      await executeCommand("chown", ["cloudlunacy:docker", composeDir]);
+      await executeCommand("chown", [`${this.uid}:${this.gid}`, composeDir]);
       await executeCommand("chmod", ["775", composeDir]);
 
       const composeContent = `
@@ -504,10 +406,9 @@ services:
       - ${this.configDir}/logs:/etc/traefik/logs
     networks:
       - traefik-proxy
-    user: "cloudlunacy:docker"
+    user: "${this.uid}:${this.gid}"
     environment:
       - TZ=UTC
-      - ADMIN_AUTH=admin:${this.adminHash}
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.traefik.rule=Host(\`traefik.localhost\`)"
@@ -548,23 +449,22 @@ http:
     auth-middleware:
       basicAuth:
         users:
-          - "${this.adminHash}"
-`;
+          - "${this.adminHash}"`;
 
       // Write middleware config
-      await fs.writeFile(
-        path.join(this.configDir, "dynamic/middleware.yml"),
-        middlewareConfig,
-        { mode: 0o644 }
+      const middlewarePath = path.join(
+        this.configDir,
+        "dynamic/middleware.yml"
       );
+      await fs.writeFile(middlewarePath, middlewareConfig, { mode: 0o644 });
       await executeCommand("chown", [
-        "cloudlunacy:docker",
-        path.join(this.configDir, "dynamic/middleware.yml"),
+        `${this.uid}:${this.gid}`,
+        middlewarePath,
       ]);
 
       // Write the compose file
       await fs.writeFile(composeFile, composeContent, { mode: 0o644 });
-      await executeCommand("chown", ["cloudlunacy:docker", composeFile]);
+      await executeCommand("chown", [`${this.uid}:${this.gid}`, composeFile]);
 
       // Save credentials to a file
       const credsFile = path.join(this.configDir, "admin_credentials.txt");
@@ -577,7 +477,7 @@ Password: ${this.adminPassword}
 IMPORTANT: Please save these credentials and delete this file!
 `;
       await fs.writeFile(credsFile, credsContent, { mode: 0o600 });
-      await executeCommand("chown", ["cloudlunacy:docker", credsFile]);
+      await executeCommand("chown", [`${this.uid}:${this.gid}`, credsFile]);
 
       logger.info("Admin credentials saved to: " + credsFile);
 
