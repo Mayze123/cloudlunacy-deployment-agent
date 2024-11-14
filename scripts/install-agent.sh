@@ -918,7 +918,6 @@ main() {
     update_system
     install_dependencies
     install_docker
-    setup_traefik_proxy
     install_node
     setup_user_directories
     setup_docker_permissions
@@ -927,6 +926,7 @@ main() {
     install_agent_dependencies
     setup_deployment_templates
     configure_env
+    setup_traefik_proxy
     fix_traefik_permissions
     setup_service
     verify_installation
