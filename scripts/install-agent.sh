@@ -268,8 +268,9 @@ BASE_DIR="/opt/cloudlunacy"
 # Function to create dedicated user and directories
 setup_user_directories() {
     log "Creating dedicated user and directories..."
-    
-    # Create user if it doesn't exist and add to docker group
+    USERNAME="cloudlunacy"
+    BASE_DIR="/opt/cloudlunacy"
+
     if id "$USERNAME" &>/dev/null; then
         log "User '$USERNAME' already exists."
         usermod -aG docker "$USERNAME"
@@ -279,26 +280,24 @@ setup_user_directories() {
         log "User '$USERNAME' created and added to docker group."
     fi
 
-    # Create and set permissions for all required directories
-    directories=(
-        "$BASE_DIR"
-        "$BASE_DIR/logs"
-        "$BASE_DIR/ssh"
-        "$BASE_DIR/config"
-        "$BASE_DIR/bin"
-        "$BASE_DIR/traefik"
-        "$BASE_DIR/deployments"
-        "/tmp/cloudlunacy-deployments"
-    )
-
-    for dir in "${directories[@]}"; do
-        fix_directory_permissions "$dir" "$USERNAME" "docker"
-    done
-
-    # Set special permissions for ssh directory
-    chmod 700 "$BASE_DIR/ssh"
+    # Create base directories with correct permissions
+    mkdir -p "$BASE_DIR"
     
-    log "Directories created and permissions set correctly."
+    # Explicitly create and set permissions for logs directory
+    mkdir -p "$BASE_DIR/logs"
+    chown -R "$USERNAME:docker" "$BASE_DIR/logs"
+    chmod -R 775 "$BASE_DIR/logs"  # Group writable for docker group
+
+    # Create other directories
+    mkdir -p "$BASE_DIR"/{ssh,config,bin,deployments}
+    chown -R "$USERNAME:docker" "$BASE_DIR"
+    find "$BASE_DIR" -type d -exec chmod 775 {} \;
+    find "$BASE_DIR" -type f -exec chmod 664 {} \;
+
+    # Special permissions for ssh directory
+    chmod 700 "$BASE_DIR/ssh"
+
+    log "Directories created at $BASE_DIR."
 }
 
 # Function to download and verify the latest agent
