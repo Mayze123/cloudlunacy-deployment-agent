@@ -268,33 +268,40 @@ BASE_DIR="/opt/cloudlunacy"
 # Function to create dedicated user and directories
 setup_user_directories() {
     log "Creating dedicated user and directories..."
-    USERNAME="cloudlunacy"
-    BASE_DIR="/opt/cloudlunacy"
-
+    
+    # Create cloudlunacy group if it doesn't exist
+    groupadd -f cloudlunacy
+    
+    # Create user if it doesn't exist and add to necessary groups
     if id "$USERNAME" &>/dev/null; then
         log "User '$USERNAME' already exists."
+        usermod -aG docker,cloudlunacy "$USERNAME"
         usermod -d "$BASE_DIR" "$USERNAME"
     else
-        useradd -m -d "$BASE_DIR" -r -s /bin/bash "$USERNAME"
-        log "User '$USERNAME' created."
+        useradd -m -d "$BASE_DIR" -G docker,cloudlunacy -s /bin/bash "$USERNAME"
+        log "User '$USERNAME' created and added to groups."
     fi
 
-    # Ensure base directory exists and has correct permissions
-    mkdir -p "$BASE_DIR"
-    chown -R "$USERNAME":"$USERNAME" "$BASE_DIR"
-    chmod -R 750 "$BASE_DIR"
+    # Create and set permissions for all required directories
+    directories=(
+        "$BASE_DIR"
+        "$BASE_DIR/logs"
+        "$BASE_DIR/ssh"
+        "$BASE_DIR/config"
+        "$BASE_DIR/bin"
+        "$BASE_DIR/traefik"
+        "$BASE_DIR/deployments"
+        "/tmp/cloudlunacy-deployments"
+    )
 
-    # Create nginx configuration directories
-    mkdir -p "$BASE_DIR/nginx/sites-available"
-    mkdir -p "$BASE_DIR/nginx/sites-enabled"
-    chown -R "$USERNAME":"$USERNAME" "$BASE_DIR/nginx"
-    chmod -R 750 "$BASE_DIR/nginx"
+    for dir in "${directories[@]}"; do
+        fix_directory_permissions "$dir" "$USERNAME" "cloudlunacy"
+    done
 
-    # Create subdirectories
-    mkdir -p "$BASE_DIR"/{logs,ssh,config,bin}
-    chown -R "$USERNAME":"$USERNAME" "$BASE_DIR"/{logs,ssh,config,bin}
-
-    log "Directories created at $BASE_DIR."
+    # Set special permissions for ssh directory
+    chmod 700 "$BASE_DIR/ssh"
+    
+    log "Directories created and permissions set correctly."
 }
 
 # Function to download and verify the latest agent
@@ -533,9 +540,15 @@ EOF
 setup_traefik_proxy() {
     log "Setting up Traefik Proxy..."
     
+    # Create cloudlunacy group if it doesn't exist
+    groupadd -f cloudlunacy
+
     # Get user's UID and GID
     USER_UID=$(id -u "$USERNAME")
-    USER_GID=$(getent group docker | cut -d: -f3)
+    GROUP_GID=$(getent group cloudlunacy | cut -d: -f3)
+    
+    # Ensure user is in both cloudlunacy and docker groups
+    usermod -aG docker,cloudlunacy "$USERNAME"
     
     # Check if anything is using required ports
     if lsof -i :80 >/dev/null 2>&1 || lsof -i :443 >/dev/null 2>&1; then
@@ -547,30 +560,39 @@ setup_traefik_proxy() {
     # First remove any existing Traefik setup
     rm -rf "${BASE_DIR}/traefik"
 
-    # Create all required directories with correct permissions
+    # Create all required directories
     log "Creating Traefik directories..."
     mkdir -p "${BASE_DIR}/traefik"/{dynamic,acme,logs}
     
-    # Set proper ownership and permissions
-    chown -R "$USERNAME:docker" "${BASE_DIR}/traefik"
+    # Set proper ownership and permissions with both groups
+    chown -R "$USERNAME:cloudlunacy" "${BASE_DIR}"
+    chmod 775 "${BASE_DIR}"
+    chown -R "$USERNAME:cloudlunacy" "${BASE_DIR}/traefik"
+    chmod 775 "${BASE_DIR}/traefik"
+    
+    # Ensure the base directory and its parent exist with correct permissions
+    mkdir -p "/opt/cloudlunacy"
+    chown -R "$USERNAME:cloudlunacy" "/opt/cloudlunacy"
+    chmod 775 "/opt/cloudlunacy"
+    
+    # Set permissions for subdirectories
     find "${BASE_DIR}/traefik" -type d -exec chmod 775 {} \;
     find "${BASE_DIR}/traefik" -type f -exec chmod 664 {} \;
     
-    # Ensure the cloudlunacy user is in the docker group
-    usermod -aG docker "$USERNAME"
-    
     # Set proper permissions for docker.sock
-    chmod 666 /var/run/docker.sock
+    if [ -e "/var/run/docker.sock" ]; then
+        chmod 666 /var/run/docker.sock
+    fi
     
     # Create base configuration file
     CONFIG_FILE="${BASE_DIR}/traefik/traefik.yml"
     touch "$CONFIG_FILE"
-    chown "$USERNAME:docker" "$CONFIG_FILE"
+    chown "$USERNAME:cloudlunacy" "$CONFIG_FILE"
     chmod 664 "$CONFIG_FILE"
     
     # Create and secure acme.json with special permissions
     touch "${BASE_DIR}/traefik/acme/acme.json"
-    chown "$USERNAME:docker" "${BASE_DIR}/traefik/acme/acme.json"
+    chown "$USERNAME:cloudlunacy" "${BASE_DIR}/traefik/acme/acme.json"
     chmod 600 "${BASE_DIR}/traefik/acme/acme.json"
 
     # Generate secure credentials for Traefik dashboard
@@ -628,36 +650,19 @@ certificatesResolvers:
         entryPoint: web
 EOF
 
-    # Create middleware configuration
-    MIDDLEWARE_FILE="${BASE_DIR}/traefik/dynamic/middleware.yml"
-    cat > "$MIDDLEWARE_FILE" << 'EOF'
-http:
-  middlewares:
-    security-headers:
-      headers:
-        frameDeny: true
-        sslRedirect: true
-        browserXssFilter: true
-        contentTypeNosniff: true
-        stsIncludeSubdomains: true
-        stsPreload: true
-        stsSeconds: 31536000
-        customResponseHeaders:
-          X-Robots-Tag: "noindex,nofollow,nosnippet,noarchive,notranslate,noimageindex"
-          Server: ""
-    
-    rate-limit:
-      rateLimit:
-        average: 100
-        burst: 50
-        period: 1s
-    
-    compress:
-      compress: {}
-EOF
+    # Ensure the config file has correct permissions
+    chown "$USERNAME:cloudlunacy" "$CONFIG_FILE"
+    chmod 664 "$CONFIG_FILE"
 
-    # Create docker-compose file for Traefik
+    # Create docker-compose file for Traefik with proper permissions
     COMPOSE_FILE="${BASE_DIR}/docker-compose.proxy.yml"
+    
+    # First ensure the directory exists with correct permissions
+    mkdir -p "$(dirname "$COMPOSE_FILE")"
+    chown "$USERNAME:cloudlunacy" "$(dirname "$COMPOSE_FILE")"
+    chmod 775 "$(dirname "$COMPOSE_FILE")"
+    
+    # Create the compose file
     cat > "$COMPOSE_FILE" << EOF
 version: "3.8"
 services:
@@ -679,26 +684,25 @@ services:
       - ${BASE_DIR}/traefik/logs:/etc/traefik/logs
     networks:
       - traefik-proxy
+    user: "${USER_UID}:${GROUP_GID}"
+    environment:
+      - TZ=UTC
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.dashboard.rule=Host(\`traefik.localhost\`)"
       - "traefik.http.routers.dashboard.service=api@internal"
       - "traefik.http.routers.dashboard.middlewares=auth-middleware"
       - "traefik.http.middlewares.auth-middleware.basicauth.users=${USERNAME}:${HASHED_PASSWORD}"
-    environment:
-      - TZ=UTC
 
 networks:
   traefik-proxy:
     external: true
 EOF
 
-    # After creating all files, ensure permissions again
-    chown -R "$USERNAME:docker" "${BASE_DIR}/traefik"
-    find "${BASE_DIR}/traefik" -type d -exec chmod 775 {} \;
-    find "${BASE_DIR}/traefik" -type f -exec chmod 664 {} \;
-    chmod 600 "${BASE_DIR}/traefik/acme/acme.json"
-    
+    # Set proper permissions for the compose file
+    chown "$USERNAME:cloudlunacy" "$COMPOSE_FILE"
+    chmod 664 "$COMPOSE_FILE"
+
     # Ensure docker network exists
     docker network create traefik-proxy 2>/dev/null || true
 
@@ -707,30 +711,53 @@ EOF
 
     # Start Traefik with proper permissions
     log "Starting Traefik proxy..."
-    if ! docker-compose -f "$COMPOSE_FILE" up -d; then
+    if ! sudo -u "$USERNAME" docker-compose -f "$COMPOSE_FILE" up -d; then
         log_error "Failed to start Traefik proxy"
         docker-compose -f "$COMPOSE_FILE" logs
         exit 1
     fi
 
-    # Verify permissions after startup
-    chown -R "$USERNAME:docker" "${BASE_DIR}/traefik"
-    find "${BASE_DIR}/traefik" -type d -exec chmod 775 {} \;
-    find "${BASE_DIR}/traefik" -type f -exec chmod 664 {} \;
-    chmod 600 "${BASE_DIR}/traefik/acme/acme.json"
-
-    # Wait for container to start
-    sleep 5
-
     # Verify Traefik is running
+    sleep 5
     if ! docker ps | grep -q traefik-proxy; then
         log_error "Traefik proxy failed to start. Logs:"
         docker logs traefik-proxy
         exit 1
     fi
 
+    # Save dashboard credentials
+    CREDS_FILE="${BASE_DIR}/traefik/dashboard_credentials.txt"
+    cat > "$CREDS_FILE" << EOF
+Traefik Dashboard Credentials
+----------------------------
+Username: admin
+Password: ${DASHBOARD_PASSWORD}
+
+IMPORTANT: Please save these credentials securely and delete this file afterwards.
+EOF
+
+    chown "$USERNAME:cloudlunacy" "$CREDS_FILE"
+    chmod 600 "$CREDS_FILE"
+
     log "Traefik Proxy setup completed successfully"
+    log "Dashboard credentials saved to: ${CREDS_FILE}"
 }
+
+fix_directory_permissions() {
+    local dir=$1
+    local user=$2
+    local group=$3
+    
+    if [ ! -d "$dir" ]; then
+        mkdir -p "$dir"
+    fi
+    
+    chown -R "$user:$group" "$dir"
+    chmod 775 "$dir"
+    find "$dir" -type d -exec chmod 775 {} \;
+    find "$dir" -type f -exec chmod 664 {} \;
+}
+
 
 setup_deployment_templates() {
     log "Setting up deployment templates..."
