@@ -269,17 +269,14 @@ BASE_DIR="/opt/cloudlunacy"
 setup_user_directories() {
     log "Creating dedicated user and directories..."
     
-    # Create cloudlunacy group if it doesn't exist
-    groupadd -f cloudlunacy
-    
-    # Create user if it doesn't exist and add to necessary groups
+    # Create user if it doesn't exist and add to docker group
     if id "$USERNAME" &>/dev/null; then
         log "User '$USERNAME' already exists."
-        usermod -aG docker,cloudlunacy "$USERNAME"
+        usermod -aG docker "$USERNAME"
         usermod -d "$BASE_DIR" "$USERNAME"
     else
-        useradd -m -d "$BASE_DIR" -G docker,cloudlunacy -s /bin/bash "$USERNAME"
-        log "User '$USERNAME' created and added to groups."
+        useradd -m -d "$BASE_DIR" -G docker -s /bin/bash "$USERNAME"
+        log "User '$USERNAME' created and added to docker group."
     fi
 
     # Create and set permissions for all required directories
@@ -295,7 +292,7 @@ setup_user_directories() {
     )
 
     for dir in "${directories[@]}"; do
-        fix_directory_permissions "$dir" "$USERNAME" "cloudlunacy"
+        fix_directory_permissions "$dir" "$USERNAME" "docker"
     done
 
     # Set special permissions for ssh directory
@@ -746,7 +743,7 @@ EOF
 fix_directory_permissions() {
     local dir=$1
     local user=$2
-    local group=$3
+    local group="docker"  # Always use docker group
     
     if [ ! -d "$dir" ]; then
         mkdir -p "$dir"
@@ -793,12 +790,8 @@ setup_docker_permissions() {
     
     # Set permissions
     chown -R cloudlunacy:docker /opt/cloudlunacy
-    chown cloudlunacy:docker /opt/cloudlunacy/deployments
-    chown cloudlunacy:docker /tmp/cloudlunacy-deployments
-    
     chmod 775 /opt/cloudlunacy/deployments
     chmod 775 /tmp/cloudlunacy-deployments
-    chmod 666 /var/run/docker.sock
     
     log "Docker permissions configured successfully."
 }
