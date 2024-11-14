@@ -316,6 +316,10 @@ download_agent() {
     mkdir -p "$BASE_DIR"
     chown "$USERNAME":"$USERNAME" "$BASE_DIR"
 
+    # Create temporary directory with correct permissions
+    mkdir -p "$BASE_DIR.tmp"
+    chown "$USERNAME":"$USERNAME" "$BASE_DIR.tmp"
+
     # Clone the repository
     sudo -u "$USERNAME" git clone https://github.com/Mayze123/cloudlunacy-deployment-agent.git "$BASE_DIR.tmp"
     mv "$BASE_DIR.tmp"/* "$BASE_DIR/"
