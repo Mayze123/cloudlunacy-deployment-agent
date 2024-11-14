@@ -296,14 +296,20 @@ async function init() {
       );
     }
 
-    // Initialize and verify Traefik
-    const traefikManager = require("./utils/traefikManager");
-    await traefikManager.initialize();
-
     // Continue with normal initialization
     await authenticateAndConnect();
-    startHeartbeat();
     setInterval(collectMetrics, 60000);
+
+    // Try to initialize Traefik but don't fail if it doesn't work
+    try {
+      const traefikManager = require("./utils/traefikManager");
+      await traefikManager.initialize();
+    } catch (error) {
+      logger.warn(
+        "Traefik initialization failed, continuing without it:",
+        error.message
+      );
+    }
   } catch (error) {
     logger.error("Initialization failed:", error);
     process.exit(1);

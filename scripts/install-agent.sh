@@ -1045,10 +1045,16 @@ main() {
     setup_service
     verify_installation
     verify_backend_connection  # First verify base connection works
-    setup_traefik_proxy
-    fix_traefik_permissions
-    restart_agent  # Restart agent after traefik setup
-    verify_backend_connection  # Verify connection again after traefik
+    
+    # Now handle Traefik separately
+    if ! setup_traefik_proxy
+    then
+        log_warn "Traefik setup failed, but agent is running. You can retry Traefik setup later."
+    else
+        fix_traefik_permissions
+        log "Traefik setup completed successfully"
+    fi
+
     completion_message
 }
 
