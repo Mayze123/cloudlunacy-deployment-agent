@@ -15,9 +15,24 @@ class TraefikManager {
 
   async initialize() {
     try {
+      // Ensure proper permissions first
+      await executeCommand("chmod", ["666", "/var/run/docker.sock"]);
+
+      // Create directories with correct permissions
       await this.ensureDirectories();
+
+      // Create docker-compose file
+      await this.ensureComposeFile();
+
+      // Create network
       await this.ensureProxyNetwork();
-      await this.ensureProxyRunning();
+
+      // Start proxy
+      await this.restartProxy();
+
+      // Verify it's running
+      await this.verifyConfiguration();
+
       logger.info("TraefikManager initialized successfully");
     } catch (error) {
       logger.error("TraefikManager initialization failed:", error);
@@ -33,13 +48,24 @@ class TraefikManager {
         `${this.configDir}/logs`,
       ];
 
+      // First ensure base directory exists with correct permissions
+      await fs.mkdir(this.configDir, { recursive: true });
+      await executeCommand("chown", [
+        "-R",
+        "cloudlunacy:docker",
+        this.configDir,
+      ]);
+      await executeCommand("chmod", ["775", this.configDir]);
+
       for (const dir of dirs) {
         try {
           await fs.access(dir);
         } catch {
-          await fs.mkdir(dir, { recursive: true, mode: 0o775 });
+          await fs.mkdir(dir, { recursive: true });
         }
-        await fs.chmod(dir, 0o775);
+        // Use executeCommand instead of fs.chmod for elevated privileges
+        await executeCommand("chown", ["-R", "cloudlunacy:docker", dir]);
+        await executeCommand("chmod", ["775", dir]);
       }
 
       // Create initial traefik.yml configuration
@@ -139,7 +165,7 @@ http:
       return true;
     } catch (error) {
       logger.error("Failed to ensure directories:", error);
-      return false;
+      throw error;
     }
   }
 
@@ -360,21 +386,27 @@ http:
     try {
       logger.info("Restarting Traefik proxy...");
 
-      // Stop the container
+      // Stop and remove container if exists (ignore errors)
       await executeCommand("docker", ["stop", this.proxyContainer]).catch(
         () => {}
       );
-
-      // Remove the container
       await executeCommand("docker", ["rm", this.proxyContainer]).catch(
         () => {}
       );
 
-      // Start using docker-compose
-      const composeFile = path.join(this.baseDir, "docker-compose.proxy.yml");
-      await executeCommand("docker-compose", ["-f", composeFile, "up", "-d"]);
+      // Ensure compose file exists
+      const composeFile = await this.ensureComposeFile();
 
-      // Wait for proxy to be ready
+      // Start using docker-compose with explicit user
+      await executeCommand("docker-compose", ["-f", composeFile, "up", "-d"], {
+        env: {
+          ...process.env,
+          USER: "cloudlunacy",
+          HOME: "/opt/cloudlunacy",
+        },
+      });
+
+      // Wait for proxy to be ready with better error handling
       let attempts = 0;
       const maxAttempts = 30;
 
@@ -392,7 +424,7 @@ http:
             return true;
           }
         } catch (error) {
-          // Ignore errors and continue waiting
+          logger.debug(`Attempt ${attempts + 1}: Container not ready yet`);
         }
 
         await new Promise((resolve) => setTimeout(resolve, 1000));
@@ -402,6 +434,48 @@ http:
       throw new Error("Failed to start Traefik proxy after multiple attempts");
     } catch (error) {
       logger.error("Failed to restart Traefik proxy:", error);
+      throw error;
+    }
+  }
+
+  async ensureComposeFile() {
+    try {
+      const composeFile = path.join(this.baseDir, "docker-compose.proxy.yml");
+      const composeContent = `
+version: "3.8"
+services:
+  traefik-proxy:
+    image: traefik:v2.10
+    container_name: traefik-proxy
+    restart: always
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ${this.configDir}/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ${this.configDir}/dynamic:/etc/traefik/dynamic:ro
+      - ${this.configDir}/acme:/etc/traefik/acme
+      - ${this.configDir}/logs:/etc/traefik/logs
+    networks:
+      - traefik-proxy
+    user: "cloudlunacy:docker"
+
+networks:
+  traefik-proxy:
+    external: true
+`;
+
+      await fs.writeFile(composeFile, composeContent);
+      await executeCommand("chown", ["cloudlunacy:docker", composeFile]);
+      await executeCommand("chmod", ["644", composeFile]);
+
+      return composeFile;
+    } catch (error) {
+      logger.error("Failed to create docker-compose file:", error);
       throw error;
     }
   }
