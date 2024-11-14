@@ -300,14 +300,32 @@ setup_user_directories() {
 # Function to download and verify the latest agent
 download_agent() {
     log "Cloning the CloudLunacy Deployment Agent repository..."
-    if [ -d "$BASE_DIR" ]; then
-        rm -rf "$BASE_DIR"
+
+    # First, backup any existing .env file if it exists
+    if [ -f "$BASE_DIR/.env" ]; then
+        cp "$BASE_DIR/.env" "/tmp/cloudlunacy.env.backup"
     fi
-    # Recreate the base directory and set ownership
+
+    # Remove contents of BASE_DIR while preserving the directory
+    if [ -d "$BASE_DIR" ]; then
+        # Remove all contents except .env backup
+        find "$BASE_DIR" -mindepth 1 -delete
+    fi
+
+    # Ensure the base directory exists with correct ownership
     mkdir -p "$BASE_DIR"
     chown "$USERNAME":"$USERNAME" "$BASE_DIR"
 
-    sudo -u "$USERNAME" git clone https://github.com/Mayze123/cloudlunacy-deployment-agent.git "$BASE_DIR"
+    # Clone the repository
+    sudo -u "$USERNAME" git clone https://github.com/Mayze123/cloudlunacy-deployment-agent.git "$BASE_DIR.tmp"
+    mv "$BASE_DIR.tmp"/* "$BASE_DIR/"
+    rm -rf "$BASE_DIR.tmp"
+
+    # Restore .env file if it was backed up
+    if [ -f "/tmp/cloudlunacy.env.backup" ]; then
+        mv "/tmp/cloudlunacy.env.backup" "$BASE_DIR/.env"
+    fi
+
     chown -R "$USERNAME":"$USERNAME" "$BASE_DIR"
     log "Agent cloned to $BASE_DIR."
 }
