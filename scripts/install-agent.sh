@@ -370,6 +370,8 @@ configure_env() {
 BACKEND_URL=$BACKEND_URL
 AGENT_API_TOKEN=$AGENT_TOKEN
 SERVER_ID=$SERVER_ID
+NODE_ENV=production
+LOG_LEVEL=info
 EOF
 
     chown "$USERNAME":"$USERNAME" "$ENV_FILE"
@@ -798,6 +800,43 @@ setup_docker_permissions() {
     log "Docker permissions configured successfully."
 }
 
+verify_backend_connection() {
+    log "Verifying backend connection..."
+    
+    # Wait for service to start
+    sleep 5
+    
+    # Check if service is running
+    if ! systemctl is-active --quiet cloudlunacy; then
+        log_error "Agent service is not running"
+        journalctl -u cloudlunacy -n 50 --no-pager
+        exit 1
+    }
+    
+    # Check logs for connection status
+    if ! journalctl -u cloudlunacy -n 50 | grep -q "WebSocket connection established"; then
+        log_error "Agent failed to connect to backend. Checking logs..."
+        journalctl -u cloudlunacy -n 50 --no-pager
+        exit 1
+    }
+    
+    log "Backend connection verified successfully"
+}
+
+restart_agent() {
+    log "Restarting CloudLunacy agent..."
+    systemctl restart cloudlunacy
+    sleep 5
+    
+    if ! systemctl is-active --quiet cloudlunacy; then
+        log_error "Agent failed to restart"
+        journalctl -u cloudlunacy -n 50 --no-pager
+        exit 1
+    }
+    
+    log "Agent restarted successfully"
+}
+
 # Function to set up systemd service
 setup_service() {
     log "Setting up CloudLunacy Deployment Agent as a systemd service..."
@@ -845,7 +884,6 @@ LimitNPROC=65535
 WantedBy=multi-user.target
 EOF
 
-    # Set proper permissions on service file
     chmod 644 "$SERVICE_FILE"
 
     # Create logs directory with proper permissions
@@ -986,11 +1024,13 @@ main() {
     install_agent_dependencies
     setup_deployment_templates
     configure_env
-    setup_traefik_proxy
-    fix_traefik_permissions
     setup_service
     verify_installation
-    display_ssh_instructions
+    verify_backend_connection  # First verify base connection works
+    setup_traefik_proxy
+    fix_traefik_permissions
+    restart_agent  # Restart agent after traefik setup
+    verify_backend_connection  # Verify connection again after traefik
     completion_message
 }
 

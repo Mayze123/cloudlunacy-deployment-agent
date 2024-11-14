@@ -252,6 +252,37 @@ function sendMetrics(metrics) {
   );
 }
 
+let heartbeatInterval;
+
+function startHeartbeat() {
+  // Clear any existing interval
+  if (heartbeatInterval) {
+    clearInterval(heartbeatInterval);
+  }
+
+  heartbeatInterval = setInterval(() => {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      try {
+        ws.send(
+          JSON.stringify({
+            type: "heartbeat",
+            serverId: SERVER_ID,
+            timestamp: new Date().toISOString(),
+            metrics: {
+              cpu: getCPUUsage(),
+              memory: getMemoryUsage(),
+              disk: getDiskUsage(),
+            },
+          })
+        );
+        logger.debug("Heartbeat sent");
+      } catch (error) {
+        logger.error("Failed to send heartbeat:", error);
+      }
+    }
+  }, 30000); // 30 seconds
+}
+
 /**
  * Initialize agent operations
  */
@@ -271,6 +302,7 @@ async function init() {
 
     // Continue with normal initialization
     await authenticateAndConnect();
+    startHeartbeat();
     setInterval(collectMetrics, 60000);
   } catch (error) {
     logger.error("Initialization failed:", error);
