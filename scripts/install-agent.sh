@@ -736,6 +736,9 @@ setup_docker_permissions() {
     
     # Add cloudlunacy user to docker group
     usermod -aG docker cloudlunacy
+
+    # Set docker.sock permissions
+    chmod 666 /var/run/docker.sock
     
     # Create deployment directories with correct permissions
     mkdir -p /opt/cloudlunacy/deployments

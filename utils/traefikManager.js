@@ -15,8 +15,12 @@ class TraefikManager {
 
   async initialize() {
     try {
-      // Ensure proper permissions first
-      await executeCommand("chmod", ["666", "/var/run/docker.sock"]);
+      // Skip direct chmod of docker.sock - we'll handle permissions differently
+      if (!(await this.checkDockerAccess())) {
+        throw new Error(
+          "Insufficient Docker permissions. Please ensure the cloudlunacy user is in the docker group."
+        );
+      }
 
       // Create directories with correct permissions
       await this.ensureDirectories();
@@ -477,6 +481,30 @@ networks:
     } catch (error) {
       logger.error("Failed to create docker-compose file:", error);
       throw error;
+    }
+  }
+
+  async checkDockerAccess() {
+    try {
+      // Try to run a simple docker command
+      await executeCommand("docker", ["info"]);
+      return true;
+    } catch (error) {
+      logger.error("Docker access check failed:", error);
+
+      // Check if user is in docker group
+      try {
+        const { stdout: groups } = await executeCommand("groups");
+        if (!groups.includes("docker")) {
+          logger.error(
+            "User is not in docker group. Please run: sudo usermod -aG docker cloudlunacy"
+          );
+        }
+      } catch (err) {
+        logger.error("Failed to check group membership:", err);
+      }
+
+      return false;
     }
   }
 }
