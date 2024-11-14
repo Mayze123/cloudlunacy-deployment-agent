@@ -559,7 +559,7 @@ IMPORTANT: Please change these credentials after first login!
 `;
 
       await fs.writeFile(credsFile, content, { mode: 0o600 });
-      await executeCommand("chown", ["cloudlunacy:cloudlunacy", credsFile]);
+      await executeCommand("chown", ["cloudlunacy:docker", credsFile]);
 
       logger.info("Admin credentials saved to:", credsFile);
     } catch (error) {
