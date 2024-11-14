@@ -401,29 +401,114 @@ http:
     try {
       logger.info("Restarting Traefik proxy...");
 
-      // Stop and remove container if exists (ignore errors)
-      await executeCommand("docker", ["stop", this.proxyContainer]).catch(
-        () => {}
-      );
-      await executeCommand("docker", ["rm", this.proxyContainer]).catch(
-        () => {}
-      );
+      // Verify the compose file exists
+      const composeFile = path.join(this.baseDir, "docker-compose.proxy.yml");
+      try {
+        await fs.access(composeFile);
+        logger.info(`Docker compose file found at: ${composeFile}`);
 
-      // Ensure compose file exists
-      const composeFile = await this.ensureComposeFile();
+        // Log the content of the compose file for debugging
+        const composeContent = await fs.readFile(composeFile, "utf8");
+        logger.info("Docker compose file content:", composeContent);
+      } catch (error) {
+        throw new Error(`Docker compose file not found: ${error.message}`);
+      }
 
-      logger.debug("Starting Traefik with compose file:", composeFile);
-      await executeCommand("docker-compose", ["-f", composeFile, "up", "-d"], {
-        env: {
-          ...process.env,
-          USER: "cloudlunacy",
-          HOME: "/opt/cloudlunacy",
-        },
-      });
+      // Stop and remove existing container with detailed error logging
+      try {
+        await executeCommand("docker", ["stop", this.proxyContainer], {
+          ignoreError: true,
+        });
+        logger.info("Successfully stopped existing container");
+      } catch (error) {
+        logger.warn(`Failed to stop container: ${error.message}`);
+      }
 
-      // Wait for proxy to be ready with better error handling
+      try {
+        await executeCommand("docker", ["rm", this.proxyContainer], {
+          ignoreError: true,
+        });
+        logger.info("Successfully removed existing container");
+      } catch (error) {
+        logger.warn(`Failed to remove container: ${error.message}`);
+      }
+
+      // Verify docker-compose is installed
+      try {
+        await executeCommand("docker-compose", ["--version"]);
+        logger.info("docker-compose is installed and accessible");
+      } catch (error) {
+        throw new Error(
+          `docker-compose not found or not accessible: ${error.message}`
+        );
+      }
+
+      // Verify docker network exists
+      try {
+        await executeCommand("docker", [
+          "network",
+          "inspect",
+          this.proxyNetwork,
+        ]);
+        logger.info("Traefik network exists");
+      } catch (error) {
+        logger.info("Creating Traefik network...");
+        await executeCommand("docker", [
+          "network",
+          "create",
+          this.proxyNetwork,
+        ]);
+      }
+
+      // Start the proxy with detailed logging
+      logger.info(`Starting Traefik with compose file: ${composeFile}`);
+      try {
+        const { stdout, stderr } = await executeCommand(
+          "docker-compose",
+          ["-f", composeFile, "up", "-d"],
+          {
+            env: {
+              ...process.env,
+              USER: "cloudlunacy",
+              HOME: "/opt/cloudlunacy",
+              PATH: process.env.PATH,
+              COMPOSE_PROJECT_NAME: "cloudlunacy",
+            },
+          }
+        );
+
+        if (stdout) logger.info("docker-compose stdout:", stdout);
+        if (stderr) logger.warn("docker-compose stderr:", stderr);
+      } catch (error) {
+        // Log detailed error information
+        logger.error("Failed to start Traefik container:", error);
+
+        // Try to get container logs if it was created
+        try {
+          const { stdout: logs } = await executeCommand("docker", [
+            "logs",
+            this.proxyContainer,
+          ]);
+          logger.error("Container logs:", logs);
+        } catch (logError) {
+          logger.error("Could not retrieve container logs:", logError.message);
+        }
+
+        // Try to get more detailed information about the failure
+        try {
+          const { stdout: ps } = await executeCommand("docker", ["ps", "-a"]);
+          logger.info("Current containers:", ps);
+        } catch (psError) {
+          logger.error("Could not list containers:", psError.message);
+        }
+
+        throw error;
+      }
+
+      // Wait for proxy to be ready
       let attempts = 0;
       const maxAttempts = 30;
+      const checkInterval = 2000; // 2 seconds
 
       while (attempts < maxAttempts) {
         try {
@@ -435,20 +520,57 @@ http:
           ]);
 
           if (stdout.trim() === "true") {
-            logger.info("Traefik proxy started successfully");
-            return true;
+            // Additional health check
+            try {
+              const { stdout: logs } = await executeCommand("docker", [
+                "logs",
+                this.proxyContainer,
+              ]);
+              if (!logs.includes("error")) {
+                logger.info("Traefik proxy started successfully");
+                return true;
+              } else {
+                logger.warn(
+                  "Container is running but logs contain errors:",
+                  logs
+                );
+              }
+            } catch (logError) {
+              logger.warn("Could not verify container logs:", logError.message);
+            }
           }
         } catch (error) {
-          logger.debug(`Attempt ${attempts + 1}: Container not ready yet`);
+          logger.debug(
+            `Attempt ${attempts + 1}: Container not ready yet:`,
+            error.message
+          );
         }
 
-        await new Promise((resolve) => setTimeout(resolve, 1000));
         attempts++;
+        await new Promise((resolve) => setTimeout(resolve, checkInterval));
       }
 
       throw new Error("Failed to start Traefik proxy after multiple attempts");
     } catch (error) {
       logger.error("Failed to restart Traefik proxy:", error);
+
+      // Additional error context
+      try {
+        const { stdout: diskSpace } = await executeCommand("df", ["-h"]);
+        logger.info("Disk space information:", diskSpace);
+
+        const { stdout: permissions } = await executeCommand("ls", [
+          "-la",
+          this.baseDir,
+        ]);
+        logger.info("Directory permissions:", permissions);
+      } catch (contextError) {
+        logger.error(
+          "Could not gather additional error context:",
+          contextError.message
+        );
+      }
+
       throw error;
     }
   }
@@ -458,7 +580,7 @@ http:
       const composeFile = path.join(this.baseDir, "docker-compose.proxy.yml");
       const composeDir = path.dirname(composeFile);
 
-      // First ensure the directory exists with correct permissions
+      // Ensure directory exists with correct permissions
       await fs.mkdir(composeDir, { recursive: true });
       await executeCommand("chown", ["cloudlunacy:docker", composeDir]);
       await executeCommand("chmod", ["775", composeDir]);
@@ -484,7 +606,6 @@ services:
       - ${this.configDir}/logs:/etc/traefik/logs
     networks:
       - traefik-proxy
-    user: "cloudlunacy:docker"
     environment:
       - TZ=UTC
     labels:
@@ -494,14 +615,48 @@ services:
 
 networks:
   traefik-proxy:
-    external: true`;
+    external: true
+`;
 
-      // Write the compose file directly
-      await fs.writeFile(composeFile, composeContent);
+      // Write the compose file with explicit error handling
+      try {
+        await fs.writeFile(composeFile, composeContent, {
+          encoding: "utf8",
+          mode: 0o664,
+        });
+      } catch (writeError) {
+        logger.error("Failed to write docker-compose file:", writeError);
+        throw writeError;
+      }
+
+      // Verify file was written correctly
+      try {
+        const written = await fs.readFile(composeFile, "utf8");
+        if (written !== composeContent) {
+          throw new Error("File content verification failed");
+        }
+      } catch (verifyError) {
+        logger.error("Failed to verify docker-compose file:", verifyError);
+        throw verifyError;
+      }
 
       // Set proper permissions
       await executeCommand("chown", ["cloudlunacy:docker", composeFile]);
-      await executeCommand("chmod", ["644", composeFile]);
+      await executeCommand("chmod", ["664", composeFile]);
+
+      // Validate compose file syntax
+      try {
+        await executeCommand("docker-compose", [
+          "-f",
+          composeFile,
+          "config",
+          "--quiet",
+        ]);
+        logger.info("Docker compose file validated successfully");
+      } catch (validateError) {
+        logger.error("Docker compose file validation failed:", validateError);
+        throw validateError;
+      }
 
       return composeFile;
     } catch (error) {
