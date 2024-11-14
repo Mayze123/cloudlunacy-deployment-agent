@@ -136,26 +136,26 @@ install_dependencies() {
     log "Installing dependencies (curl, wget, git, jq)..."
     case "$OS_TYPE" in
         ubuntu | debian | raspbian)
-            apt-get install -y curl wget git jq coreutils
+            apt-get install -y curl wget git jq coreutils apache2-utils
             ;;
         arch)
-            pacman -S --noconfirm curl wget git jq coreutils
+            pacman -S --noconfirm curl wget git jq coreutils apache2-utils
             ;;
         alpine)
-            apk add --no-cache curl wget git jq coreutils
+            apk add --no-cache curl wget git jq coreutils apache2-utils
             ;;
         centos | fedora | rhel | ol | rocky | almalinux | amzn)
             if [ "$OS_TYPE" = "amzn" ]; then
-                yum install -y curl wget git jq coreutils
+                yum install -y curl wget git jq coreutils httpd-tools
             else
                 if ! command -v dnf >/dev/null 2>&1; then
                     yum install -y dnf
                 fi
-                dnf install -y curl wget git jq coreutils
+                dnf install -y curl wget git jq coreutils httpd-tools
             fi
             ;;
         sles | opensuse-leap | opensuse-tumbleweed)
-            zypper install -y curl wget git jq coreutils
+            zypper install -y curl wget git jq coreutils apache2-utils
             ;;
         *)
             log_error "Unsupported OS: $OS_TYPE $OS_VERSION"

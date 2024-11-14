@@ -530,24 +530,15 @@ networks:
     try {
       // Generate random password
       const password = crypto.randomBytes(16).toString("hex");
+      this.initialAdminPassword = password;
 
-      try {
-        // Try using htpasswd first
-        const { stdout } = await executeCommand("htpasswd", [
-          "-nbB",
-          "admin",
-          password,
-        ]);
-        this.initialAdminPassword = password;
-        return stdout.trim();
-      } catch (error) {
-        // Fallback to bcrypt if htpasswd fails
-        const bcrypt = require("bcryptjs");
-        const salt = bcrypt.genSaltSync(10);
-        const hash = bcrypt.hashSync(password, salt);
-        this.initialAdminPassword = password;
-        return `admin:${hash}`;
-      }
+      // Use bcrypt directly instead of trying htpasswd first
+      const bcrypt = require("bcryptjs");
+      const salt = bcrypt.genSaltSync(10);
+      const hash = bcrypt.hashSync(password, salt);
+
+      // Format the credentials string as required by Traefik
+      return `admin:${hash}`;
     } catch (error) {
       logger.error("Failed to generate secure password:", error);
       throw error;
