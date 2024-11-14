@@ -494,15 +494,14 @@ services:
 
 networks:
   traefik-proxy:
-    external: true
-`;
+    external: true`;
 
-      // Write file using temporary file approach
-      const tempFile = `${composeFile}.tmp`;
-      await fs.writeFile(tempFile, composeContent);
-      await executeCommand("chown", ["cloudlunacy:docker", tempFile]);
-      await executeCommand("chmod", ["644", tempFile]);
-      await fs.rename(tempFile, composeFile);
+      // Write the compose file directly
+      await fs.writeFile(composeFile, composeContent);
+
+      // Set proper permissions
+      await executeCommand("chown", ["cloudlunacy:docker", composeFile]);
+      await executeCommand("chmod", ["644", composeFile]);
 
       return composeFile;
     } catch (error) {
