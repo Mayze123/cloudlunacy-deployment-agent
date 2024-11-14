@@ -456,6 +456,13 @@ http:
   async ensureComposeFile() {
     try {
       const composeFile = path.join(this.baseDir, "docker-compose.proxy.yml");
+      const composeDir = path.dirname(composeFile);
+
+      // First ensure the directory exists with correct permissions
+      await fs.mkdir(composeDir, { recursive: true });
+      await executeCommand("chown", ["cloudlunacy:docker", composeDir]);
+      await executeCommand("chmod", ["775", composeDir]);
+
       const composeContent = `
 version: "3.8"
 services:
@@ -490,9 +497,12 @@ networks:
     external: true
 `;
 
-      await fs.writeFile(composeFile, composeContent);
-      await executeCommand("chown", ["cloudlunacy:docker", composeFile]);
-      await executeCommand("chmod", ["644", composeFile]);
+      // Write file using temporary file approach
+      const tempFile = `${composeFile}.tmp`;
+      await fs.writeFile(tempFile, composeContent);
+      await executeCommand("chown", ["cloudlunacy:docker", tempFile]);
+      await executeCommand("chmod", ["644", tempFile]);
+      await fs.rename(tempFile, composeFile);
 
       return composeFile;
     } catch (error) {
