@@ -4,6 +4,7 @@ const logger = require("./logger");
 const fs = require("fs").promises;
 const path = require("path");
 const yaml = require("js-yaml");
+const crypto = require("crypto");
 
 class TraefikManager {
   constructor() {
@@ -129,10 +130,17 @@ certificatesResolvers:
         { mode: 0o644 }
       );
 
-      // Create dynamic configuration directory for custom middleware
+      // Generate secure password for admin user
+      const adminPassword = await this.generateSecurePassword();
+
       const middlewareConfig = `
 http:
   middlewares:
+    auth-basic:
+      basicAuth:
+        users:
+          - "${adminPassword}"  # Generated during installation
+    
     security-headers:
       headers:
         frameDeny: true
@@ -161,6 +169,9 @@ http:
         middlewareConfig,
         { mode: 0o644 }
       );
+
+      // Save admin credentials securely
+      await this.saveAdminCredentials();
 
       // Create empty acme.json with correct permissions
       const acmeFile = path.join(this.configDir, "acme/acme.json");
@@ -401,7 +412,7 @@ http:
       // Ensure compose file exists
       const composeFile = await this.ensureComposeFile();
 
-      // Start using docker-compose with explicit user
+      logger.debug("Starting Traefik with compose file:", composeFile);
       await executeCommand("docker-compose", ["-f", composeFile, "up", "-d"], {
         env: {
           ...process.env,
@@ -467,6 +478,12 @@ services:
     networks:
       - traefik-proxy
     user: "cloudlunacy:docker"
+    environment:
+      - TZ=UTC
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.traefik.service=api@internal"
+      - "traefik.http.routers.traefik.middlewares=auth-basic@file"
 
 networks:
   traefik-proxy:
@@ -505,6 +522,52 @@ networks:
       }
 
       return false;
+    }
+  }
+
+  // Add method to generate secure password
+  async generateSecurePassword() {
+    try {
+      // Generate random password
+      const password = crypto.randomBytes(16).toString("hex");
+
+      // Use htpasswd to hash the password
+      const { stdout } = await executeCommand("htpasswd", [
+        "-nbB",
+        "admin",
+        password,
+      ]);
+
+      // Store the plain password temporarily for initial setup
+      this.initialAdminPassword = password;
+
+      return stdout.trim();
+    } catch (error) {
+      logger.error("Failed to generate secure password:", error);
+      throw error;
+    }
+  }
+
+  // Add method to save admin credentials
+  async saveAdminCredentials() {
+    try {
+      const credsFile = path.join(this.configDir, "admin_credentials.txt");
+      const content = `
+Initial Traefik Dashboard Credentials
+-----------------------------------
+Username: admin
+Password: ${this.initialAdminPassword}
+
+IMPORTANT: Please change these credentials after first login!
+`;
+
+      await fs.writeFile(credsFile, content, { mode: 0o600 });
+      await executeCommand("chown", ["cloudlunacy:cloudlunacy", credsFile]);
+
+      logger.info("Admin credentials saved to:", credsFile);
+    } catch (error) {
+      logger.error("Failed to save admin credentials:", error);
+      throw error;
     }
   }
 }
