@@ -5,6 +5,7 @@ const fs = require("fs").promises;
 const path = require("path");
 const yaml = require("js-yaml");
 const crypto = require("crypto");
+const bcrypt = require("bcryptjs");
 
 class TraefikManager {
   constructor() {
@@ -401,176 +402,68 @@ http:
     try {
       logger.info("Restarting Traefik proxy...");
 
-      // Verify the compose file exists
+      // Stop and remove existing container
+      await executeCommand("docker", ["stop", this.proxyContainer]).catch(
+        () => {}
+      );
+      await executeCommand("docker", ["rm", this.proxyContainer]).catch(
+        () => {}
+      );
+
+      // Ensure network exists
+      await executeCommand("docker", [
+        "network",
+        "create",
+        "traefik-proxy",
+      ]).catch(() => {});
+
+      // Get compose file path
       const composeFile = path.join(this.baseDir, "docker-compose.proxy.yml");
-      try {
-        await fs.access(composeFile);
-        logger.info(`Docker compose file found at: ${composeFile}`);
 
-        // Log the content of the compose file for debugging
-        const composeContent = await fs.readFile(composeFile, "utf8");
-        logger.info("Docker compose file content:", composeContent);
-      } catch (error) {
-        throw new Error(`Docker compose file not found: ${error.message}`);
-      }
+      // Start the container
+      const result = await executeCommand(
+        "docker-compose",
+        ["-f", composeFile, "up", "-d"],
+        {
+          env: {
+            ...process.env,
+            PATH: process.env.PATH,
+            HOME: this.baseDir,
+          },
+        }
+      );
 
-      // Stop and remove existing container with detailed error logging
-      try {
-        await executeCommand("docker", ["stop", this.proxyContainer], {
-          ignoreError: true,
-        });
-        logger.info("Successfully stopped existing container");
-      } catch (error) {
-        logger.warn(`Failed to stop container: ${error.message}`);
-      }
-
-      try {
-        await executeCommand("docker", ["rm", this.proxyContainer], {
-          ignoreError: true,
-        });
-        logger.info("Successfully removed existing container");
-      } catch (error) {
-        logger.warn(`Failed to remove container: ${error.message}`);
-      }
-
-      // Verify docker-compose is installed
-      try {
-        await executeCommand("docker-compose", ["--version"]);
-        logger.info("docker-compose is installed and accessible");
-      } catch (error) {
-        throw new Error(
-          `docker-compose not found or not accessible: ${error.message}`
-        );
-      }
-
-      // Verify docker network exists
-      try {
-        await executeCommand("docker", [
-          "network",
-          "inspect",
-          this.proxyNetwork,
-        ]);
-        logger.info("Traefik network exists");
-      } catch (error) {
-        logger.info("Creating Traefik network...");
-        await executeCommand("docker", [
-          "network",
-          "create",
-          this.proxyNetwork,
-        ]);
-      }
-
-      // Start the proxy with detailed logging
-      logger.info(`Starting Traefik with compose file: ${composeFile}`);
-      try {
-        const { stdout, stderr } = await executeCommand(
-          "docker-compose",
-          ["-f", composeFile, "up", "-d"],
-          {
-            env: {
-              ...process.env,
-              USER: "cloudlunacy",
-              HOME: "/opt/cloudlunacy",
-              PATH: process.env.PATH,
-              COMPOSE_PROJECT_NAME: "cloudlunacy",
-            },
-          }
-        );
-
-        if (stdout) logger.info("docker-compose stdout:", stdout);
-        if (stderr) logger.warn("docker-compose stderr:", stderr);
-      } catch (error) {
-        // Log detailed error information
-        logger.error("Failed to start Traefik container:", error);
-
-        // Try to get container logs if it was created
+      // Wait for container to start
+      let attempts = 0;
+      while (attempts < 30) {
         try {
-          const { stdout: logs } = await executeCommand("docker", [
+          const { stdout } = await executeCommand("docker", [
             "logs",
             this.proxyContainer,
           ]);
-          logger.error("Container logs:", logs);
-        } catch (logError) {
-          logger.error("Could not retrieve container logs:", logError.message);
-        }
-
-        // Try to get more detailed information about the failure
-        try {
-          const { stdout: ps } = await executeCommand("docker", ["ps", "-a"]);
-          logger.info("Current containers:", ps);
-        } catch (psError) {
-          logger.error("Could not list containers:", psError.message);
-        }
-
-        throw error;
-      }
-
-      // Wait for proxy to be ready
-      let attempts = 0;
-      const maxAttempts = 30;
-      const checkInterval = 2000; // 2 seconds
-
-      while (attempts < maxAttempts) {
-        try {
-          const { stdout } = await executeCommand("docker", [
-            "inspect",
-            "-f",
-            "{{.State.Running}}",
-            this.proxyContainer,
-          ]);
-
-          if (stdout.trim() === "true") {
-            // Additional health check
-            try {
-              const { stdout: logs } = await executeCommand("docker", [
-                "logs",
-                this.proxyContainer,
-              ]);
-              if (!logs.includes("error")) {
-                logger.info("Traefik proxy started successfully");
-                return true;
-              } else {
-                logger.warn(
-                  "Container is running but logs contain errors:",
-                  logs
-                );
-              }
-            } catch (logError) {
-              logger.warn("Could not verify container logs:", logError.message);
-            }
+          if (stdout.includes("Traefik is ready")) {
+            logger.info("Traefik proxy started successfully");
+            return true;
           }
         } catch (error) {
           logger.debug(
-            `Attempt ${attempts + 1}: Container not ready yet:`,
-            error.message
+            `Waiting for Traefik to start (attempt ${attempts + 1}/30)`
           );
         }
 
+        await new Promise((resolve) => setTimeout(resolve, 1000));
         attempts++;
-        await new Promise((resolve) => setTimeout(resolve, checkInterval));
       }
 
-      throw new Error("Failed to start Traefik proxy after multiple attempts");
+      // Get logs if startup failed
+      const { stdout: logs } = await executeCommand("docker", [
+        "logs",
+        this.proxyContainer,
+      ]);
+      logger.error("Traefik proxy failed to start. Logs:", logs);
+      throw new Error("Failed to start Traefik proxy after 30 seconds");
     } catch (error) {
       logger.error("Failed to restart Traefik proxy:", error);
-
-      // Additional error context
-      try {
-        const { stdout: diskSpace } = await executeCommand("df", ["-h"]);
-        logger.info("Disk space information:", diskSpace);
-
-        const { stdout: permissions } = await executeCommand("ls", [
-          "-la",
-          this.baseDir,
-        ]);
-        logger.info("Directory permissions:", permissions);
-      } catch (contextError) {
-        logger.error(
-          "Could not gather additional error context:",
-          contextError.message
-        );
-      }
-
       throw error;
     }
   }
@@ -579,6 +472,11 @@ http:
     try {
       const composeFile = path.join(this.baseDir, "docker-compose.proxy.yml");
       const composeDir = path.dirname(composeFile);
+
+      // Generate auth credentials if not already generated
+      if (!this.adminHash) {
+        await this.generateSecurePassword();
+      }
 
       // Ensure directory exists with correct permissions
       await fs.mkdir(composeDir, { recursive: true });
@@ -606,57 +504,82 @@ services:
       - ${this.configDir}/logs:/etc/traefik/logs
     networks:
       - traefik-proxy
+    user: "cloudlunacy:docker"
     environment:
       - TZ=UTC
+      - ADMIN_AUTH=admin:${this.adminHash}
     labels:
       - "traefik.enable=true"
+      - "traefik.http.routers.traefik.rule=Host(\`traefik.localhost\`)"
       - "traefik.http.routers.traefik.service=api@internal"
-      - "traefik.http.routers.traefik.middlewares=auth-basic@file"
+      - "traefik.http.routers.traefik.middlewares=auth-middleware"
+      - "traefik.http.middlewares.auth-middleware.basicauth.users=${this.adminHash}"
 
 networks:
   traefik-proxy:
-    external: true
+    external: true`;
+
+      // Create middleware configuration
+      const middlewareConfig = `
+http:
+  middlewares:
+    security-headers:
+      headers:
+        frameDeny: true
+        sslRedirect: true
+        browserXssFilter: true
+        contentTypeNosniff: true
+        stsIncludeSubdomains: true
+        stsPreload: true
+        stsSeconds: 31536000
+        customResponseHeaders:
+          X-Robots-Tag: "noindex,nofollow,nosnippet,noarchive,notranslate,noimageindex"
+          Server: ""
+    
+    rate-limit:
+      rateLimit:
+        average: 100
+        burst: 50
+        period: 1s
+    
+    compress:
+      compress: {}
+
+    auth-middleware:
+      basicAuth:
+        users:
+          - "${this.adminHash}"
 `;
 
-      // Write the compose file with explicit error handling
-      try {
-        await fs.writeFile(composeFile, composeContent, {
-          encoding: "utf8",
-          mode: 0o664,
-        });
-      } catch (writeError) {
-        logger.error("Failed to write docker-compose file:", writeError);
-        throw writeError;
-      }
+      // Write middleware config
+      await fs.writeFile(
+        path.join(this.configDir, "dynamic/middleware.yml"),
+        middlewareConfig,
+        { mode: 0o644 }
+      );
+      await executeCommand("chown", [
+        "cloudlunacy:docker",
+        path.join(this.configDir, "dynamic/middleware.yml"),
+      ]);
 
-      // Verify file was written correctly
-      try {
-        const written = await fs.readFile(composeFile, "utf8");
-        if (written !== composeContent) {
-          throw new Error("File content verification failed");
-        }
-      } catch (verifyError) {
-        logger.error("Failed to verify docker-compose file:", verifyError);
-        throw verifyError;
-      }
-
-      // Set proper permissions
+      // Write the compose file
+      await fs.writeFile(composeFile, composeContent, { mode: 0o644 });
       await executeCommand("chown", ["cloudlunacy:docker", composeFile]);
-      await executeCommand("chmod", ["664", composeFile]);
 
-      // Validate compose file syntax
-      try {
-        await executeCommand("docker-compose", [
-          "-f",
-          composeFile,
-          "config",
-          "--quiet",
-        ]);
-        logger.info("Docker compose file validated successfully");
-      } catch (validateError) {
-        logger.error("Docker compose file validation failed:", validateError);
-        throw validateError;
-      }
+      // Save credentials to a file
+      const credsFile = path.join(this.configDir, "admin_credentials.txt");
+      const credsContent = `
+Traefik Dashboard Credentials
+----------------------------
+Username: admin
+Password: ${this.adminPassword}
+
+IMPORTANT: Please save these credentials and delete this file!
+`;
+      await fs.writeFile(credsFile, credsContent, { mode: 0o600 });
+      await executeCommand("chown", ["cloudlunacy:docker", credsFile]);
+
+      logger.info("Admin credentials saved to: " + credsFile);
 
       return composeFile;
     } catch (error) {
@@ -694,14 +617,13 @@ networks:
     try {
       // Generate random password
       const password = crypto.randomBytes(16).toString("hex");
-      this.initialAdminPassword = password;
+      this.adminPassword = password; // Store for later use
 
-      // Use bcrypt directly instead of trying htpasswd first
-      const bcrypt = require("bcryptjs");
+      // Generate bcrypt hash
       const salt = bcrypt.genSaltSync(10);
       const hash = bcrypt.hashSync(password, salt);
+      this.adminHash = hash; // Store for later use
 
-      // Format the credentials string as required by Traefik
       return `admin:${hash}`;
     } catch (error) {
       logger.error("Failed to generate secure password:", error);
