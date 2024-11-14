@@ -513,7 +513,7 @@ setup_traefik_proxy() {
     
     # Get user's UID and GID
     USER_UID=$(id -u "$USERNAME")
-    USER_GID=$(id -g "$USERNAME")
+    USER_GID=$(getent group docker | cut -d: -f3)
     
     # Check if anything is using required ports
     if lsof -i :80 >/dev/null 2>&1 || lsof -i :443 >/dev/null 2>&1; then
@@ -525,18 +525,32 @@ setup_traefik_proxy() {
     # First remove any existing Traefik setup
     rm -rf "${BASE_DIR}/traefik"
 
-    # Create all required directories with correct ownership
+    # Create all required directories with correct permissions
     log "Creating Traefik directories..."
     mkdir -p "${BASE_DIR}/traefik"/{dynamic,acme,logs}
+    
+    # Set proper ownership and permissions
+    chown -R "$USERNAME:docker" "${BASE_DIR}/traefik"
+    find "${BASE_DIR}/traefik" -type d -exec chmod 775 {} \;
+    find "${BASE_DIR}/traefik" -type f -exec chmod 664 {} \;
+    
+    # Ensure the cloudlunacy user is in the docker group
+    usermod -aG docker "$USERNAME"
+    
+    # Set proper permissions for docker.sock
+    chmod 666 /var/run/docker.sock
     
     # Create base configuration file
     CONFIG_FILE="${BASE_DIR}/traefik/traefik.yml"
     touch "$CONFIG_FILE"
+    chown "$USERNAME:docker" "$CONFIG_FILE"
+    chmod 664 "$CONFIG_FILE"
     
-    # Create and secure acme.json
+    # Create and secure acme.json with special permissions
     touch "${BASE_DIR}/traefik/acme/acme.json"
+    chown "$USERNAME:docker" "${BASE_DIR}/traefik/acme/acme.json"
     chmod 600 "${BASE_DIR}/traefik/acme/acme.json"
-    
+
     # Generate secure credentials for Traefik dashboard
     DASHBOARD_PASSWORD=$(openssl rand -base64 32)
     HASHED_PASSWORD=$(openssl passwd -apr1 "$DASHBOARD_PASSWORD")
@@ -657,29 +671,31 @@ networks:
     external: true
 EOF
 
-    # Set correct permissions
-    chown -R "$USERNAME:$USERNAME" "${BASE_DIR}/traefik"
-    chmod 755 "${BASE_DIR}/traefik"
-    chmod 755 "${BASE_DIR}/traefik/dynamic"
-    chmod 755 "${BASE_DIR}/traefik/logs"
-    chmod 700 "${BASE_DIR}/traefik/acme"
-    chmod 644 "$CONFIG_FILE"
-    chmod 644 "$MIDDLEWARE_FILE"
-    chmod 644 "$COMPOSE_FILE"
-
-    # Create docker network if it doesn't exist
+    # After creating all files, ensure permissions again
+    chown -R "$USERNAME:docker" "${BASE_DIR}/traefik"
+    find "${BASE_DIR}/traefik" -type d -exec chmod 775 {} \;
+    find "${BASE_DIR}/traefik" -type f -exec chmod 664 {} \;
+    chmod 600 "${BASE_DIR}/traefik/acme/acme.json"
+    
+    # Ensure docker network exists
     docker network create traefik-proxy 2>/dev/null || true
 
     # Remove existing container if it exists
     docker rm -f traefik-proxy 2>/dev/null || true
 
-    # Start Traefik
+    # Start Traefik with proper permissions
     log "Starting Traefik proxy..."
     if ! docker-compose -f "$COMPOSE_FILE" up -d; then
         log_error "Failed to start Traefik proxy"
         docker-compose -f "$COMPOSE_FILE" logs
         exit 1
     fi
+
+    # Verify permissions after startup
+    chown -R "$USERNAME:docker" "${BASE_DIR}/traefik"
+    find "${BASE_DIR}/traefik" -type d -exec chmod 775 {} \;
+    find "${BASE_DIR}/traefik" -type f -exec chmod 664 {} \;
+    chmod 600 "${BASE_DIR}/traefik/acme/acme.json"
 
     # Wait for container to start
     sleep 5
@@ -691,25 +707,7 @@ EOF
         exit 1
     fi
 
-    # Save dashboard credentials
-    CREDS_FILE="${BASE_DIR}/traefik/dashboard_credentials.txt"
-    cat > "$CREDS_FILE" << EOF
-Traefik Dashboard Credentials
-============================
-Username: ${USERNAME}
-Password: ${DASHBOARD_PASSWORD}
-
-Access the dashboard at: https://traefik.localhost
-(Add this domain to your hosts file pointing to your server IP)
-
-These credentials are generated during installation and should be kept secure.
-EOF
-
-    chmod 600 "$CREDS_FILE"
-    chown "$USERNAME:$USERNAME" "$CREDS_FILE"
-
     log "Traefik Proxy setup completed successfully"
-    log "Dashboard credentials saved to: ${BASE_DIR}/traefik/dashboard_credentials.txt"
 }
 
 setup_deployment_templates() {
@@ -850,6 +848,29 @@ display_ssh_instructions() {
     log "2. Ensure that the deploy key has read access to the repository."
 }
 
+fix_traefik_permissions() {
+    log "Fixing Traefik permissions..."
+    
+    # Get docker group GID
+    DOCKER_GID=$(getent group docker | cut -d: -f3)
+    
+    # Ensure user is in docker group
+    usermod -aG docker "$USERNAME"
+    
+    # Fix base permissions
+    chown -R "$USERNAME:docker" "${BASE_DIR}/traefik"
+    find "${BASE_DIR}/traefik" -type d -exec chmod 775 {} \;
+    find "${BASE_DIR}/traefik" -type f -exec chmod 664 {} \;
+    
+    # Special permissions for acme.json
+    chmod 600 "${BASE_DIR}/traefik/acme/acme.json"
+    
+    # Fix docker socket permissions
+    chmod 666 /var/run/docker.sock
+    
+    log "Traefik permissions fixed"
+}
+
 # ----------------------------
 # Main Execution Flow
 # ----------------------------
@@ -884,6 +905,7 @@ main() {
     install_agent_dependencies
     setup_deployment_templates
     configure_env
+    fix_traefik_permissions
     setup_service
     verify_installation
     display_ssh_instructions
