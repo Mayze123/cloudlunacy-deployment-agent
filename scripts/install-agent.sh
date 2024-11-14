@@ -807,18 +807,35 @@ verify_backend_connection() {
     sleep 5
     
     # Check if service is running
-    if ! systemctl is-active --quiet cloudlunacy; then
+    if ! systemctl is-active --quiet cloudlunacy
+    then
         log_error "Agent service is not running"
         journalctl -u cloudlunacy -n 50 --no-pager
         exit 1
-    }
+    fi
     
-    # Check logs for connection status
-    if ! journalctl -u cloudlunacy -n 50 | grep -q "WebSocket connection established"; then
+    # Check for specific error messages first
+    if journalctl -u cloudlunacy -n 50 | grep -q "Error in authentication request"
+    then
+        log_error "Authentication failed with backend. Check your AGENT_TOKEN and SERVER_ID"
+        journalctl -u cloudlunacy -n 50 --no-pager
+        exit 1
+    fi
+    
+    if journalctl -u cloudlunacy -n 50 | grep -q "No response received from backend"
+    then
+        log_error "Could not reach backend server. Check your BACKEND_URL and network connectivity"
+        journalctl -u cloudlunacy -n 50 --no-pager
+        exit 1
+    fi
+    
+    # Check for successful connection
+    if ! journalctl -u cloudlunacy -n 50 | grep -q "WebSocket connection established"
+    then
         log_error "Agent failed to connect to backend. Checking logs..."
         journalctl -u cloudlunacy -n 50 --no-pager
         exit 1
-    }
+    fi
     
     log "Backend connection verified successfully"
 }
@@ -828,11 +845,12 @@ restart_agent() {
     systemctl restart cloudlunacy
     sleep 5
     
-    if ! systemctl is-active --quiet cloudlunacy; then
+    if ! systemctl is-active --quiet cloudlunacy
+    then
         log_error "Agent failed to restart"
         journalctl -u cloudlunacy -n 50 --no-pager
         exit 1
-    }
+    fi
     
     log "Agent restarted successfully"
 }
