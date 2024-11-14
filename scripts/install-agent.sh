@@ -801,6 +801,10 @@ setup_service() {
     log "Setting up CloudLunacy Deployment Agent as a systemd service..."
     SERVICE_FILE="/etc/systemd/system/cloudlunacy.service"
 
+    # Get UID and GID
+    USER_UID=$(id -u cloudlunacy)
+    DOCKER_GID=$(getent group docker | cut -d: -f3)
+
     cat <<EOF > "$SERVICE_FILE"
 [Unit]
 Description=CloudLunacy Deployment Agent
@@ -808,6 +812,10 @@ After=network.target docker.service
 Requires=docker.service
 
 [Service]
+Type=simple
+ExecStartPre=/bin/mkdir -p /opt/cloudlunacy/logs
+ExecStartPre=/bin/chown -R cloudlunacy:docker /opt/cloudlunacy/logs
+ExecStartPre=/bin/chmod -R 775 /opt/cloudlunacy/logs
 ExecStart=/usr/bin/node $BASE_DIR/agent.js
 WorkingDirectory=$BASE_DIR
 Restart=always
@@ -815,20 +823,50 @@ RestartSec=5
 User=cloudlunacy
 Group=docker
 Environment=HOME=$BASE_DIR
-EnvironmentFile=$ENV_FILE
+Environment=USER_UID=$USER_UID
+Environment=USER_GID=$DOCKER_GID
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=NODE_ENV=production
+EnvironmentFile=$BASE_DIR/.env
+
+# Security settings
+NoNewPrivileges=yes
+ProtectSystem=full
+ReadWritePaths=/opt/cloudlunacy
+PrivateTmp=true
+
+# Resource limits
+LimitNOFILE=65535
+LimitNPROC=65535
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
+    # Set proper permissions on service file
+    chmod 644 "$SERVICE_FILE"
+
+    # Create logs directory with proper permissions
+    mkdir -p "/opt/cloudlunacy/logs"
+    chown -R cloudlunacy:docker "/opt/cloudlunacy/logs"
+    chmod -R 775 "/opt/cloudlunacy/logs"
+
+    # Reload systemd and enable/start service
     systemctl daemon-reload
     systemctl enable cloudlunacy
     systemctl start cloudlunacy
+
+    # Verify service status
+    if ! systemctl is-active --quiet cloudlunacy; then
+        log_error "Service failed to start. Checking logs..."
+        journalctl -u cloudlunacy -n 50 --no-pager
+        exit 1
+    fi
     
-    # Restart Docker to ensure group changes take effect
-    systemctl restart docker
-    
-    log "CloudLunacy service set up and started."
+    log "CloudLunacy service set up and started successfully."
+
+    # Show status
+    systemctl status cloudlunacy
 }
 
 # Function to verify installation
