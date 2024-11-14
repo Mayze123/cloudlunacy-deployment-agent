@@ -513,7 +513,7 @@ IMPORTANT: Please save these credentials and delete this file!
     }
   }
 
-  // Add method to generate secure password
+  // Modify this method to include 'admin:' in adminHash
   async generateSecurePassword() {
     try {
       // Generate random password
@@ -523,9 +523,9 @@ IMPORTANT: Please save these credentials and delete this file!
       // Generate bcrypt hash
       const salt = bcrypt.genSaltSync(10);
       const hash = bcrypt.hashSync(password, salt);
-      this.adminHash = hash; // Store for later use
+      this.adminHash = `admin:${hash}`; // Include 'admin:' here
 
-      return `admin:${hash}`;
+      return this.adminHash;
     } catch (error) {
       logger.error("Failed to generate secure password:", error);
       throw error;
@@ -540,7 +540,7 @@ IMPORTANT: Please save these credentials and delete this file!
 Initial Traefik Dashboard Credentials
 -----------------------------------
 Username: admin
-Password: ${this.initialAdminPassword}
+Password: ${this.adminPassword}
 
 IMPORTANT: Please change these credentials after first login!
 `;
