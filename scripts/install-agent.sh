@@ -542,10 +542,10 @@ setup_traefik_proxy() {
     # Get user's UID and GID
     USER_UID=$(id -u "$USERNAME")
     GROUP_GID=$(getent group cloudlunacy | cut -d: -f3)
-    
+
     # Ensure user is in both cloudlunacy and docker groups
     usermod -aG docker,cloudlunacy "$USERNAME"
-    
+
     # Check if anything is using required ports
     if lsof -i :80 >/dev/null 2>&1 || lsof -i :443 >/dev/null 2>&1; then
         log_warn "Port 80 or 443 is in use. Stopping system nginx if running..."
@@ -559,33 +559,33 @@ setup_traefik_proxy() {
     # Create all required directories
     log "Creating Traefik directories..."
     mkdir -p "${BASE_DIR}/traefik"/{dynamic,acme,logs}
-    
+
     # Set proper ownership and permissions with both groups
     chown -R "$USERNAME:cloudlunacy" "${BASE_DIR}"
     chmod 775 "${BASE_DIR}"
     chown -R "$USERNAME:cloudlunacy" "${BASE_DIR}/traefik"
     chmod 775 "${BASE_DIR}/traefik"
-    
+
     # Ensure the base directory and its parent exist with correct permissions
     mkdir -p "/opt/cloudlunacy"
     chown -R "$USERNAME:cloudlunacy" "/opt/cloudlunacy"
     chmod 775 "/opt/cloudlunacy"
-    
+
     # Set permissions for subdirectories
     find "${BASE_DIR}/traefik" -type d -exec chmod 775 {} \;
     find "${BASE_DIR}/traefik" -type f -exec chmod 664 {} \;
-    
+
     # Set proper permissions for docker.sock
     if [ -e "/var/run/docker.sock" ]; then
         chmod 666 /var/run/docker.sock
     fi
-    
+
     # Create base configuration file
     CONFIG_FILE="${BASE_DIR}/traefik/traefik.yml"
     touch "$CONFIG_FILE"
     chown "$USERNAME:cloudlunacy" "$CONFIG_FILE"
     chmod 664 "$CONFIG_FILE"
-    
+
     # Create and secure acme.json with special permissions
     touch "${BASE_DIR}/traefik/acme/acme.json"
     chown "$USERNAME:cloudlunacy" "${BASE_DIR}/traefik/acme/acme.json"
@@ -594,7 +594,10 @@ setup_traefik_proxy() {
     # Generate secure credentials for Traefik dashboard
     DASHBOARD_PASSWORD=$(openssl rand -base64 32)
     HASHED_PASSWORD=$(openssl passwd -apr1 "$DASHBOARD_PASSWORD")
-    
+
+    # Escape $ symbols in the hashed password
+    ESCAPED_HASHED_PASSWORD=$(echo "$HASHED_PASSWORD" | sed 's/\$/\$\$/g')
+
     # Write Traefik configuration
     cat > "$CONFIG_FILE" << 'EOF'
 global:
@@ -652,12 +655,12 @@ EOF
 
     # Create docker-compose file for Traefik with proper permissions
     COMPOSE_FILE="${BASE_DIR}/docker-compose.proxy.yml"
-    
+
     # First ensure the directory exists with correct permissions
     mkdir -p "$(dirname "$COMPOSE_FILE")"
     chown "$USERNAME:cloudlunacy" "$(dirname "$COMPOSE_FILE")"
     chmod 775 "$(dirname "$COMPOSE_FILE")"
-    
+
     # Create the compose file
     cat > "$COMPOSE_FILE" << EOF
 version: "3.8"
@@ -688,7 +691,7 @@ services:
       - "traefik.http.routers.dashboard.rule=Host(\`traefik.localhost\`)"
       - "traefik.http.routers.dashboard.service=api@internal"
       - "traefik.http.routers.dashboard.middlewares=auth-middleware"
-      - "traefik.http.middlewares.auth-middleware.basicauth.users=${USERNAME}:${HASHED_PASSWORD}"
+      - "traefik.http.middlewares.auth-middleware.basicauth.users=${USERNAME}:${ESCAPED_HASHED_PASSWORD}"
 
 networks:
   traefik-proxy:
@@ -726,7 +729,7 @@ EOF
     cat > "$CREDS_FILE" << EOF
 Traefik Dashboard Credentials
 ----------------------------
-Username: admin
+Username: ${USERNAME}
 Password: ${DASHBOARD_PASSWORD}
 
 IMPORTANT: Please save these credentials securely and delete this file afterwards.

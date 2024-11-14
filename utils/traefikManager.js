@@ -6,6 +6,7 @@ const path = require("path");
 const yaml = require("js-yaml");
 const crypto = require("crypto");
 const bcrypt = require("bcryptjs");
+const { execSync } = require("child_process");
 
 class TraefikManager {
   constructor() {
