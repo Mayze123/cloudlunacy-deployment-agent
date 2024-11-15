@@ -135,15 +135,6 @@ async function deployApp(payload, ws) {
 
     logger.info(`Using port ${deploymentPort} for ${serviceName}`);
 
-    // Write deployment files
-    await Promise.all([
-      fs.writeFile("Dockerfile", files.dockerfile),
-      fs.writeFile("docker-compose.yml", files.dockerCompose),
-      files.nginxConf
-        ? fs.writeFile("nginx.conf", files.nginxConf)
-        : Promise.resolve(),
-    ]);
-
     // Generate deployment files
     sendLogs(ws, deploymentId, "Generating deployment configuration...");
     const files = await templateHandler.generateDeploymentFiles({
@@ -154,6 +145,15 @@ async function deployApp(payload, ws) {
       envFile: path.basename(envFilePath),
       domain: domain,
     });
+
+    // Write deployment files
+    await Promise.all([
+      fs.writeFile("Dockerfile", files.dockerfile),
+      fs.writeFile("docker-compose.yml", files.dockerCompose),
+      files.nginxConf
+        ? fs.writeFile("nginx.conf", files.nginxConf)
+        : Promise.resolve(),
+    ]);
 
     // Validate docker-compose file
     try {

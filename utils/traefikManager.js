@@ -30,17 +30,6 @@ class TraefikManager {
 
   async initialize() {
     try {
-      // Add delay before initialization
-      await new Promise((resolve) => setTimeout(resolve, 2000));
-
-      // Check for existing Traefik container and remove if exists
-      try {
-        await executeCommand("docker", ["rm", "-f", this.proxyContainer]);
-        logger.info("Removed existing Traefik container");
-      } catch (error) {
-        // Ignore errors if container doesn't exist
-      }
-
       // Skip direct chmod of docker.sock - we'll handle permissions differently
       if (!(await this.checkDockerAccess())) {
         throw new Error(
@@ -52,66 +41,15 @@ class TraefikManager {
       await this.ensureDirectories();
 
       // Create docker-compose file
-      const composeFile = await this.ensureComposeFile();
+      await this.ensureComposeFile();
 
       // Create network
       await this.ensureProxyNetwork();
 
-      // Start proxy with explicit compose file path
-      logger.info("Starting Traefik with compose file:", composeFile);
-      await executeCommand("docker-compose", ["-f", composeFile, "up", "-d"], {
-        env: {
-          ...process.env,
-          PATH: process.env.PATH,
-          HOME: this.baseDir,
-          USER_UID: this.uid.toString(),
-          USER_GID: this.gid.toString(),
-        },
-      });
+      // Start proxy
+      await this.restartProxy();
 
-      // Wait for proxy to be ready with improved logging
-      let attempts = 0;
-      const maxAttempts = 30;
-      while (attempts < maxAttempts) {
-        try {
-          const { stdout: logs } = await executeCommand("docker", [
-            "logs",
-            this.proxyContainer,
-          ]);
-          if (logs.includes("Traefik is ready")) {
-            logger.info("Traefik proxy started successfully");
-            break;
-          }
-          logger.debug(
-            `Waiting for Traefik to start (attempt ${
-              attempts + 1
-            }/${maxAttempts})`
-          );
-          await new Promise((resolve) => setTimeout(resolve, 1000));
-          attempts++;
-        } catch (error) {
-          logger.debug(
-            `Error checking Traefik logs (attempt ${
-              attempts + 1
-            }/${maxAttempts}):`,
-            error
-          );
-          await new Promise((resolve) => setTimeout(resolve, 1000));
-          attempts++;
-        }
-      }
-
-      if (attempts >= maxAttempts) {
-        const { stdout: logs } = await executeCommand("docker", [
-          "logs",
-          this.proxyContainer,
-        ]).catch(() => ({ stdout: "Could not retrieve logs" }));
-        throw new Error(
-          `Traefik failed to start after ${maxAttempts} attempts. Logs: ${logs}`
-        );
-      }
-
-      // Verify configuration
+      // Verify it's running
       await this.verifyConfiguration();
 
       logger.info("TraefikManager initialized successfully");
