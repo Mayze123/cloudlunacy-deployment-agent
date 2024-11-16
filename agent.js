@@ -118,19 +118,21 @@ async function authenticateAndConnect() {
       ws.close();
     });
   } catch (error) {
-    logger.error("Authentication failed:", error.message);
-    logger.info("Retrying authentication in 5 seconds...");
-    setTimeout(authenticateAndConnect, 5000);
-
+    // logger.error('Authentication failed:', error.message);
+    // logger.info('Retrying authentication in 5 seconds...');
+    // setTimeout(authenticateAndConnect, 5000);
     if (error.response) {
+      // The request was made and the server responded with a status code outside the range of 2xx
       logger.error(
         `Authentication failed with status ${
           error.response.status
         }: ${JSON.stringify(error.response.data)}`
       );
     } else if (error.request) {
+      // The request was made but no response was received
       logger.error("No response received from backend:", error.request);
     } else {
+      // Something happened in setting up the request that triggered an Error
       logger.error("Error in authentication request:", error.message);
     }
   }
@@ -250,37 +252,6 @@ function sendMetrics(metrics) {
   );
 }
 
-let heartbeatInterval;
-
-function startHeartbeat() {
-  // Clear any existing interval
-  if (heartbeatInterval) {
-    clearInterval(heartbeatInterval);
-  }
-
-  heartbeatInterval = setInterval(() => {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      try {
-        ws.send(
-          JSON.stringify({
-            type: "heartbeat",
-            serverId: SERVER_ID,
-            timestamp: new Date().toISOString(),
-            metrics: {
-              cpu: getCPUUsage(),
-              memory: getMemoryUsage(),
-              disk: getDiskUsage(),
-            },
-          })
-        );
-        logger.debug("Heartbeat sent");
-      } catch (error) {
-        logger.error("Failed to send heartbeat:", error);
-      }
-    }
-  }, 30000); // 30 seconds
-}
-
 /**
  * Initialize agent operations
  */
@@ -294,20 +265,13 @@ async function init() {
       );
     }
 
+    // Initialize and verify Traefik
+    const traefikManager = require("./utils/traefikManager");
+    await traefikManager.initialize();
+
     // Continue with normal initialization
     await authenticateAndConnect();
     setInterval(collectMetrics, 60000);
-
-    // Try to initialize Traefik but don't fail if it doesn't work
-    try {
-      const traefikManager = require("./utils/traefikManager");
-      await traefikManager.initialize();
-    } catch (error) {
-      logger.warn(
-        "Traefik initialization failed, continuing without it:",
-        error.message
-      );
-    }
   } catch (error) {
     logger.error("Initialization failed:", error);
     process.exit(1);
