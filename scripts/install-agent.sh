@@ -652,11 +652,9 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.traefik.rule=Host(\`traefik.localhost\`)"
+      - "traefik.http.routers.traefik.entrypoints=web"
       - "traefik.http.routers.traefik.service=api@internal"
       - "traefik.http.routers.traefik.middlewares=auth-middleware@file"
-networks:
-  traefik-proxy:
-    external: true
 EOF
 }
 
@@ -667,7 +665,6 @@ http:
     security-headers:
       headers:
         frameDeny: true
-        sslRedirect: true
         browserXssFilter: true
         contentTypeNosniff: true
         stsIncludeSubdomains: true
@@ -713,16 +710,8 @@ api:
 entryPoints:
   web:
     address: ":80"
-    http:
-      redirections:
-        entryPoint:
-          to: websecure
-          scheme: https
   websecure:
     address: ":443"
-    http:
-      tls:
-        certResolver: letsencrypt
 
 providers:
   docker:
@@ -733,14 +722,6 @@ providers:
   file:
     directory: "/etc/traefik/dynamic"
     watch: true
-
-certificatesResolvers:
-  letsencrypt:
-    acme:
-      email: "admin@example.com"
-      storage: "/etc/traefik/acme/acme.json"
-      httpChallenge:
-        entryPoint: web
 EOF
 }
 
