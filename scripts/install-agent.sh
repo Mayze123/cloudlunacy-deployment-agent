@@ -353,11 +353,11 @@ install_agent_dependencies() {
     chown -R "$USERNAME":"$USERNAME" "$NPM_CACHE_DIR"
 
     # Run npm install as the cloudlunacy user
-    if [ -f "package.json" ]; then
-        sudo -u "$USERNAME" HOME="$BASE_DIR" npm install --cache "$NPM_CACHE_DIR" --no-fund --no-audit
-    else
-        sudo -u "$USERNAME" HOME="$BASE_DIR" npm init -y
-        sudo -u "$USERNAME" HOME="$BASE_DIR" npm install axios dotenv winston bcryptjs shelljs ws handlebars js-yaml --cache "$NPM_CACHE_DIR" --no-fund --no-audit
+    sudo -u "$USERNAME" HOME="$BASE_DIR" npm install --cache "$NPM_CACHE_DIR" --no-fund --no-audit
+
+    if [ $? -ne 0 ]; then
+        log_error "npm install failed. Check npm logs for details."
+        exit 1
     fi
 
     log "Agent dependencies installed."
