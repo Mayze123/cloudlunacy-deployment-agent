@@ -7,6 +7,8 @@ const yaml = require("js-yaml");
 const crypto = require("crypto");
 const bcrypt = require("bcryptjs");
 const { execSync } = require("child_process");
+const util = require("util");
+const fsChown = util.promisify(require("fs").chown);
 
 class TraefikManager {
   constructor() {
@@ -15,27 +17,40 @@ class TraefikManager {
     this.proxyNetwork = "traefik-proxy";
     this.proxyContainer = "traefik-proxy";
 
-    // Get UID and GID using the cloudlunacy user specifically
+    // Get UID and GID using more reliable methods
     try {
-      // Get the UID of the cloudlunacy user
-      this.uid = parseInt(execSync("id -u cloudlunacy").toString().trim());
+      const userInfo = execSync("id cloudlunacy").toString();
+      const uidMatch = userInfo.match(/uid=(\d+)/);
+      const gidMatch = userInfo.match(/gid=(\d+)/);
 
-      // Get the GID of the cloudlunacy group
-      const cloudlunacyGid = parseInt(
-        execSync("getent group cloudlunacy | cut -d: -f3").toString().trim()
-      );
-
-      if (!this.uid || !cloudlunacyGid) {
-        throw new Error(
-          "Could not determine UID/GID for cloudlunacy user/group"
-        );
+      if (!uidMatch || !gidMatch) {
+        throw new Error("Could not determine UID/GID for cloudlunacy user");
       }
 
-      this.gid = cloudlunacyGid;
+      this.uid = parseInt(uidMatch[1]);
+      this.gid = parseInt(gidMatch[1]);
+
       logger.info(`Using UID:GID = ${this.uid}:${this.gid}`);
     } catch (error) {
       logger.error("Failed to get UID/GID:", error);
       throw error;
+    }
+  }
+
+  async setOwnershipAndPermissions(targetPath, isDirectory = false) {
+    try {
+      await fsChown(targetPath, this.uid, this.gid);
+
+      if (isDirectory) {
+        await fs.chmod(targetPath, 0o775);
+      } else {
+        await fs.chmod(targetPath, 0o664);
+      }
+
+      return true;
+    } catch (error) {
+      logger.error(`Failed to set permissions for ${targetPath}:`, error);
+      return false;
     }
   }
 
@@ -125,50 +140,42 @@ class TraefikManager {
   async ensureDirectories() {
     try {
       const dirs = [
+        this.baseDir,
         this.configDir,
         `${this.configDir}/dynamic`,
         `${this.configDir}/acme`,
         `${this.configDir}/logs`,
       ];
 
-      // Create base directory with correct permissions
-      await fs.mkdir(this.baseDir, { recursive: true });
-      await executeCommand("chown", ["cloudlunacy:cloudlunacy", this.baseDir]);
-      await executeCommand("chmod", ["775", this.baseDir]);
-
-      // Create and set permissions for all Traefik directories
+      // Create directories
       for (const dir of dirs) {
-        await fs.mkdir(dir, { recursive: true });
-        await executeCommand("chown", ["cloudlunacy:cloudlunacy", dir]);
-        await executeCommand("chmod", ["775", dir]);
+        try {
+          await fs.mkdir(dir, { recursive: true, mode: 0o775 });
+        } catch (error) {
+          if (error.code !== "EEXIST") {
+            throw error;
+          }
+        }
       }
 
-      // Set recursive permissions for subdirectories
-      await executeCommand("find", [
-        this.configDir,
-        "-type",
-        "d",
-        "-exec",
-        "chmod",
-        "775",
-        "{}",
-        ";",
-      ]);
-      await executeCommand("find", [
-        this.configDir,
-        "-type",
-        "f",
-        "-exec",
-        "chmod",
-        "664",
-        "{}",
-        ";",
-      ]);
+      // Set permissions for base directories first
+      await this.setOwnershipAndPermissions(this.baseDir, true);
+      await this.setOwnershipAndPermissions(this.configDir, true);
+
+      // Set permissions for subdirectories
+      for (const dir of dirs.slice(2)) {
+        await this.setOwnershipAndPermissions(dir, true);
+      }
 
       // Create and secure acme.json
       const acmeFile = path.join(this.configDir, "acme/acme.json");
-      await fs.writeFile(acmeFile, "{}", { mode: 0o600 });
-      await executeCommand("chown", ["cloudlunacy:cloudlunacy", acmeFile]);
+      try {
+        await fs.writeFile(acmeFile, "{}", { mode: 0o600 });
+        await fsChown(acmeFile, this.uid, this.gid);
+      } catch (error) {
+        logger.error("Failed to create acme.json:", error);
+        throw error;
+      }
 
       return true;
     } catch (error) {
@@ -186,8 +193,35 @@ class TraefikManager {
       this.adminHash = `admin:${hash}`;
       this.adminPassword = dashboardPassword;
 
-      // Create traefik.yml
-      const traefikConfig = `
+      // Create Traefik configuration
+      const configContent = this.generateTraefikConfig();
+      const configPath = path.join(this.configDir, "traefik.yml");
+
+      await fs.writeFile(configPath, configContent, { mode: 0o664 });
+      await this.setOwnershipAndPermissions(configPath);
+
+      // Create middleware configuration
+      const middlewareContent = this.generateMiddlewareConfig();
+      const middlewarePath = path.join(
+        this.configDir,
+        "dynamic/middleware.yml"
+      );
+
+      await fs.writeFile(middlewarePath, middlewareContent, { mode: 0o664 });
+      await this.setOwnershipAndPermissions(middlewarePath);
+
+      // Save dashboard credentials
+      await this.saveDashboardCredentials();
+
+      return true;
+    } catch (error) {
+      logger.error("Failed to create config files:", error);
+      throw error;
+    }
+  }
+
+  generateTraefikConfig() {
+    return `
 global:
   checkNewVersion: true
   sendAnonymousUsage: false
@@ -235,15 +269,10 @@ certificatesResolvers:
       storage: "/etc/traefik/acme/acme.json"
       httpChallenge:
         entryPoint: web`;
+  }
 
-      // Write traefik.yml
-      const configPath = path.join(this.configDir, "traefik.yml");
-      await fs.writeFile(configPath, traefikConfig);
-      await executeCommand("chown", ["cloudlunacy:cloudlunacy", configPath]);
-      await executeCommand("chmod", ["664", configPath]);
-
-      // Create middleware configuration
-      const middlewareConfig = `
+  generateMiddlewareConfig() {
+    return `
 http:
   middlewares:
     security-headers:
@@ -272,27 +301,6 @@ http:
       basicAuth:
         users:
           - "${this.adminHash}"`;
-
-      // Write middleware config
-      const middlewarePath = path.join(
-        this.configDir,
-        "dynamic/middleware.yml"
-      );
-      await fs.writeFile(middlewarePath, middlewareConfig);
-      await executeCommand("chown", [
-        "cloudlunacy:cloudlunacy",
-        middlewarePath,
-      ]);
-      await executeCommand("chmod", ["664", middlewarePath]);
-
-      // Save dashboard credentials
-      await this.saveDashboardCredentials();
-
-      return true;
-    } catch (error) {
-      logger.error("Failed to create config files:", error);
-      throw error;
-    }
   }
 
   async ensureProxyNetwork() {
@@ -317,7 +325,7 @@ http:
 
   async saveDashboardCredentials() {
     try {
-      const credsFile = path.join(this.configDir, "dashboard_credentials.txt");
+      const credsFile = path.join(this.configDir, "admin_credentials.txt");
       const content = `
 Traefik Dashboard Credentials
 ----------------------------
@@ -328,9 +336,9 @@ IMPORTANT: Please save these credentials securely and delete this file afterward
 `;
 
       await fs.writeFile(credsFile, content, { mode: 0o600 });
-      await executeCommand("chown", ["cloudlunacy:cloudlunacy", credsFile]);
+      await fsChown(credsFile, this.uid, this.gid);
 
-      logger.info("Dashboard credentials saved to:", credsFile);
+      logger.info("Admin credentials saved to:", credsFile);
     } catch (error) {
       logger.error("Failed to save dashboard credentials:", error);
       throw error;
