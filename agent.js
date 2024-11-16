@@ -118,9 +118,9 @@ async function authenticateAndConnect() {
       ws.close();
     });
   } catch (error) {
-    // logger.error('Authentication failed:', error.message);
-    // logger.info('Retrying authentication in 5 seconds...');
-    // setTimeout(authenticateAndConnect, 5000);
+    logger.error("Authentication failed:", error.message);
+    logger.info("Retrying authentication in 5 seconds...");
+    setTimeout(authenticateAndConnect, 5000);
     if (error.response) {
       // The request was made and the server responded with a status code outside the range of 2xx
       logger.error(

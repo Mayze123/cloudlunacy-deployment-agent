@@ -543,6 +543,11 @@ setup_traefik_proxy() {
     USER_UID=$(id -u "$USERNAME")
     GROUP_GID=$(getent group cloudlunacy | cut -d: -f3)
 
+    if [ -z "$GROUP_GID" ]; then
+        log_error "Failed to get cloudlunacy group GID"
+        exit 1
+    fi
+
     # Ensure user is in both cloudlunacy and docker groups
     usermod -aG docker,cloudlunacy "$USERNAME"
 
@@ -553,23 +558,23 @@ setup_traefik_proxy() {
         systemctl disable nginx || true
     fi
 
-    # First remove any existing Traefik setup
+    # First ensure parent directories exist with correct permissions
+    mkdir -p "/opt/cloudlunacy"
+    chown "$USERNAME:cloudlunacy" "/opt/cloudlunacy"
+    chmod 775 "/opt/cloudlunacy"
+
+    # Clean up any existing Traefik setup
     rm -rf "${BASE_DIR}/traefik"
 
     # Create all required directories
     log "Creating Traefik directories..."
     mkdir -p "${BASE_DIR}/traefik"/{dynamic,acme,logs}
 
-    # Set proper ownership and permissions with both groups
+    # Set proper ownership and permissions
     chown -R "$USERNAME:cloudlunacy" "${BASE_DIR}"
     chmod 775 "${BASE_DIR}"
     chown -R "$USERNAME:cloudlunacy" "${BASE_DIR}/traefik"
     chmod 775 "${BASE_DIR}/traefik"
-
-    # Ensure the base directory and its parent exist with correct permissions
-    mkdir -p "/opt/cloudlunacy"
-    chown -R "$USERNAME:cloudlunacy" "/opt/cloudlunacy"
-    chmod 775 "/opt/cloudlunacy"
 
     # Set permissions for subdirectories
     find "${BASE_DIR}/traefik" -type d -exec chmod 775 {} \;
@@ -649,14 +654,48 @@ certificatesResolvers:
         entryPoint: web
 EOF
 
-    # Ensure the config file has correct permissions
+    # Create middleware configuration
+    cat > "${BASE_DIR}/traefik/dynamic/middleware.yml" << EOF
+http:
+  middlewares:
+    security-headers:
+      headers:
+        frameDeny: true
+        sslRedirect: true
+        browserXssFilter: true
+        contentTypeNosniff: true
+        stsIncludeSubdomains: true
+        stsPreload: true
+        stsSeconds: 31536000
+        customResponseHeaders:
+          X-Robots-Tag: "noindex,nofollow,nosnippet,noarchive,notranslate,noimageindex"
+          Server: ""
+    
+    rate-limit:
+      rateLimit:
+        average: 100
+        burst: 50
+        period: 1s
+    
+    compress:
+      compress: {}
+
+    auth-middleware:
+      basicAuth:
+        users:
+          - "${USERNAME}:${ESCAPED_HASHED_PASSWORD}"
+EOF
+
+    # Ensure config files have correct permissions
     chown "$USERNAME:cloudlunacy" "$CONFIG_FILE"
     chmod 664 "$CONFIG_FILE"
+    chown "$USERNAME:cloudlunacy" "${BASE_DIR}/traefik/dynamic/middleware.yml"
+    chmod 664 "${BASE_DIR}/traefik/dynamic/middleware.yml"
 
-    # Create docker-compose file for Traefik with proper permissions
+    # Create docker-compose file for Traefik
     COMPOSE_FILE="${BASE_DIR}/docker-compose.proxy.yml"
 
-    # First ensure the directory exists with correct permissions
+    # Ensure compose file directory exists with correct permissions
     mkdir -p "$(dirname "$COMPOSE_FILE")"
     chown "$USERNAME:cloudlunacy" "$(dirname "$COMPOSE_FILE")"
     chmod 775 "$(dirname "$COMPOSE_FILE")"
@@ -702,27 +741,68 @@ EOF
     chown "$USERNAME:cloudlunacy" "$COMPOSE_FILE"
     chmod 664 "$COMPOSE_FILE"
 
+    # Verify docker group membership
+    if ! groups "$USERNAME" | grep -q "docker"; then
+        log_error "User $USERNAME is not in the docker group"
+        exit 1
+    fi
+
     # Ensure docker network exists
-    docker network create traefik-proxy 2>/dev/null || true
+    if ! docker network ls | grep -q "traefik-proxy"; then
+        log "Creating traefik-proxy network..."
+        docker network create traefik-proxy || {
+            log_error "Failed to create traefik-proxy network"
+            exit 1
+        }
+    fi
 
     # Remove existing container if it exists
-    docker rm -f traefik-proxy 2>/dev/null || true
+    if docker ps -a | grep -q "traefik-proxy"; then
+        log "Removing existing Traefik container..."
+        docker rm -f traefik-proxy
+    fi
 
     # Start Traefik with proper permissions
     log "Starting Traefik proxy..."
-    if ! sudo -u "$USERNAME" docker-compose -f "$COMPOSE_FILE" up -d; then
-        log_error "Failed to start Traefik proxy"
-        docker-compose -f "$COMPOSE_FILE" logs
-        exit 1
-    fi
+    
+    # Try to start Traefik up to 3 times
+    MAX_RETRIES=3
+    RETRY_COUNT=0
+    
+    while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+        if sudo -u "$USERNAME" docker-compose -f "$COMPOSE_FILE" up -d; then
+            break
+        else
+            RETRY_COUNT=$((RETRY_COUNT + 1))
+            if [ $RETRY_COUNT -eq $MAX_RETRIES ]; then
+                log_error "Failed to start Traefik proxy after $MAX_RETRIES attempts"
+                docker-compose -f "$COMPOSE_FILE" logs
+                exit 1
+            fi
+            log_warn "Failed to start Traefik proxy, retrying... (attempt $RETRY_COUNT/$MAX_RETRIES)"
+            sleep 5
+        fi
+    done
 
     # Verify Traefik is running
-    sleep 5
-    if ! docker ps | grep -q traefik-proxy; then
-        log_error "Traefik proxy failed to start. Logs:"
-        docker logs traefik-proxy
-        exit 1
-    fi
+    for i in {1..30}; do
+        if docker ps | grep -q "traefik-proxy"; then
+            # Check if Traefik is responding
+            if docker exec traefik-proxy traefik healthcheck 2>/dev/null; then
+                log "Traefik proxy started successfully"
+                break
+            fi
+        fi
+        
+        if [ $i -eq 30 ]; then
+            log_error "Traefik proxy failed to start. Logs:"
+            docker logs traefik-proxy
+            exit 1
+        fi
+        
+        log "Waiting for Traefik to start... ($i/30)"
+        sleep 2
+    done
 
     # Save dashboard credentials
     CREDS_FILE="${BASE_DIR}/traefik/dashboard_credentials.txt"
@@ -735,11 +815,54 @@ Password: ${DASHBOARD_PASSWORD}
 IMPORTANT: Please save these credentials securely and delete this file afterwards.
 EOF
 
+    # Set proper permissions for credentials file
     chown "$USERNAME:cloudlunacy" "$CREDS_FILE"
     chmod 600 "$CREDS_FILE"
 
+    # Create a fix permissions script
+    FIX_PERMS_SCRIPT="${BASE_DIR}/fix_traefik_permissions.sh"
+    cat > "$FIX_PERMS_SCRIPT" << EOF
+#!/bin/bash
+
+# Fix Traefik permissions script
+BASE_DIR="${BASE_DIR}"
+USERNAME="${USERNAME}"
+
+# Ensure running as root
+if [ "\$(id -u)" -ne 0 ]; then
+    echo "This script must be run as root"
+    exit 1
+fi
+
+# Fix base directory permissions
+chown -R "\$USERNAME:cloudlunacy" "\$BASE_DIR"
+chmod 775 "\$BASE_DIR"
+
+# Fix Traefik directory permissions
+chown -R "\$USERNAME:cloudlunacy" "\$BASE_DIR/traefik"
+chmod 775 "\$BASE_DIR/traefik"
+
+# Fix subdirectory permissions
+find "\$BASE_DIR/traefik" -type d -exec chmod 775 {} \;
+find "\$BASE_DIR/traefik" -type f -exec chmod 664 {} \;
+
+# Fix acme.json permissions
+chmod 600 "\$BASE_DIR/traefik/acme/acme.json"
+chown "\$USERNAME:cloudlunacy" "\$BASE_DIR/traefik/acme/acme.json"
+
+# Fix docker.sock permissions
+chmod 666 /var/run/docker.sock
+
+echo "Permissions fixed successfully"
+EOF
+
+    # Set permissions for the fix permissions script
+    chmod +x "$FIX_PERMS_SCRIPT"
+    chown "$USERNAME:cloudlunacy" "$FIX_PERMS_SCRIPT"
+
     log "Traefik Proxy setup completed successfully"
     log "Dashboard credentials saved to: ${CREDS_FILE}"
+    log "Fix permissions script created at: ${FIX_PERMS_SCRIPT}"
 }
 
 fix_directory_permissions() {
