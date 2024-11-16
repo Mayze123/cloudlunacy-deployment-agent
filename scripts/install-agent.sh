@@ -327,7 +327,9 @@ download_agent() {
 
     # Clone the repository
     sudo -u "$USERNAME" git clone https://github.com/Mayze123/cloudlunacy-deployment-agent.git "$BASE_DIR.tmp"
-    mv "$BASE_DIR.tmp"/* "$BASE_DIR/"
+
+    # Move all files, including hidden ones
+    rsync -a "$BASE_DIR.tmp/" "$BASE_DIR/"
     rm -rf "$BASE_DIR.tmp"
 
     # Restore .env file if it was backed up
@@ -353,11 +355,11 @@ install_agent_dependencies() {
     chown -R "$USERNAME":"$USERNAME" "$NPM_CACHE_DIR"
 
     # Run npm install as the cloudlunacy user
-    sudo -u "$USERNAME" HOME="$BASE_DIR" npm install --cache "$NPM_CACHE_DIR" --no-fund --no-audit
-
-    if [ $? -ne 0 ]; then
-        log_error "npm install failed. Check npm logs for details."
-        exit 1
+    if [ -f "package.json" ]; then
+        sudo -u "$USERNAME" HOME="$BASE_DIR" npm install --cache "$NPM_CACHE_DIR" --no-fund --no-audit
+    else
+        sudo -u "$USERNAME" HOME="$BASE_DIR" npm init -y
+        sudo -u "$USERNAME" HOME="$BASE_DIR" npm install axios dotenv winston bcryptjs shelljs ws handlebars js-yaml --cache "$NPM_CACHE_DIR" --no-fund --no-audit
     fi
 
     log "Agent dependencies installed."
