@@ -118,21 +118,19 @@ async function authenticateAndConnect() {
       ws.close();
     });
   } catch (error) {
-    // logger.error('Authentication failed:', error.message);
-    // logger.info('Retrying authentication in 5 seconds...');
-    // setTimeout(authenticateAndConnect, 5000);
+    logger.error("Authentication failed:", error.message);
+    logger.info("Retrying authentication in 5 seconds...");
+    setTimeout(authenticateAndConnect, 5000);
+
     if (error.response) {
-      // The request was made and the server responded with a status code outside the range of 2xx
       logger.error(
         `Authentication failed with status ${
           error.response.status
         }: ${JSON.stringify(error.response.data)}`
       );
     } else if (error.request) {
-      // The request was made but no response was received
       logger.error("No response received from backend:", error.request);
     } else {
-      // Something happened in setting up the request that triggered an Error
       logger.error("Error in authentication request:", error.message);
     }
   }

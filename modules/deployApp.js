@@ -141,7 +141,7 @@ async function deployApp(payload, ws) {
       appType,
       appName: serviceName,
       environment,
-      port: deploymentPort, // Pass the explicit port
+      port: deploymentPort,
       envFile: path.basename(envFilePath),
       domain: domain,
     });
