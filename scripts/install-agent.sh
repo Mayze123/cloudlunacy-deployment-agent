@@ -537,7 +537,16 @@ EOF
 
 setup_traefik_proxy() {
     log "Setting up Traefik Proxy..."
-    
+
+    # Generate secure admin password
+    ADMIN_PASSWORD=$(openssl rand -base64 16)
+    ADMIN_PASSWORD_HASH=$(openssl passwd -apr1 "$ADMIN_PASSWORD")
+
+    # Save credentials to a file
+    echo -e "Traefik Dashboard Credentials\n----------------------------\nUsername: admin\nPassword: $ADMIN_PASSWORD\n" > "${BASE_DIR}/traefik/admin_credentials.txt"
+    chmod 600 "${BASE_DIR}/traefik/admin_credentials.txt"
+    chown "$USERNAME:$GROUP_GID" "${BASE_DIR}/traefik/admin_credentials.txt"
+
     # Create cloudlunacy group if it doesn't exist
     groupadd -f cloudlunacy
 
@@ -578,6 +587,12 @@ setup_traefik_proxy() {
     create_middleware_config
     create_docker_compose
 
+    # **Insert the permission-setting lines here**
+    # Set ownership and permissions for Traefik directories
+    chown -R "$USERNAME:$GROUP_GID" "${BASE_DIR}/traefik"
+    chmod -R 755 "${BASE_DIR}/traefik"
+    chmod 600 "${BASE_DIR}/traefik/acme/acme.json"
+
     # Ensure docker network exists
     docker network create traefik-proxy 2>/dev/null || true
 
@@ -586,11 +601,11 @@ setup_traefik_proxy() {
 
     # Start Traefik with proper permissions
     log "Starting Traefik proxy..."
-    
+
     # Try to start Traefik up to 3 times
     MAX_RETRIES=3
     RETRY_COUNT=0
-    
+
     while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
         if sudo -u "$USERNAME" docker-compose -f "${BASE_DIR}/docker-compose.proxy.yml" up -d; then
             break
@@ -610,6 +625,123 @@ setup_traefik_proxy() {
     create_permission_fix_script
 
     log "Traefik Proxy setup completed successfully"
+}
+
+create_docker_compose() {
+    cat > "${BASE_DIR}/docker-compose.proxy.yml" << EOF
+version: "3.8"
+services:
+  traefik-proxy:
+    image: traefik:v2.10
+    container_name: traefik-proxy
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ${BASE_DIR}/traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ${BASE_DIR}/traefik/dynamic:/etc/traefik/dynamic:ro
+      - ${BASE_DIR}/traefik/acme:/etc/traefik/acme
+      - ${BASE_DIR}/traefik/logs:/etc/traefik/logs
+    networks:
+      - traefik-proxy
+    environment:
+      - TZ=UTC
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.traefik.rule=Host(\`traefik.localhost\`)"
+      - "traefik.http.routers.traefik.service=api@internal"
+      - "traefik.http.routers.traefik.middlewares=auth-middleware@file"
+networks:
+  traefik-proxy:
+    external: true
+EOF
+}
+
+create_middleware_config() {
+    cat > "${BASE_DIR}/traefik/dynamic/middleware.yml" << EOF
+http:
+  middlewares:
+    security-headers:
+      headers:
+        frameDeny: true
+        sslRedirect: true
+        browserXssFilter: true
+        contentTypeNosniff: true
+        stsIncludeSubdomains: true
+        stsPreload: true
+        stsSeconds: 31536000
+        customResponseHeaders:
+          X-Robots-Tag: "noindex,nofollow,nosnippet,noarchive,notranslate,noimageindex"
+          Server: ""
+
+    rate-limit:
+      rateLimit:
+        average: 100
+        burst: 50
+        period: 1s
+
+    compress:
+      compress: {}
+
+    auth-middleware:
+      basicAuth:
+        users:
+          - "admin:${ADMIN_PASSWORD_HASH}"
+EOF
+}
+
+create_traefik_config() {
+    cat > "${BASE_DIR}/traefik/traefik.yml" << EOF
+global:
+  checkNewVersion: true
+  sendAnonymousUsage: false
+
+log:
+  level: INFO
+  filePath: "/etc/traefik/logs/traefik.log"
+
+accessLog:
+  filePath: "/etc/traefik/logs/access.log"
+  bufferingSize: 100
+
+api:
+  dashboard: true
+
+entryPoints:
+  web:
+    address: ":80"
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+  websecure:
+    address: ":443"
+    http:
+      tls:
+        certResolver: letsencrypt
+
+providers:
+  docker:
+    endpoint: "unix:///var/run/docker.sock"
+    watch: true
+    exposedByDefault: false
+    network: traefik-proxy
+  file:
+    directory: "/etc/traefik/dynamic"
+    watch: true
+
+certificatesResolvers:
+  letsencrypt:
+    acme:
+      email: "admin@example.com"
+      storage: "/etc/traefik/acme/acme.json"
+      httpChallenge:
+        entryPoint: web
+EOF
 }
 
 create_permission_fix_script() {
@@ -952,24 +1084,24 @@ display_ssh_instructions() {
 
 fix_traefik_permissions() {
     log "Fixing Traefik permissions..."
-    
+
     # Get docker group GID
     DOCKER_GID=$(getent group docker | cut -d: -f3)
-    
+
     # Ensure user is in docker group
     usermod -aG docker "$USERNAME"
-    
+
     # Fix base permissions
     chown -R "$USERNAME:docker" "${BASE_DIR}/traefik"
-    find "${BASE_DIR}/traefik" -type d -exec chmod 775 {} \;
-    find "${BASE_DIR}/traefik" -type f -exec chmod 664 {} \;
-    
+    find "${BASE_DIR}/traefik" -type d -exec chmod 755 {} \;
+    find "${BASE_DIR}/traefik" -type f -exec chmod 644 {} \;
+
     # Special permissions for acme.json
     chmod 600 "${BASE_DIR}/traefik/acme/acme.json"
-    
+
     # Fix docker socket permissions
     chmod 666 /var/run/docker.sock
-    
+
     log "Traefik permissions fixed"
 }
 
@@ -1009,16 +1141,15 @@ main() {
     fix_systemd_permissions
     setup_service
     verify_installation
-    verify_backend_connection  # First verify base connection works
+    verify_backend_connection  
     
-    # Now handle Traefik separately
-    if ! setup_traefik_proxy
-    then
-        log_warn "Traefik setup failed, but agent is running. You can retry Traefik setup later."
-    else
-        fix_traefik_permissions
-        log "Traefik setup completed successfully"
-    fi
+ if ! setup_traefik_proxy; then
+    log_warn "Traefik setup failed, but agent is running. You can retry Traefik setup later."
+    exit 1
+else
+    fix_traefik_permissions
+    log "Traefik setup completed successfully"
+fi
 
     bash "$BASE_DIR/fix_permissions.sh"
 
