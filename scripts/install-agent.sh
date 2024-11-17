@@ -136,26 +136,26 @@ install_dependencies() {
     log "Installing dependencies (curl, wget, git, jq)..."
     case "$OS_TYPE" in
         ubuntu | debian | raspbian)
-            apt-get install -y curl wget git jq coreutils apache2-utils
+            apt-get install -y curl wget git jq coreutils
             ;;
         arch)
-            pacman -S --noconfirm curl wget git jq coreutils apache2-utils
+            pacman -S --noconfirm curl wget git jq coreutils
             ;;
         alpine)
-            apk add --no-cache curl wget git jq coreutils apache2-utils
+            apk add --no-cache curl wget git jq coreutils
             ;;
         centos | fedora | rhel | ol | rocky | almalinux | amzn)
             if [ "$OS_TYPE" = "amzn" ]; then
-                yum install -y curl wget git jq coreutils httpd-tools
+                yum install -y curl wget git jq coreutils
             else
                 if ! command -v dnf >/dev/null 2>&1; then
                     yum install -y dnf
                 fi
-                dnf install -y curl wget git jq coreutils httpd-tools
+                dnf install -y curl wget git jq coreutils
             fi
             ;;
         sles | opensuse-leap | opensuse-tumbleweed)
-            zypper install -y curl wget git jq coreutils apache2-utils
+            zypper install -y curl wget git jq coreutils
             ;;
         *)
             log_error "Unsupported OS: $OS_TYPE $OS_VERSION"
@@ -261,9 +261,67 @@ install_node() {
     log "Node.js installed successfully."
 }
 
-# Add this at the beginning of the script, after the IFS declaration
-USERNAME="cloudlunacy"
-BASE_DIR="/opt/cloudlunacy"
+install_nginx() {
+    log "Checking Nginx installation..."
+    if command -v nginx >/dev/null 2>&1; then
+        log "Nginx is already installed."
+    else
+        log "Nginx not found. Installing Nginx..."
+
+        case "$OS_TYPE" in
+            ubuntu | debian | raspbian)
+                apt-get install -y nginx
+                ;;
+            centos | rhel | fedora | rocky | almalinux)
+                if command -v dnf >/dev/null 2>&1; then
+                    dnf install -y nginx
+                else
+                    yum install -y nginx
+                fi
+                ;;
+            *)
+                log_error "Nginx installation not supported on this OS."
+                exit 1
+                ;;
+        esac
+
+        systemctl enable nginx
+        systemctl start nginx
+        log "Nginx installed successfully."
+    fi
+
+    # Set up Nginx directories and permissions
+    log "Setting up Nginx configuration directories..."
+    mkdir -p /etc/nginx/sites-available
+    mkdir -p /etc/nginx/sites-enabled
+    
+    # Add nginx user to necessary groups
+    usermod -aG nginx cloudlunacy
+    
+    # Update nginx configuration to include sites-enabled
+    if ! grep -q "include /etc/nginx/sites-enabled/\*" /etc/nginx/nginx.conf; then
+        sed -i '/http {/a \    include /etc/nginx/sites-enabled/*;' /etc/nginx/nginx.conf
+    fi
+    
+    # Add server_names_hash_bucket_size if not present
+    if ! grep -q "server_names_hash_bucket_size" /etc/nginx/nginx.conf; then
+        sed -i '/http {/a \    server_names_hash_bucket_size 128;' /etc/nginx/nginx.conf
+    fi
+    
+    # Set permissions
+    chown -R cloudlunacy:nginx /etc/nginx/sites-available
+    chown -R cloudlunacy:nginx /etc/nginx/sites-enabled
+    chmod 775 /etc/nginx/sites-available
+    chmod 775 /etc/nginx/sites-enabled
+    
+    # Add cloudlunacy user to sudoers for specific nginx commands
+    echo "cloudlunacy ALL=(ALL) NOPASSWD: /usr/sbin/nginx, /bin/systemctl reload nginx, /bin/systemctl restart nginx" | EDITOR="tee -a" visudo
+    
+    # Test and reload nginx
+    nginx -t && systemctl reload nginx
+    
+    log "Nginx setup completed."
+}
 
 # Function to create dedicated user and directories
 setup_user_directories() {
@@ -271,72 +329,43 @@ setup_user_directories() {
     USERNAME="cloudlunacy"
     BASE_DIR="/opt/cloudlunacy"
 
-    # Create cloudlunacy group if it doesn't exist
-    groupadd -f cloudlunacy
-
     if id "$USERNAME" &>/dev/null; then
         log "User '$USERNAME' already exists."
-        # Update user groups and home directory
-        usermod -aG docker,cloudlunacy "$USERNAME"
         usermod -d "$BASE_DIR" "$USERNAME"
     else
-        # Create user with specific groups
-        useradd -m -d "$BASE_DIR" -G docker,cloudlunacy -s /bin/bash "$USERNAME"
-        log "User '$USERNAME' created and added to required groups."
+        useradd -m -d "$BASE_DIR" -r -s /bin/bash "$USERNAME"
+        log "User '$USERNAME' created."
     fi
 
-    # Create all required directories
-    mkdir -p "$BASE_DIR"/{logs,ssh,config,bin,deployments,traefik/{dynamic,acme,logs}}
+    # Ensure base directory exists and has correct permissions
+    mkdir -p "$BASE_DIR"
+    chown -R "$USERNAME":"$USERNAME" "$BASE_DIR"
+    chmod -R 750 "$BASE_DIR"
 
-    # Set ownership and permissions
-    chown -R "$USERNAME:cloudlunacy" "$BASE_DIR"
-    find "$BASE_DIR" -type d -exec chmod 775 {} \;
-    find "$BASE_DIR" -type f -exec chmod 664 {} \;
+    # Create nginx configuration directories
+    mkdir -p "$BASE_DIR/nginx/sites-available"
+    mkdir -p "$BASE_DIR/nginx/sites-enabled"
+    chown -R "$USERNAME":"$USERNAME" "$BASE_DIR/nginx"
+    chmod -R 750 "$BASE_DIR/nginx"
 
-    # Special permissions for ssh directory
-    chmod 700 "$BASE_DIR/ssh"
-    
-    # Special permissions for docker.sock
-    chmod 666 /var/run/docker.sock
+    # Create subdirectories
+    mkdir -p "$BASE_DIR"/{logs,ssh,config,bin}
+    chown -R "$USERNAME":"$USERNAME" "$BASE_DIR"/{logs,ssh,config,bin}
 
-    log "Directories created and permissions set at $BASE_DIR"
+    log "Directories created at $BASE_DIR."
 }
 
 # Function to download and verify the latest agent
 download_agent() {
     log "Cloning the CloudLunacy Deployment Agent repository..."
-
-    # First, backup any existing .env file if it exists
-    if [ -f "$BASE_DIR/.env" ]; then
-        cp "$BASE_DIR/.env" "/tmp/cloudlunacy.env.backup"
-    fi
-
-    # Remove contents of BASE_DIR while preserving the directory
     if [ -d "$BASE_DIR" ]; then
-        # Remove all contents except .env backup
-        find "$BASE_DIR" -mindepth 1 -delete
+        rm -rf "$BASE_DIR"
     fi
-
-    # Ensure the base directory exists with correct ownership
+    # Recreate the base directory and set ownership
     mkdir -p "$BASE_DIR"
     chown "$USERNAME":"$USERNAME" "$BASE_DIR"
 
-    # Create temporary directory with correct permissions
-    mkdir -p "$BASE_DIR.tmp"
-    chown "$USERNAME":"$USERNAME" "$BASE_DIR.tmp"
-
-    # Clone the repository
-    sudo -u "$USERNAME" git clone https://github.com/Mayze123/cloudlunacy-deployment-agent.git "$BASE_DIR.tmp"
-
-    # Move all files, including hidden ones
-    rsync -a "$BASE_DIR.tmp/" "$BASE_DIR/"
-    rm -rf "$BASE_DIR.tmp"
-
-    # Restore .env file if it was backed up
-    if [ -f "/tmp/cloudlunacy.env.backup" ]; then
-        mv "/tmp/cloudlunacy.env.backup" "$BASE_DIR/.env"
-    fi
-
+    sudo -u "$USERNAME" git clone https://github.com/Mayze123/cloudlunacy-deployment-agent.git "$BASE_DIR"
     chown -R "$USERNAME":"$USERNAME" "$BASE_DIR"
     log "Agent cloned to $BASE_DIR."
 }
@@ -359,7 +388,7 @@ install_agent_dependencies() {
         sudo -u "$USERNAME" HOME="$BASE_DIR" npm install --cache "$NPM_CACHE_DIR" --no-fund --no-audit
     else
         sudo -u "$USERNAME" HOME="$BASE_DIR" npm init -y
-        sudo -u "$USERNAME" HOME="$BASE_DIR" npm install axios dotenv winston bcryptjs shelljs ws handlebars js-yaml --cache "$NPM_CACHE_DIR" --no-fund --no-audit
+        sudo -u "$USERNAME" HOME="$BASE_DIR" npm install axios dotenv winston shelljs ws handlebars js-yaml --cache "$NPM_CACHE_DIR" --no-fund --no-audit
     fi
 
     log "Agent dependencies installed."
@@ -412,450 +441,70 @@ EOF'
     log "SSH setup completed."
 }
 
-setup_nginx_proxy() {
-    log "Setting up Nginx Proxy..."
+setup_nginx_templates() {
+    log "Setting up Nginx configuration templates..."
     
-    # Get user's UID and GID
-    USER_UID=$(id -u "$USERNAME")
-    USER_GID=$(id -g "$USERNAME")
+    TEMPLATES_DIR="$BASE_DIR/templates/nginx"
+    mkdir -p "$TEMPLATES_DIR"
     
-    # Check if anything is using port 80
-    if lsof -i :80 >/dev/null 2>&1; then
-        log_warn "Port 80 is in use. Stopping system nginx if running..."
-        systemctl stop nginx || true
-        systemctl disable nginx || true
-    fi
-
-    # Create all required directories with correct ownership
-    log "Creating nginx directories..."
-    mkdir -p "${BASE_DIR}/nginx/"{conf.d,vhost.d,html,certs,temp/{client,proxy,fastcgi,uwsgi,scgi}}
-    chown -R "$USERNAME:$USERNAME" "${BASE_DIR}/nginx"
-    chmod -R 775 "${BASE_DIR}/nginx"
-    
-    # Create dedicated network for proxy
-    docker network create nginx-proxy || true
-    
-    # Remove existing proxy container if it exists
-    docker rm -f nginx-proxy >/dev/null 2>&1 || true
-
-    # Create base nginx configuration
-    cat > "${BASE_DIR}/nginx/nginx.conf" << EOF
-worker_processes auto;
-pid /tmp/nginx.pid;
-
-events {
-    worker_connections 768;
-}
-
-http {
-    client_body_temp_path /temp/client;
-    proxy_temp_path /temp/proxy;
-    fastcgi_temp_path /temp/fastcgi;
-    uwsgi_temp_path /temp/uwsgi;
-    scgi_temp_path /temp/scgi;
-
-    sendfile on;
-    tcp_nopush on;
-    tcp_nodelay on;
-    keepalive_timeout 65;
-    types_hash_max_size 2048;
-
-    include /etc/nginx/mime.types;
-    default_type application/octet-stream;
-
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_prefer_server_ciphers on;
-
-    access_log /dev/stdout;
-    error_log /dev/stderr;
-
-    gzip on;
-
-    include /etc/nginx/conf.d/*.conf;
-}
-EOF
-    
-    # Create nginx proxy container
-    cat > "$BASE_DIR/docker-compose.proxy.yml" << EOF
-version: "3.8"
-services:
-  nginx-proxy:
-    image: nginx:alpine
-    container_name: nginx-proxy
-    restart: always
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ${BASE_DIR}/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      - ${BASE_DIR}/nginx/conf.d:/etc/nginx/conf.d
-      - ${BASE_DIR}/nginx/vhost.d:/etc/nginx/vhost.d
-      - ${BASE_DIR}/nginx/html:/usr/share/nginx/html
-      - ${BASE_DIR}/nginx/certs:/etc/nginx/certs:ro
-      - ${BASE_DIR}/nginx/temp:/temp
-    networks:
-      - nginx-proxy
-    user: "${USER_UID}:${USER_GID}"
-networks:
-  nginx-proxy:
-    external: true
-EOF
-    
-    # Create default configuration
-    cat > "${BASE_DIR}/nginx/conf.d/default.conf" << EOF
+    # Create a basic Nginx virtual host template
+    cat <<EOF > "$TEMPLATES_DIR/virtual-host.template"
 server {
-    listen 80 default_server;
-    server_name _;
-    
+    listen 80;
+    server_name {{domain}};
+
     location / {
-        return 200 'Server is running\n';
-        add_header Content-Type text/plain;
+        proxy_pass http://127.0.0.1:{{port}};
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+
+    location /socket.io/ {
+        proxy_pass http://127.0.0.1:{{port}};
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
     }
 }
 EOF
 
-    # Ensure proper ownership of all files
-    chown "$USERNAME:$USERNAME" "$BASE_DIR/docker-compose.proxy.yml"
-    chown "$USERNAME:$USERNAME" "${BASE_DIR}/nginx/nginx.conf"
-    chown "$USERNAME:$USERNAME" "${BASE_DIR}/nginx/conf.d/default.conf"
-    chmod 664 "${BASE_DIR}/nginx/conf.d/default.conf"
-    chmod 664 "${BASE_DIR}/nginx/nginx.conf"
-
-    # Start the proxy
-    docker-compose -f "$BASE_DIR/docker-compose.proxy.yml" up -d
-
-    # Wait a moment for the container to start
-    sleep 2
-
-    # Check if container is running
-    if ! docker ps | grep -q nginx-proxy; then
-        log_error "Failed to start nginx proxy. Check docker logs:"
-        docker logs nginx-proxy
-        exit 1
-    fi
-
-    log "Nginx Proxy setup completed successfully"
-}
-
-setup_traefik_proxy() {
-    log "Setting up Traefik Proxy..."
-
-    # Generate secure admin password
-    ADMIN_PASSWORD=$(openssl rand -base64 16)
-    ADMIN_PASSWORD_HASH=$(openssl passwd -apr1 "$ADMIN_PASSWORD")
-
-    # Save credentials to a file
-    echo -e "Traefik Dashboard Credentials\n----------------------------\nUsername: admin\nPassword: $ADMIN_PASSWORD\n" > "${BASE_DIR}/traefik/admin_credentials.txt"
-    chmod 600 "${BASE_DIR}/traefik/admin_credentials.txt"
-    chown "$USERNAME:$GROUP_GID" "${BASE_DIR}/traefik/admin_credentials.txt"
-
-    # Create cloudlunacy group if it doesn't exist
-    groupadd -f cloudlunacy
-
-    # Get user's UID and GID
-    USER_UID=$(id -u "$USERNAME")
-    GROUP_GID=$(getent group cloudlunacy | cut -d: -f3)
-
-    if [ -z "$GROUP_GID" ]; then
-        log_error "Failed to get cloudlunacy group GID"
-        exit 1
-    fi
-
-    # Ensure user is in both cloudlunacy and docker groups
-    usermod -aG docker,cloudlunacy "$USERNAME"
-
-    # Check for ports in use
-    if lsof -i :80 >/dev/null 2>&1 || lsof -i :443 >/dev/null 2>&1; then
-        log_warn "Port 80 or 443 is in use. Stopping system nginx if running..."
-        systemctl stop nginx || true
-        systemctl disable nginx || true
-    fi
-
-    # Clean up any existing Traefik setup
-    rm -rf "${BASE_DIR}/traefik"
-
-    # Create directories with proper permissions
-    mkdir -p "${BASE_DIR}/traefik"/{dynamic,acme,logs}
-    chown -R "$USERNAME:cloudlunacy" "${BASE_DIR}"
-    chmod -R 775 "${BASE_DIR}"
-
-    # Create required files with proper permissions
-    touch "${BASE_DIR}/traefik/acme/acme.json"
-    chmod 600 "${BASE_DIR}/traefik/acme/acme.json"
-    chown "$USERNAME:cloudlunacy" "${BASE_DIR}/traefik/acme/acme.json"
-
-    # Set up configuration files
-    create_traefik_config
-    create_middleware_config
-    create_docker_compose
-
-    # **Insert the permission-setting lines here**
-    # Set ownership and permissions for Traefik directories
-    chown -R "$USERNAME:$GROUP_GID" "${BASE_DIR}/traefik"
-    chmod -R 755 "${BASE_DIR}/traefik"
-    chmod 600 "${BASE_DIR}/traefik/acme/acme.json"
-
-    # Ensure docker network exists
-    docker network create traefik-proxy 2>/dev/null || true
-
-    # Remove existing container if it exists
-    docker rm -f traefik-proxy 2>/dev/null || true
-
-    # Start Traefik with proper permissions
-    log "Starting Traefik proxy..."
-
-    # Try to start Traefik up to 3 times
-    MAX_RETRIES=3
-    RETRY_COUNT=0
-
-    while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-        if sudo -u "$USERNAME" docker-compose -f "${BASE_DIR}/docker-compose.proxy.yml" up -d; then
-            break
-        else
-            RETRY_COUNT=$((RETRY_COUNT + 1))
-            if [ $RETRY_COUNT -eq $MAX_RETRIES ]; then
-                log_error "Failed to start Traefik proxy after $MAX_RETRIES attempts"
-                docker-compose -f "${BASE_DIR}/docker-compose.proxy.yml" logs
-                exit 1
-            fi
-            log_warn "Failed to start Traefik proxy, retrying... (attempt $RETRY_COUNT/$MAX_RETRIES)"
-            sleep 5
-        fi
-    done
-
-    # Create permission fix script
-    create_permission_fix_script
-
-    log "Traefik Proxy setup completed successfully"
-}
-
-create_docker_compose() {
-    cat > "${BASE_DIR}/docker-compose.proxy.yml" << EOF
-version: "3.8"
-services:
-  traefik-proxy:
-    image: traefik:v2.10
-    container_name: traefik-proxy
-    restart: always
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - /etc/localtime:/etc/localtime:ro
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      - ${BASE_DIR}/traefik/traefik.yml:/etc/traefik/traefik.yml:ro
-      - ${BASE_DIR}/traefik/dynamic:/etc/traefik/dynamic:ro
-      - ${BASE_DIR}/traefik/acme:/etc/traefik/acme
-      - ${BASE_DIR}/traefik/logs:/etc/traefik/logs
-    networks:
-      - traefik-proxy
-    environment:
-      - TZ=UTC
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.traefik.rule=Host(\`traefik.localhost\`)"
-      - "traefik.http.routers.traefik.entrypoints=web"
-      - "traefik.http.routers.traefik.service=api@internal"
-      - "traefik.http.routers.traefik.middlewares=auth-middleware@file"
-EOF
-}
-
-create_middleware_config() {
-    cat > "${BASE_DIR}/traefik/dynamic/middleware.yml" << EOF
-http:
-  middlewares:
-    security-headers:
-      headers:
-        frameDeny: true
-        browserXssFilter: true
-        contentTypeNosniff: true
-        stsIncludeSubdomains: true
-        stsPreload: true
-        stsSeconds: 31536000
-        customResponseHeaders:
-          X-Robots-Tag: "noindex,nofollow,nosnippet,noarchive,notranslate,noimageindex"
-          Server: ""
-
-    rate-limit:
-      rateLimit:
-        average: 100
-        burst: 50
-        period: 1s
-
-    compress:
-      compress: {}
-
-    auth-middleware:
-      basicAuth:
-        users:
-          - "admin:${ADMIN_PASSWORD_HASH}"
-EOF
-}
-
-create_traefik_config() {
-    cat > "${BASE_DIR}/traefik/traefik.yml" << EOF
-global:
-  checkNewVersion: true
-  sendAnonymousUsage: false
-
-log:
-  level: INFO
-  filePath: "/etc/traefik/logs/traefik.log"
-
-accessLog:
-  filePath: "/etc/traefik/logs/access.log"
-  bufferingSize: 100
-
-api:
-  dashboard: true
-
-entryPoints:
-  web:
-    address: ":80"
-  websecure:
-    address: ":443"
-
-providers:
-  docker:
-    endpoint: "unix:///var/run/docker.sock"
-    watch: true
-    exposedByDefault: false
-    network: traefik-proxy
-  file:
-    directory: "/etc/traefik/dynamic"
-    watch: true
-EOF
-}
-
-create_permission_fix_script() {
-    local SCRIPT="${BASE_DIR}/fix_permissions.sh"
+    # Set proper ownership and permissions
+    chown -R "$USERNAME":"$USERNAME" "$TEMPLATES_DIR"
+    chmod 750 "$TEMPLATES_DIR"
+    chmod 640 "$TEMPLATES_DIR/virtual-host.template"
     
-    cat > "$SCRIPT" << 'EOF'
-#!/bin/bash
+    log "Nginx templates created successfully."
+}
 
-BASE_DIR="/opt/cloudlunacy"
-USERNAME="cloudlunacy"
-
-# Ensure running as root
-if [ "$(id -u)" -ne 0 ]; then
-    echo "This script must be run as root"
-    exit 1
-fi
-
-# Fix base directory permissions
-chown -R "$USERNAME:cloudlunacy" "$BASE_DIR"
-chmod -R 775 "$BASE_DIR"
-
-# Fix special permissions
-chmod 700 "$BASE_DIR/ssh"
-chmod 600 "$BASE_DIR/traefik/acme/acme.json"
-chmod 666 /var/run/docker.sock
-
-# Ensure proper group memberships
-usermod -aG docker,cloudlunacy "$USERNAME"
-
-# Reload systemd
-systemctl daemon-reload
-
-# Restart service
-systemctl restart cloudlunacy
-
-echo "Permissions fixed successfully"
+setup_nginx_permissions() {
+    log "Configuring Nginx sudo permissions..."
+    
+    # Create sudoers.d file for cloudlunacy nginx permissions
+    cat <<EOF > /etc/sudoers.d/cloudlunacy-nginx
+# Allow cloudlunacy user to manage nginx
+cloudlunacy ALL=(ALL) NOPASSWD: /usr/sbin/nginx
+cloudlunacy ALL=(ALL) NOPASSWD: /bin/systemctl reload nginx
+cloudlunacy ALL=(ALL) NOPASSWD: /bin/systemctl restart nginx
+cloudlunacy ALL=(ALL) NOPASSWD: /usr/bin/tee /etc/nginx/sites-available/*
+cloudlunacy ALL=(ALL) NOPASSWD: /usr/bin/tee /etc/nginx/sites-enabled/*
+cloudlunacy ALL=(ALL) NOPASSWD: /bin/ln -sf /etc/nginx/sites-available/* /etc/nginx/sites-enabled/*
+cloudlunacy ALL=(ALL) NOPASSWD: /bin/rm /etc/nginx/sites-available/*
+cloudlunacy ALL=(ALL) NOPASSWD: /bin/rm /etc/nginx/sites-enabled/*
 EOF
 
-    chmod +x "$SCRIPT"
-    chown "$USERNAME:cloudlunacy" "$SCRIPT"
-}
-
-
-
-fix_directory_permissions() {
-    local dir=$1
-    local user=$2
-    local group="docker"  # Always use docker group
+    # Set proper permissions on the sudoers file
+    chmod 440 /etc/sudoers.d/cloudlunacy-nginx
     
-    if [ ! -d "$dir" ]; then
-        mkdir -p "$dir"
-    fi
-    
-    chown -R "$user:$group" "$dir"
-    chmod 775 "$dir"
-    find "$dir" -type d -exec chmod 775 {} \;
-    find "$dir" -type f -exec chmod 664 {} \;
-}
-
-fix_systemd_permissions() {
-    log "Setting up systemd service permissions..."
-    
-    # Create and set permissions for directories
-    mkdir -p /opt/cloudlunacy/logs
-    chown -R cloudlunacy:cloudlunacy /opt/cloudlunacy
-    chmod -R 775 /opt/cloudlunacy
-    
-    # Ensure docker.sock has correct permissions
-    chmod 666 /var/run/docker.sock
-    
-    # Update systemd service file with proper permissions
-    cat > /etc/systemd/system/cloudlunacy.service << EOF
-[Unit]
-Description=CloudLunacy Deployment Agent
-After=network.target docker.service
-Requires=docker.service
-
-[Service]
-Type=simple
-ExecStartPre=/bin/mkdir -p /opt/cloudlunacy/logs
-ExecStartPre=/bin/chown -R cloudlunacy:cloudlunacy /opt/cloudlunacy
-ExecStartPre=/bin/chmod -R 775 /opt/cloudlunacy
-ExecStartPre=/bin/chmod 666 /var/run/docker.sock
-ExecStart=/usr/bin/node /opt/cloudlunacy/agent.js
-WorkingDirectory=/opt/cloudlunacy
-Restart=always
-RestartSec=5
-User=cloudlunacy
-Group=cloudlunacy
-Environment=HOME=/opt/cloudlunacy
-Environment=NODE_ENV=production
-EnvironmentFile=/opt/cloudlunacy/.env
-
-# Security settings
-NoNewPrivileges=no
-ProtectSystem=full
-ReadWritePaths=/opt/cloudlunacy
-PrivateTmp=true
-
-# Resource limits
-LimitNOFILE=65535
-LimitNPROC=65535
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    # Set proper permissions for service file
-    chmod 644 /etc/systemd/system/cloudlunacy.service
-
-    # Reload systemd
-    systemctl daemon-reload
-}
-
-setup_deployment_templates() {
-    log "Setting up deployment templates..."
-    
-    # Templates directory is already at BASE_DIR/templates
-    TEMPLATES_DIR="${BASE_DIR}/templates"
-
-    # No need to copy, just set proper permissions
-    if [ -d "$TEMPLATES_DIR" ]; then
-        # Set proper permissions
-        chown -R "$USERNAME:$USERNAME" "$TEMPLATES_DIR"
-        chmod 755 "$TEMPLATES_DIR"
-        find "$TEMPLATES_DIR" -type f -exec chmod 644 {} \;
-        log "Deployment templates permissions updated"
-    else
-        log_error "Templates directory not found at ${TEMPLATES_DIR}"
-        exit 1
-    fi
+    log "Nginx sudo permissions configured."
 }
 
 setup_docker_permissions() {
@@ -863,9 +512,6 @@ setup_docker_permissions() {
     
     # Add cloudlunacy user to docker group
     usermod -aG docker cloudlunacy
-
-    # Set docker.sock permissions
-    chmod 666 /var/run/docker.sock
     
     # Create deployment directories with correct permissions
     mkdir -p /opt/cloudlunacy/deployments
@@ -873,75 +519,20 @@ setup_docker_permissions() {
     
     # Set permissions
     chown -R cloudlunacy:docker /opt/cloudlunacy
+    chown cloudlunacy:docker /opt/cloudlunacy/deployments
+    chown cloudlunacy:docker /tmp/cloudlunacy-deployments
+    
     chmod 775 /opt/cloudlunacy/deployments
     chmod 775 /tmp/cloudlunacy-deployments
+    chmod 666 /var/run/docker.sock
     
     log "Docker permissions configured successfully."
-}
-
-verify_backend_connection() {
-    log "Verifying backend connection..."
-    
-    # Wait for service to start
-    sleep 5
-    
-    # Check if service is running
-    if ! systemctl is-active --quiet cloudlunacy
-    then
-        log_error "Agent service is not running"
-        journalctl -u cloudlunacy -n 50 --no-pager
-        exit 1
-    fi
-    
-    # Check for specific error messages first
-    if journalctl -u cloudlunacy -n 50 | grep -q "Error in authentication request"
-    then
-        log_error "Authentication failed with backend. Check your AGENT_TOKEN and SERVER_ID"
-        journalctl -u cloudlunacy -n 50 --no-pager
-        exit 1
-    fi
-    
-    if journalctl -u cloudlunacy -n 50 | grep -q "No response received from backend"
-    then
-        log_error "Could not reach backend server. Check your BACKEND_URL and network connectivity"
-        journalctl -u cloudlunacy -n 50 --no-pager
-        exit 1
-    fi
-    
-    # Check for successful connection
-    if ! journalctl -u cloudlunacy -n 50 | grep -q "WebSocket connection established"
-    then
-        log_error "Agent failed to connect to backend. Checking logs..."
-        journalctl -u cloudlunacy -n 50 --no-pager
-        exit 1
-    fi
-    
-    log "Backend connection verified successfully"
-}
-
-restart_agent() {
-    log "Restarting CloudLunacy agent..."
-    systemctl restart cloudlunacy
-    sleep 5
-    
-    if ! systemctl is-active --quiet cloudlunacy
-    then
-        log_error "Agent failed to restart"
-        journalctl -u cloudlunacy -n 50 --no-pager
-        exit 1
-    fi
-    
-    log "Agent restarted successfully"
 }
 
 # Function to set up systemd service
 setup_service() {
     log "Setting up CloudLunacy Deployment Agent as a systemd service..."
     SERVICE_FILE="/etc/systemd/system/cloudlunacy.service"
-
-    # Get UID and GID
-    USER_UID=$(id -u cloudlunacy)
-    DOCKER_GID=$(getent group docker | cut -d: -f3)
 
     cat <<EOF > "$SERVICE_FILE"
 [Unit]
@@ -950,10 +541,6 @@ After=network.target docker.service
 Requires=docker.service
 
 [Service]
-Type=simple
-ExecStartPre=/bin/mkdir -p /opt/cloudlunacy/logs
-ExecStartPre=/bin/chown -R cloudlunacy:docker /opt/cloudlunacy/logs
-ExecStartPre=/bin/chmod -R 775 /opt/cloudlunacy/logs
 ExecStart=/usr/bin/node $BASE_DIR/agent.js
 WorkingDirectory=$BASE_DIR
 Restart=always
@@ -961,49 +548,20 @@ RestartSec=5
 User=cloudlunacy
 Group=docker
 Environment=HOME=$BASE_DIR
-Environment=USER_UID=$USER_UID
-Environment=USER_GID=$DOCKER_GID
-Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-Environment=NODE_ENV=production
-EnvironmentFile=$BASE_DIR/.env
-
-# Security settings
-NoNewPrivileges=yes
-ProtectSystem=full
-ReadWritePaths=/opt/cloudlunacy
-PrivateTmp=true
-
-# Resource limits
-LimitNOFILE=65535
-LimitNPROC=65535
+EnvironmentFile=$ENV_FILE
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-    chmod 644 "$SERVICE_FILE"
-
-    # Create logs directory with proper permissions
-    mkdir -p "/opt/cloudlunacy/logs"
-    chown -R cloudlunacy:docker "/opt/cloudlunacy/logs"
-    chmod -R 775 "/opt/cloudlunacy/logs"
-
-    # Reload systemd and enable/start service
     systemctl daemon-reload
     systemctl enable cloudlunacy
     systemctl start cloudlunacy
-
-    # Verify service status
-    if ! systemctl is-active --quiet cloudlunacy; then
-        log_error "Service failed to start. Checking logs..."
-        journalctl -u cloudlunacy -n 50 --no-pager
-        exit 1
-    fi
     
-    log "CloudLunacy service set up and started successfully."
-
-    # Show status
-    systemctl status cloudlunacy
+    # Restart Docker to ensure group changes take effect
+    systemctl restart docker
+    
+    log "CloudLunacy service set up and started."
 }
 
 # Function to verify installation
@@ -1065,29 +623,6 @@ display_ssh_instructions() {
     log "2. Ensure that the deploy key has read access to the repository."
 }
 
-fix_traefik_permissions() {
-    log "Fixing Traefik permissions..."
-
-    # Get docker group GID
-    DOCKER_GID=$(getent group docker | cut -d: -f3)
-
-    # Ensure user is in docker group
-    usermod -aG docker "$USERNAME"
-
-    # Fix base permissions
-    chown -R "$USERNAME:docker" "${BASE_DIR}/traefik"
-    find "${BASE_DIR}/traefik" -type d -exec chmod 755 {} \;
-    find "${BASE_DIR}/traefik" -type f -exec chmod 644 {} \;
-
-    # Special permissions for acme.json
-    chmod 600 "${BASE_DIR}/traefik/acme/acme.json"
-
-    # Fix docker socket permissions
-    chmod 666 /var/run/docker.sock
-
-    log "Traefik permissions fixed"
-}
-
 # ----------------------------
 # Main Execution Flow
 # ----------------------------
@@ -1113,29 +648,19 @@ main() {
     update_system
     install_dependencies
     install_docker
+    install_nginx
     install_node
     setup_user_directories
     setup_docker_permissions
+    setup_nginx_permissions
+    setup_nginx_templates
     setup_ssh "$GITHUB_SSH_KEY"
     download_agent
     install_agent_dependencies
-    setup_deployment_templates
     configure_env
-    fix_systemd_permissions
     setup_service
     verify_installation
-    verify_backend_connection  
-    
- if ! setup_traefik_proxy; then
-    log_warn "Traefik setup failed, but agent is running. You can retry Traefik setup later."
-    exit 1
-else
-    fix_traefik_permissions
-    log "Traefik setup completed successfully"
-fi
-
-    bash "$BASE_DIR/fix_permissions.sh"
-
+    display_ssh_instructions
     completion_message
 }
 

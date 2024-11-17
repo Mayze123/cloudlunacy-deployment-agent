@@ -1,216 +1,143 @@
-const { executeCommand } = require("./executor");
-const logger = require("./logger");
-const fs = require("fs").promises;
-const path = require("path");
+// src/utils/nginxManager.js
+
+const { executeCommand } = require('./executor');
+const logger = require('./logger');
+const fs = require('fs').promises;
+const path = require('path');
+const shelljs = require('shelljs');
 
 class NginxManager {
   constructor() {
-    this.baseDir = "/opt/cloudlunacy";
-    this.configDir = `${this.baseDir}/nginx/conf.d`;
-    this.proxyNetwork = "nginx-proxy";
-    this.proxyContainer = "nginx-proxy";
+    this.sitesAvailablePath = '/etc/nginx/sites-available';
+    this.sitesEnabledPath = '/etc/nginx/sites-enabled';
   }
 
-  async initialize() {
+  async configureNginx(domain, port, deployDir) {
     try {
-      await this.ensureDirectories();
-      await this.ensureProxyNetwork();
-      await this.ensureProxyRunning();
-      logger.info("NginxManager initialized successfully");
-    } catch (error) {
-      logger.error("NginxManager initialization failed:", error);
-      throw error;
-    }
-  }
+      logger.info(`Configuring Nginx for ${domain} on port ${port}`);
 
-  async ensureDirectories() {
-    try {
-      const dirs = [
-        `${this.baseDir}/nginx/conf.d`,
-        `${this.baseDir}/nginx/vhost.d`,
-        `${this.baseDir}/nginx/html`,
-        `${this.baseDir}/nginx/certs`,
-      ];
-
-      for (const dir of dirs) {
-        try {
-          await fs.access(dir);
-        } catch {
-          // If directory doesn't exist, try to create it
-          await fs.mkdir(dir, { recursive: true, mode: 0o775 });
-        }
-
-        // Try to set permissions even if directory exists
-        await fs.chmod(dir, 0o775);
-      }
-
-      return true;
-    } catch (error) {
-      logger.error("Failed to ensure directories:", error);
-      return false;
-    }
-  }
-
-  async ensureProxyNetwork() {
-    try {
-      const { stdout: networks } = await executeCommand("docker", [
-        "network",
-        "ls",
-      ]);
-      if (!networks.includes(this.proxyNetwork)) {
-        await executeCommand("docker", [
-          "network",
-          "create",
-          this.proxyNetwork,
-        ]);
-        logger.info(`Created ${this.proxyNetwork} network`);
-      }
-    } catch (error) {
-      logger.error("Failed to ensure proxy network:", error);
-      throw error;
-    }
-  }
-
-  async ensureProxyRunning() {
-    try {
-      // Check if container exists and is running
-      const { stdout: containers } = await executeCommand("docker", [
-        "ps",
-        "-a",
-      ]);
-      const isRunning = containers.includes(this.proxyContainer);
-
-      if (!isRunning) {
-        // Create docker-compose file for proxy
-        const composeFilePath = path.join(
-          this.baseDir,
-          "docker-compose.proxy.yml"
-        );
-        const composeConfig = `
-version: "3.8"
-services:
-  nginx-proxy:
-    image: nginx:alpine
-    container_name: ${this.proxyContainer}
-    restart: always
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ${this.baseDir}/nginx/conf.d:/etc/nginx/conf.d
-      - ${this.baseDir}/nginx/vhost.d:/etc/nginx/vhost.d
-      - ${this.baseDir}/nginx/html:/usr/share/nginx/html
-      - ${this.baseDir}/nginx/certs:/etc/nginx/certs:ro
-    networks:
-      - ${this.proxyNetwork}
-
-networks:
-  ${this.proxyNetwork}:
-    external: true`;
-
-        await fs.writeFile(composeFilePath, composeConfig);
-
-        // Start the proxy
-        await executeCommand("docker-compose", [
-          "-f",
-          composeFilePath,
-          "up",
-          "-d",
-        ]);
-        logger.info("Started nginx proxy container");
-      }
-    } catch (error) {
-      logger.error("Failed to ensure proxy is running:", error);
-      throw error;
-    }
-  }
-
-  async configureNginx(domain, hostPort) {
-    try {
-      logger.info(`Configuring Nginx for ${domain} on port ${hostPort}`);
-
-      const config = `
-server {
-    listen 80;
-    server_name ${domain};
-
-    location / {
-        proxy_pass http://host.docker.internal:${hostPort};
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
+      // Check if configuration already exists
+      const existingConfig = await this.getExistingConfig(domain);
+      if (existingConfig) {
+        logger.info(`Found existing Nginx config for ${domain}`);
         
-        proxy_connect_timeout 60s;
-        proxy_send_timeout 60s;
-        proxy_read_timeout 60s;
-    }
-}`;
+        // Check if the port has changed
+        const currentPort = this.extractPortFromConfig(existingConfig);
+        if (currentPort === port) {
+          logger.info(`Port ${port} unchanged for ${domain}, skipping Nginx reconfiguration`);
+          return;
+        }
+        logger.info(`Port changed from ${currentPort} to ${port} for ${domain}, updating configuration`);
+      }
 
-      // Use fs.writeFile with mode
-      await fs.writeFile(path.join(this.configDir, `${domain}.conf`), config, {
-        mode: 0o664,
-      });
+      const nginxConfig = await this.generateNginxConfig(domain, port);
+      
+      // Write configuration
+      const configPath = path.join(this.sitesAvailablePath, domain);
+      await executeCommand('sudo', ['bash', '-c', `echo '${nginxConfig}' | sudo tee ${configPath}`]);
+      
+      // Create symlink if it doesn't exist
+      const enabledPath = path.join(this.sitesEnabledPath, domain);
+      if (!await this.checkFileExists(enabledPath)) {
+        await executeCommand('sudo', ['ln', '-sf', configPath, enabledPath]);
+      }
 
-      // Reload nginx container
-      await executeCommand("docker", [
-        "exec",
-        this.proxyContainer,
-        "nginx",
-        "-s",
-        "reload",
-      ]);
-
+      // Verify configuration and reload
+      await this.verifyAndReload();
+      
       logger.info(`Nginx configuration completed for ${domain}`);
-      return true;
     } catch (error) {
-      logger.error(`Nginx configuration failed for ${domain}:`, error);
+      logger.error('Nginx configuration failed:', error);
+      await this.collectNginxDiagnostics(error);
       throw error;
     }
   }
 
-  async removeConfig(domain) {
+  async getExistingConfig(domain) {
     try {
-      const configPath = path.join(this.configDir, `${domain}.conf`);
-
-      await fs.unlink(configPath).catch(() => {});
-
-      // Reload nginx container
-      await executeCommand("docker", [
-        "exec",
-        this.proxyContainer,
-        "nginx",
-        "-s",
-        "reload",
-      ]);
-
-      logger.info(`Removed Nginx configuration for ${domain}`);
+      const configPath = path.join(this.sitesAvailablePath, domain);
+      const { stdout } = await executeCommand('sudo', ['cat', configPath], { silent: true });
+      return stdout;
     } catch (error) {
-      logger.error(`Error removing Nginx config for ${domain}:`, error);
-      throw error;
+      // File doesn't exist or other error
+      return null;
+    }
+  }
+
+  extractPortFromConfig(config) {
+    const portMatch = config.match(/proxy_pass http:\/\/127\.0\.0\.1:(\d+)/);
+    return portMatch ? parseInt(portMatch[1], 10) : null;
+  }
+
+  async generateNginxConfig(domain, port) {
+    // Read template
+    const templatePath = path.join('/opt/cloudlunacy/templates/nginx', 'virtual-host.template');
+    const template = await fs.readFile(templatePath, 'utf-8');
+    
+    // Replace variables
+    return template
+      .replace(/\{\{domain\}\}/g, domain)
+      .replace(/\{\{port\}\}/g, port);
+  }
+
+  async checkFileExists(filePath) {
+    try {
+      await executeCommand('sudo', ['test', '-f', filePath], { silent: true });
+      return true;
+    } catch (error) {
+      return false;
     }
   }
 
   async verifyAndReload() {
     try {
-      await executeCommand("docker", [
-        "exec",
-        this.proxyContainer,
-        "nginx",
-        "-t",
-      ]);
-      await executeCommand("docker", [
-        "exec",
-        this.proxyContainer,
-        "nginx",
-        "-s",
-        "reload",
-      ]);
+      // Test nginx configuration
+      await executeCommand('sudo', ['nginx', '-t']);
+      // Reload nginx
+      await executeCommand('sudo', ['systemctl', 'reload', 'nginx']);
     } catch (error) {
       throw new Error(`Failed to verify/reload Nginx: ${error.message}`);
+    }
+  }
+
+  async collectNginxDiagnostics(error) {
+    try {
+      const errorLog = await executeCommand('sudo', ['tail', '-n', '50', '/var/log/nginx/error.log'])
+        .catch(() => ({ stdout: 'Could not read nginx error log' }));
+      
+      const journalLog = await executeCommand(
+        'sudo',
+        ['journalctl', '-xeu', 'nginx.service', '--no-pager', '-n', '50']
+      ).catch(() => ({ stdout: 'Could not read journal log' }));
+
+      logger.error('Nginx error log:', errorLog.stdout);
+      logger.error('Journal log:', journalLog.stdout);
+      logger.error('Original error:', error.message);
+    } catch (diagError) {
+      logger.error('Failed to collect Nginx diagnostics:', diagError);
+    }
+  }
+
+  async removeConfig(domain) {
+    try {
+      // Check if config exists before trying to remove
+      const configExists = await this.getExistingConfig(domain);
+      if (!configExists) {
+        logger.info(`No existing Nginx configuration found for ${domain}`);
+        return;
+      }
+
+      // Remove nginx config files
+      await executeCommand('sudo', ['rm', '-f', path.join(this.sitesAvailablePath, domain)]);
+      await executeCommand('sudo', ['rm', '-f', path.join(this.sitesEnabledPath, domain)]);
+      
+      // Reload nginx
+      await this.verifyAndReload();
+      
+      logger.info(`Removed Nginx configuration for ${domain}`);
+    } catch (error) {
+      logger.error(`Error removing Nginx config for ${domain}:`, error);
+      throw error;
     }
   }
 }
