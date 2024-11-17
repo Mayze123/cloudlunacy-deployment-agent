@@ -1,5 +1,3 @@
-// src/modules/deployApp.js
-
 const { executeCommand } = require('../utils/executor');
 const logger = require('../utils/logger');
 const fs = require('fs').promises;
@@ -9,7 +7,6 @@ const deployConfig = require('../deployConfig.json');
 const { ensureDeploymentPermissions } = require('../utils/permissionCheck');
 const apiClient = require('../utils/apiClient');
 const EnvironmentManager = require('../utils/environmentManager');
-const nginxManager = require('../utils/nginxManager');
 
 async function deployApp(payload, ws) {
     const {
@@ -58,13 +55,7 @@ async function deployApp(payload, ws) {
         // Cleanup existing containers and networks
         try {
             sendLogs(ws, deploymentId, `Cleaning up existing container: ${serviceName}`);
-            await executeCommand('docker', ['stop', serviceName]).catch(() => {});
-            await executeCommand('docker', ['rm', serviceName]).catch(() => {});
-            
-            // Remove existing networks
-            const networkName = 'app-network';
-            await executeCommand('docker', ['network', 'rm', networkName]).catch(() => {});
-            
+            await executeCommand('docker-compose', ['down']).catch(() => {});
             sendLogs(ws, deploymentId, 'Previous deployment cleaned up');
         } catch (error) {
             logger.warn('Cleanup warning:', error);
@@ -106,10 +97,6 @@ async function deployApp(payload, ws) {
         
         sendLogs(ws, deploymentId, 'Environment variables configured successfully');
 
-        // Verify environment files
-        const envFiles = await fs.readdir(deployDir);
-        sendLogs(ws, deploymentId, `Environment files in directory: ${envFiles.filter(f => f.startsWith('.env')).join(', ')}`);
-
         // Initialize template handler
         const templateHandler = new TemplateHandler(
             path.join('/opt/cloudlunacy/templates'),
@@ -136,28 +123,9 @@ async function deployApp(payload, ws) {
         await Promise.all([
             fs.writeFile('Dockerfile', files.dockerfile),
             fs.writeFile('docker-compose.yml', files.dockerCompose),
-            files.nginxConf ? fs.writeFile('nginx.conf', files.nginxConf) : Promise.resolve()
         ]);
 
-        // Create env loading script
-        const envLoaderContent = `
-        const dotenv = require('dotenv');
-        const path = require('path');
-        
-        // Load environment specific variables
-        const envFile = path.join(process.cwd(), '.env.${environment}');
-        const result = dotenv.config({ path: envFile });
-        
-        if (result.error) {
-            console.error('Error loading environment variables:', result.error);
-            process.exit(1);
-        }
-        
-        console.log('Environment variables loaded successfully');
-        `;
-        
-        await fs.writeFile('load-env.js', envLoaderContent);
-        sendLogs(ws, deploymentId, 'Environment loader script created');
+        sendLogs(ws, deploymentId, 'Deployment configuration generated successfully');
 
         // Validate docker-compose file
         try {
@@ -172,56 +140,12 @@ async function deployApp(payload, ws) {
 
         // Build and start containers
         sendLogs(ws, deploymentId, 'Building application...');
-        await executeCommand('docker-compose', ['build', '--no-cache']);
-        sendLogs(ws, deploymentId, 'Application built successfully');
-
-        sendLogs(ws, deploymentId, 'Starting application...');
-        await executeCommand('docker-compose', ['up', '-d', '--force-recreate']);
-        
-        // Log container status
-        const { stdout: containerLogs } = await executeCommand('docker', ['logs', serviceName]);
-        sendLogs(ws, deploymentId, 'Container logs:');
-        sendLogs(ws, deploymentId, containerLogs);
-
-        // Configure Nginx if domain is provided
-        if (domain) {
-            try {
-                sendLogs(ws, deploymentId, `Configuring domain: ${domain}`);
-                await nginxManager.configureNginx(domain, port, deployDir);
-                
-                // Execute curl to check domain accessibility
-                const maxRetries = 5;
-                let retryCount = 0;
-                let domainAccessible = false;
-
-                while (retryCount < maxRetries && !domainAccessible) {
-                    try {
-                        await executeCommand('curl', ['--max-time', '5', '-I', `http://${domain}`]);
-                        domainAccessible = true;
-                        sendLogs(ws, deploymentId, `Domain ${domain} is accessible`);
-                    } catch (error) {
-                        retryCount++;
-                        if (retryCount < maxRetries) {
-                            sendLogs(ws, deploymentId, `Waiting for domain to become accessible (attempt ${retryCount}/${maxRetries})...`);
-                            await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5 seconds between retries
-                        }
-                    }
-                }
-
-                if (!domainAccessible) {
-                    logger.warn(`Domain ${domain} is not yet accessible, but deployment will continue`);
-                    sendLogs(ws, deploymentId, `Warning: Domain ${domain} is not yet accessible. DNS propagation may take some time.`);
-                }
-            } catch (error) {
-                logger.error(`Failed to configure domain ${domain}:`, error);
-                sendLogs(ws, deploymentId, `Warning: Domain configuration encountered an error: ${error.message}`);
-                // Continue deployment even if domain configuration fails
-            }
-        }
+        await executeCommand('docker-compose', ['up', '-d', '--build']);
+        sendLogs(ws, deploymentId, 'Application built and started successfully');
 
         // Verify deployment
         sendLogs(ws, deploymentId, 'Verifying deployment...');
-        const health = await checkDeploymentHealth(port, serviceName, domain);
+        const health = await checkDeploymentHealth(serviceName, domain);
         
         if (!health.healthy) {
             throw new Error(`Deployment health check failed: ${health.message}`);
@@ -247,29 +171,7 @@ async function deployApp(payload, ws) {
 
         // Cleanup on failure
         try {
-            // Get container logs before cleanup if possible
-            try {
-                const { stdout: failureLogs } = await executeCommand('docker', ['logs', serviceName]);
-                logger.error('Container logs before cleanup:', failureLogs);
-            } catch (logError) {
-                logger.warn('Could not retrieve container logs:', logError);
-            }
-
-            // Remove Nginx config if it was created
-            if (domain) {
-                await nginxManager.removeConfig(domain);
-                sendLogs(ws, deploymentId, `Removed Nginx configuration for ${domain}`);
-            }
-
-            // Stop and remove containers
-            await executeCommand('docker', ['stop', serviceName]).catch(() => {});
-            await executeCommand('docker', ['rm', serviceName]).catch(() => {});
-            
-            // Remove network
-            const networkName = 'app-network';
-            await executeCommand('docker', ['network', 'rm', networkName]).catch(() => {});
-            
-            // Remove deployment directory
+            await executeCommand('docker-compose', ['down']).catch(() => {});
             await fs.rm(deployDir, { recursive: true, force: true });
         } catch (cleanupError) {
             logger.error('Cleanup failed:', cleanupError);
@@ -302,7 +204,7 @@ function sendLogs(ws, deploymentId, log) {
     }
 }
 
-async function checkDeploymentHealth(port, containerName, domain) {
+async function checkDeploymentHealth(serviceName, domain) {
     try {
         // Wait for container to start
         await new Promise(resolve => setTimeout(resolve, 10000));
@@ -312,79 +214,29 @@ async function checkDeploymentHealth(port, containerName, domain) {
             'inspect',
             '--format',
             '{{.State.Status}}',
-            containerName
+            serviceName
         ], { silent: true });
 
         if (!status || !status.includes('running')) {
-            // Get container logs for debugging
-            const { stdout: logs } = await executeCommand('docker', ['logs', containerName], { 
-                silent: true,
-                ignoreError: true 
-            });
-            
-            logger.error('Container logs:', logs);
             throw new Error('Container is not running');
         }
 
-        // Check port availability
-        logger.info(`Checking port ${port} availability...`);
-        const portCheck = await new Promise((resolve) => {
-            const net = require('net');
-            const socket = net.createConnection(port);
-            
-            const timeout = setTimeout(() => {
-                socket.destroy();
-                resolve(false);
-            }, 5000);
-            
-            socket.on('connect', () => {
-                clearTimeout(timeout);
-                socket.end();
-                resolve(true);
-            });
-            
-            socket.on('error', () => {
-                clearTimeout(timeout);
-                resolve(false);
-            });
-        });
-
-        if (!portCheck) {
-            throw new Error(`Port ${port} is not accessible`);
-        }
+        // Traefik should automatically route traffic based on labels
 
         // Check domain accessibility if provided
         if (domain) {
             logger.info(`Verifying domain configuration for ${domain}`);
-            
-            // Check nginx configuration
-            const nginxCheck = await executeCommand('sudo', ['nginx', '-t'], { silent: true })
-                .catch(error => ({ error }));
-                
-            if (nginxCheck.error) {
-                logger.warn('Nginx configuration test failed:', nginxCheck.error);
-            }
 
-            // Check if site is at least locally accessible via curl
+            // Check if site is accessible via curl
             const curlCheck = await executeCommand(
                 'curl',
-                ['--max-time', '5', '-I', `http://localhost:${port}`],
+                ['--max-time', '10', '-I', `http://${domain}`],
                 { silent: true }
-            ).catch(error => ({ error }));
+            );
 
-            if (curlCheck.error) {
-                logger.warn(`Local port ${port} is not accessible:`, curlCheck.error);
+            if (!curlCheck.stdout.includes('200 OK')) {
+                throw new Error(`Domain ${domain} is not accessible`);
             }
-        }
-
-        // Check container logs for errors
-        const { stdout: containerLogs } = await executeCommand('docker', ['logs', '--tail', '50', containerName], {
-            silent: true,
-            ignoreError: true
-        });
-
-        if (containerLogs && containerLogs.toLowerCase().includes('error')) {
-            logger.warn('Found potential errors in container logs:', containerLogs);
         }
 
         return { healthy: true };

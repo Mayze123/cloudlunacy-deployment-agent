@@ -1,9 +1,9 @@
 #!/bin/bash
 # ------------------------------------------------------------------------------
-# Installation Script for CloudLunacy Deployment Agent
-# Version: 1.5.2
+# Installation Script for CloudLunacy Deployment Agent with Traefik
+# Version: 2.0.0
 # Author: Mahamadou Taibou
-# Date: 2024-11-02
+# Date: 2024-11-17
 #
 # Description:
 # This script installs and configures the CloudLunacy Deployment Agent on a VPS.
@@ -11,7 +11,8 @@
 #   - Detects the operating system and version
 #   - Updates system packages
 #   - Installs necessary dependencies (Docker, Node.js, Git, jq)
-#   - Creates a dedicated user with a home directory and correct permissions
+#   - Sets up Traefik as a reverse proxy
+#   - Creates a dedicated user with correct permissions
 #   - Downloads the latest version of the Deployment Agent from GitHub
 #   - Installs Node.js dependencies
 #   - Configures environment variables
@@ -42,9 +43,9 @@ IFS=$'\n\t'
 display_info() {
     echo "-------------------------------------------------"
     echo "CloudLunacy Deployment Agent Installation Script"
-    echo "Version: 1.5.2"
+    echo "Version: 2.0.0"
     echo "Author: Mahamadou Taibou"
-    echo "Date: 2024-11-02"
+    echo "Date: 2024-11-17"
     echo "-------------------------------------------------"
 }
 
@@ -82,22 +83,6 @@ check_root() {
 detect_os() {
     OS_TYPE=$(grep -w "ID" /etc/os-release | cut -d "=" -f 2 | tr -d '"')
     OS_VERSION=$(grep -w "VERSION_ID" /etc/os-release | cut -d "=" -f 2 | tr -d '"')
-
-    # Normalize OS names
-    case "$OS_TYPE" in
-        manjaro | manjaro-arm)
-            OS_TYPE="arch"
-            OS_VERSION="rolling"
-            ;;
-        fedora-asahi-remix)
-            OS_TYPE="fedora"
-            ;;
-        pop | linuxmint | zorin)
-            OS_TYPE="ubuntu"
-            ;;
-        *)
-            ;;
-    esac
 }
 
 # Function to update system packages
@@ -107,21 +92,12 @@ update_system() {
         ubuntu | debian | raspbian)
             apt-get update -y && apt-get upgrade -y
             ;;
-        arch)
-            pacman -Syu --noconfirm
-            ;;
-        alpine)
-            apk update && apk upgrade
-            ;;
         centos | fedora | rhel | ol | rocky | almalinux | amzn)
             if command -v dnf >/dev/null 2>&1; then
                 dnf upgrade -y
             else
                 yum update -y
             fi
-            ;;
-        sles | opensuse-leap | opensuse-tumbleweed)
-            zypper refresh && zypper update -y
             ;;
         *)
             log_error "Unsupported OS: $OS_TYPE $OS_VERSION"
@@ -136,26 +112,14 @@ install_dependencies() {
     log "Installing dependencies (curl, wget, git, jq)..."
     case "$OS_TYPE" in
         ubuntu | debian | raspbian)
-            apt-get install -y curl wget git jq coreutils
-            ;;
-        arch)
-            pacman -S --noconfirm curl wget git jq coreutils
-            ;;
-        alpine)
-            apk add --no-cache curl wget git jq coreutils
+            apt-get install -y curl wget git jq
             ;;
         centos | fedora | rhel | ol | rocky | almalinux | amzn)
-            if [ "$OS_TYPE" = "amzn" ]; then
-                yum install -y curl wget git jq coreutils
+            if command -v dnf >/dev/null 2>&1; then
+                dnf install -y curl wget git jq
             else
-                if ! command -v dnf >/dev/null 2>&1; then
-                    yum install -y dnf
-                fi
-                dnf install -y curl wget git jq coreutils
+                yum install -y curl wget git jq
             fi
-            ;;
-        sles | opensuse-leap | opensuse-tumbleweed)
-            zypper install -y curl wget git jq coreutils
             ;;
         *)
             log_error "Unsupported OS: $OS_TYPE $OS_VERSION"
@@ -215,14 +179,14 @@ install_docker() {
     else
         log "Installing Docker Compose..."
         DOCKER_COMPOSE_VERSION="2.24.1"  # Update this version as needed
-        
+
         # Download and install docker-compose binary
         curl -L "https://github.com/docker/compose/releases/download/v${DOCKER_COMPOSE_VERSION}/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
         chmod +x /usr/local/bin/docker-compose
-        
+
         # Create symlink
         ln -sf /usr/local/bin/docker-compose /usr/bin/docker-compose
-        
+
         log "Docker Compose installed successfully."
     fi
 }
@@ -248,10 +212,6 @@ install_node() {
             curl -fsSL https://rpm.nodesource.com/setup_$NODE_VERSION | bash -
             yum install -y nodejs
             ;;
-        sles | opensuse-leap | opensuse-tumbleweed)
-            curl -fsSL https://rpm.nodesource.com/setup_$NODE_VERSION | bash -
-            zypper install -y nodejs
-            ;;
         *)
             log_error "Node.js installation not supported on this OS."
             exit 1
@@ -259,74 +219,6 @@ install_node() {
     esac
 
     log "Node.js installed successfully."
-}
-
-install_nginx() {
-    log "Checking Nginx installation..."
-    if command -v nginx >/dev/null 2>&1; then
-        log "Nginx is already installed."
-    else
-        log "Nginx not found. Installing Nginx..."
-
-        case "$OS_TYPE" in
-            ubuntu | debian | raspbian)
-                apt-get install -y nginx
-                ;;
-            centos | rhel | fedora | rocky | almalinux)
-                if command -v dnf >/dev/null 2>&1; then
-                    dnf install -y nginx
-                else
-                    yum install -y nginx
-                fi
-                ;;
-            *)
-                log_error "Nginx installation not supported on this OS."
-                exit 1
-                ;;
-        esac
-
-        systemctl enable nginx
-        systemctl start nginx
-        log "Nginx installed successfully."
-    fi
-
-    # Create nginx group if it doesn't exist
-    if ! getent group nginx >/dev/null; then
-        groupadd nginx
-        log "Created nginx group"
-    fi
-    # Add nginx user to necessary groups
-    # Set up Nginx directories and permissions
-    log "Setting up Nginx configuration directories..."
-    mkdir -p /etc/nginx/sites-available
-    mkdir -p /etc/nginx/sites-enabled
-        sed -i '/http {/a \    include /etc/nginx/sites-enabled/*;' /etc/nginx/nginx.conf
-    # Add nginx user to necessary groups
-    usermod -aG nginx cloudlunacy
-    # Add server_names_hash_bucket_size if not present
-    # Update nginx configuration to include sites-enabled
-    if ! grep -q "include /etc/nginx/sites-enabled/\*" /etc/nginx/nginx.conf; then
-        sed -i '/http {/a \    include /etc/nginx/sites-enabled/*;' /etc/nginx/nginx.conf
-    fi
-    # Set permissions
-    # Add server_names_hash_bucket_size if not present
-    if ! grep -q "server_names_hash_bucket_size" /etc/nginx/nginx.conf; then
-        sed -i '/http {/a \    server_names_hash_bucket_size 128;' /etc/nginx/nginx.conf
-    fi
-    
-    # Set permissions
-    chown -R cloudlunacy:nginx /etc/nginx/sites-available
-    chown -R cloudlunacy:nginx /etc/nginx/sites-enabled
-    chmod 775 /etc/nginx/sites-available
-    chmod 775 /etc/nginx/sites-enabled
-    
-    # Add cloudlunacy user to sudoers for specific nginx commands
- 
-    
-    # Test and reload nginx
-    nginx -t && systemctl reload nginx
-    log "Creating dedicated user and directories..."
-    log "Nginx setup completed."
 }
 
 # Function to create dedicated user and directories
@@ -348,15 +240,9 @@ setup_user_directories() {
     chown -R "$USERNAME":"$USERNAME" "$BASE_DIR"
     chmod -R 750 "$BASE_DIR"
 
-    # Create nginx configuration directories
-    mkdir -p "$BASE_DIR/nginx/sites-available"
-    mkdir -p "$BASE_DIR/nginx/sites-enabled"
-    chown -R "$USERNAME":"$USERNAME" "$BASE_DIR/nginx"
-    chmod -R 750 "$BASE_DIR/nginx"
-
     # Create subdirectories
-    mkdir -p "$BASE_DIR"/{logs,ssh,config,bin}
-    chown -R "$USERNAME":"$USERNAME" "$BASE_DIR"/{logs,ssh,config,bin}
+    mkdir -p "$BASE_DIR"/{logs,ssh,config,bin,deployments}
+    chown -R "$USERNAME":"$USERNAME" "$BASE_DIR"/{logs,ssh,config,bin,deployments}
 
     log "Directories created at $BASE_DIR."
 }
@@ -435,11 +321,11 @@ setup_ssh() {
 
     sudo -u "$USERNAME" chmod 600 "$SSH_DIR/id_ed25519"
     sudo -u "$USERNAME" touch "$SSH_DIR/config"
-    sudo -u "$USERNAME" bash -c 'cat <<EOF > /opt/cloudlunacy/.ssh/config
+    sudo -u "$USERNAME" bash -c 'cat <<EOF > '"$SSH_DIR"'/config
 Host github.com
     HostName github.com
     User git
-    IdentityFile /opt/cloudlunacy/.ssh/id_ed25519
+    IdentityFile '"$SSH_DIR"'/id_ed25519
     StrictHostKeyChecking no
 EOF'
 
@@ -447,92 +333,78 @@ EOF'
     log "SSH setup completed."
 }
 
-setup_nginx_templates() {
-    log "Setting up Nginx configuration templates..."
-    
-    TEMPLATES_DIR="$BASE_DIR/templates/nginx"
-    mkdir -p "$TEMPLATES_DIR"
-    
-    # Create a basic Nginx virtual host template
-    cat <<EOF > "$TEMPLATES_DIR/virtual-host.template"
-server {
-    listen 80;
-    server_name {{domain}};
-
-    location / {
-        proxy_pass http://127.0.0.1:{{port}};
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-    }
-
-    location /socket.io/ {
-        proxy_pass http://127.0.0.1:{{port}};
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-    }
-}
-EOF
-
-    # Set proper ownership and permissions
-    chown -R "$USERNAME":"$USERNAME" "$TEMPLATES_DIR"
-    chmod 750 "$TEMPLATES_DIR"
-    chmod 640 "$TEMPLATES_DIR/virtual-host.template"
-    
-    log "Nginx templates created successfully."
-}
-
-setup_nginx_permissions() {
-    log "Configuring Nginx sudo permissions..."
-    
-    # Create sudoers.d file for cloudlunacy nginx permissions
-    cat <<EOF > /etc/sudoers.d/cloudlunacy-nginx
-# Allow cloudlunacy user to manage nginx
-cloudlunacy ALL=(ALL) NOPASSWD: /usr/sbin/nginx
-cloudlunacy ALL=(ALL) NOPASSWD: /bin/systemctl reload nginx
-cloudlunacy ALL=(ALL) NOPASSWD: /bin/systemctl restart nginx
-cloudlunacy ALL=(ALL) NOPASSWD: /usr/bin/tee /etc/nginx/sites-available/*
-cloudlunacy ALL=(ALL) NOPASSWD: /usr/bin/tee /etc/nginx/sites-enabled/*
-cloudlunacy ALL=(ALL) NOPASSWD: /bin/ln -sf /etc/nginx/sites-available/* /etc/nginx/sites-enabled/*
-cloudlunacy ALL=(ALL) NOPASSWD: /bin/rm /etc/nginx/sites-available/*
-cloudlunacy ALL=(ALL) NOPASSWD: /bin/rm /etc/nginx/sites-enabled/*
-EOF
-
-    # Set proper permissions on the sudoers file
-    chmod 440 /etc/sudoers.d/cloudlunacy-nginx
-    
-    log "Nginx sudo permissions configured."
-}
-
+# Function to set up Docker permissions
 setup_docker_permissions() {
     log "Setting up Docker permissions..."
-    
+
     # Add cloudlunacy user to docker group
-    usermod -aG docker cloudlunacy
-    
-    # Create deployment directories with correct permissions
-    mkdir -p /opt/cloudlunacy/deployments
-    mkdir -p /tmp/cloudlunacy-deployments
-    
+    usermod -aG docker "$USERNAME"
+
     # Set permissions
-    chown -R cloudlunacy:docker /opt/cloudlunacy
-    chown cloudlunacy:docker /opt/cloudlunacy/deployments
-    chown cloudlunacy:docker /tmp/cloudlunacy-deployments
-    
-    chmod 775 /opt/cloudlunacy/deployments
-    chmod 775 /tmp/cloudlunacy-deployments
+    chown -R "$USERNAME":docker "$BASE_DIR"
+    chmod -R 775 "$BASE_DIR/deployments"
     chmod 666 /var/run/docker.sock
-    
+
     log "Docker permissions configured successfully."
+}
+
+# Function to set up Traefik
+setup_traefik() {
+    log "Setting up Traefik as a reverse proxy..."
+
+    TRAEFIK_DIR="/opt/traefik"
+    mkdir -p "$TRAEFIK_DIR"
+    chown "$USERNAME":"$USERNAME" "$TRAEFIK_DIR"
+
+    # Create Traefik configuration file
+    cat <<EOF > "$TRAEFIK_DIR/traefik.yml"
+entryPoints:
+  web:
+    address: ":80"
+
+providers:
+  docker:
+    endpoint: "unix:///var/run/docker.sock"
+    exposedByDefault: false
+
+log:
+  level: INFO
+EOF
+
+    chown "$USERNAME":"$USERNAME" "$TRAEFIK_DIR/traefik.yml"
+
+    # Create Docker Compose file for Traefik
+    cat <<EOF > "$TRAEFIK_DIR/docker-compose.yml"
+version: "3.8"
+services:
+  traefik:
+    image: traefik:v2.10
+    command:
+      - "--configFile=/traefik.yml"
+    ports:
+      - "80:80"
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+      - "./traefik.yml:/traefik.yml:ro"
+    restart: unless-stopped
+    networks:
+      - traefik-network
+networks:
+  traefik-network:
+    name: traefik-network
+    driver: bridge
+EOF
+
+    chown "$USERNAME":"$USERNAME" "$TRAEFIK_DIR/docker-compose.yml"
+
+    # Create the Docker network
+    docker network create traefik-network || true
+
+    # Start Traefik using Docker Compose
+    cd "$TRAEFIK_DIR"
+    sudo -u "$USERNAME" docker-compose up -d
+
+    log "Traefik set up and running."
 }
 
 # Function to set up systemd service
@@ -551,7 +423,7 @@ ExecStart=/usr/bin/node $BASE_DIR/agent.js
 WorkingDirectory=$BASE_DIR
 Restart=always
 RestartSec=5
-User=cloudlunacy
+User=$USERNAME
 Group=docker
 Environment=HOME=$BASE_DIR
 EnvironmentFile=$ENV_FILE
@@ -563,10 +435,7 @@ EOF
     systemctl daemon-reload
     systemctl enable cloudlunacy
     systemctl start cloudlunacy
-    
-    # Restart Docker to ensure group changes take effect
-    systemctl restart docker
-    
+
     log "CloudLunacy service set up and started."
 }
 
@@ -577,6 +446,14 @@ verify_installation() {
         log "CloudLunacy Deployment Agent is running successfully."
     else
         log_error "CloudLunacy Deployment Agent failed to start. Check the logs for details."
+        exit 1
+    fi
+
+    log "Verifying Traefik installation..."
+    if docker ps | grep -q "traefik"; then
+        log "Traefik is running successfully."
+    else
+        log_error "Traefik failed to start. Check the Docker logs for details."
         exit 1
     fi
 }
@@ -599,7 +476,7 @@ completion_message() {
         echo -e "Could not retrieve public IP address. Please replace 'your_server_ip' with your actual IP."
     fi
 
-    echo -e "Access it by visiting: http://$PUBLIC_IP:8000"
+    echo -e "Traefik is running and will route traffic to your deployed applications automatically."
     echo -e "Logs are located at: $BASE_DIR/logs/agent.log"
     echo -e "It's recommended to back up your environment file:"
     echo -e "cp $BASE_DIR/.env $BASE_DIR/.env.backup"
@@ -654,16 +531,14 @@ main() {
     update_system
     install_dependencies
     install_docker
-    install_nginx
     install_node
     setup_user_directories
     setup_docker_permissions
-    setup_nginx_permissions
-    setup_nginx_templates
     setup_ssh "$GITHUB_SSH_KEY"
     download_agent
     install_agent_dependencies
     configure_env
+    setup_traefik
     setup_service
     verify_installation
     display_ssh_instructions
