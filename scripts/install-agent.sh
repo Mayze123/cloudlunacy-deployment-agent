@@ -129,6 +129,19 @@ install_dependencies() {
     log "Dependencies installed."
 }
 
+stop_conflicting_containers() {
+    log "Checking for Docker containers using port 80..."
+    CONTAINER_ID=$(docker ps -q --filter "publish=80")
+    if [ -n "$CONTAINER_ID" ]; then
+        log "Stopping container using port 80 (ID: $CONTAINER_ID)..."
+        docker stop "$CONTAINER_ID"
+        docker rm "$CONTAINER_ID"
+        log "Container stopped and removed."
+    else
+        log "No Docker containers are using port 80."
+    fi
+}
+
 # Function to install Docker
 install_docker() {
     log "Checking Docker installation..."
@@ -539,6 +552,7 @@ main() {
     download_agent
     install_agent_dependencies
     configure_env
+    stop_conflicting_containers
     setup_traefik
     setup_service
     verify_installation
