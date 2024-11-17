@@ -290,6 +290,12 @@ install_nginx() {
         log "Nginx installed successfully."
     fi
 
+    # Create nginx group if it doesn't exist
+    if ! getent group nginx >/dev/null; then
+        groupadd nginx
+        log "Created nginx group"
+    fi
+
     # Set up Nginx directories and permissions
     log "Setting up Nginx configuration directories..."
     mkdir -p /etc/nginx/sites-available
