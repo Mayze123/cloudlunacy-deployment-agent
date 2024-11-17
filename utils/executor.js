@@ -24,16 +24,24 @@ function executeCommand(command, args = [], options = {}) {
     const {
         cwd = process.cwd(),
         ignoreError = false,
-        silent = false
+        silent = false,
+        env = { ...process.env }
     } = options;
+
+    // Append common paths if needed
+    env.PATH = env.PATH || '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin';
+    // Ensure standard directories are included
+    env.PATH += ':/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin';
 
     if (!silent) {
         logger.debug(`Executing command: ${command} ${args.join(' ')}`);
+        logger.debug(`Using PATH: ${env.PATH}`);
     }
 
     return new Promise((resolve, reject) => {
         const cmd = spawn(command, args, { 
             cwd,
+            env,
             stdio: ['inherit', 'pipe', 'pipe']
         });
 
