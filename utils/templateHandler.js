@@ -63,65 +63,50 @@ class TemplateHandler {
 
   async generateDeploymentFiles(appConfig) {
     logger.info('Starting file generation with config:', JSON.stringify(appConfig, null, 2));
-
+  
     const {
       appType,
       appName,
       environment,
-      port,
+      containerPort,
+      hostPort,
       envFile,
       buildConfig = {},
       domain
     } = appConfig;
-
+  
     const config = this.mergeDefaults(appType, buildConfig);
     logger.info('Merged config:', JSON.stringify(config, null, 2));
-
+  
     const files = {};
-    // Normalize service name to be consistent across all uses
-    const serviceName = `${appName}-${environment}`.toLowerCase().replace(/[^a-z0-9-]/g, '-');
-
-    // Generate docker-compose.yml with Traefik labels
-    const dockerComposeContent = `version: "3.8"
-services:
-  ${serviceName}:
-    container_name: ${serviceName}
-    build:
-      context: .
-      dockerfile: Dockerfile
-    environment:
-      - NODE_ENV=${environment}
-    env_file:
-      - ${envFile}
-    restart: unless-stopped
-    networks:
-      - traefik-network
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.${serviceName}.rule=Host(\`${domain}\`)"
-      - "traefik.http.services.${serviceName}.loadbalancer.server.port=${port}"
-
-networks:
-  traefik-network:
-    external: true`;
-
-    // Generate Dockerfile
-    const dockerfileContent = `FROM node:18-alpine
-WORKDIR /app
-COPY package*.json ./
-RUN npm ci --only=production
-COPY . .
-COPY ${envFile} .env
-ENV NODE_ENV=${environment}
-EXPOSE ${port}
-CMD ["npm", "start"]`;
-
-    files.dockerCompose = dockerComposeContent;
-    files.dockerfile = dockerfileContent;
-
-    logger.info('Generated docker-compose content:', dockerComposeContent);
-    logger.info('Generated dockerfile content:', dockerfileContent);
-
+    const sanitizedAppName = `${appName}-${environment}`.toLowerCase().replace(/[^a-z0-9-]/g, '-');
+  
+    // Prepare context for templates
+    const templateContext = {
+      appName,
+      sanitizedAppName,
+      environment,
+      containerPort,
+      hostPort,
+      envFile,
+      domain,
+      ...config
+    };
+  
+    // Load and render templates
+    const dockerComposeTemplateName = this.deployConfig[appType].dockerComposeTemplate;
+    const dockerfileTemplateName = this.deployConfig[appType].dockerfileTemplate;
+  
+    const dockerComposeTemplate = await this.loadTemplate(dockerComposeTemplateName);
+    const dockerfileTemplate = await this.loadTemplate(dockerfileTemplateName);
+  
+    files.dockerCompose = dockerComposeTemplate(templateContext);
+    files.dockerfile = dockerfileTemplate(templateContext);
+  
+    logger.info('Generated docker-compose content:', files.dockerCompose);
+    logger.info('Generated Dockerfile content:', files.dockerfile);
+  
+    // Return the generated files
     return files;
   }
 

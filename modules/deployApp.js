@@ -7,179 +7,185 @@ const deployConfig = require('../deployConfig.json');
 const { ensureDeploymentPermissions } = require('../utils/permissionCheck');
 const apiClient = require('../utils/apiClient');
 const EnvironmentManager = require('../utils/environmentManager');
+const portManager = require('../utils/portManager');
 
 async function deployApp(payload, ws) {
-    const {
-        deploymentId,
-        appType,
-        appName,
-        repositoryOwner,
-        repositoryName,
-        branch,
-        githubToken, 
-        environment,
-        port,
-        domain,
-        envVarsToken
-    } = payload;
+  const {
+      deploymentId,
+      appType,
+      appName,
+      repositoryOwner,
+      repositoryName,
+      branch,
+      githubToken, 
+      environment,
+      domain,
+      envVarsToken
+  } = payload;
 
-    // Create consistent container/service name
-    const serviceName = `${appName}-${environment}`.toLowerCase().replace(/[^a-z0-9-]/g, '-');
-    const deployDir = path.join('/opt/cloudlunacy/deployments', deploymentId);
-    const currentDir = process.cwd();
-    
-    logger.info(`Starting deployment ${deploymentId} for ${appType} app: ${appName}`);
-    
-    try {
-        // Check permissions before deployment
-        const permissionsOk = await ensureDeploymentPermissions();
-        if (!permissionsOk) {
-            throw new Error('Deployment failed: Permission check failed');
-        }
+  const serviceName = `${appName}-${environment}`.toLowerCase().replace(/[^a-z0-9-]/g, '-');
+  const deployDir = path.join('/opt/cloudlunacy/deployments', deploymentId);
+  const currentDir = process.cwd();
+  
+  logger.info(`Starting deployment ${deploymentId} for ${appType} app: ${appName}`);
+  
+  try {
+      // Check permissions before deployment
+      const permissionsOk = await ensureDeploymentPermissions();
+      if (!permissionsOk) {
+          throw new Error('Deployment failed: Permission check failed');
+      }
 
-        // Check for required tools
-        await executeCommand('which', ['docker']);
-        await executeCommand('which', ['docker-compose']);
-        
-        // Set up deployment directory
-        await fs.mkdir(deployDir, { recursive: true });
-        process.chdir(deployDir);
+      // Check for required tools
+      await executeCommand('which', ['docker']);
+      await executeCommand('which', ['docker-compose']);
+      
+      // Set up deployment directory
+      await fs.mkdir(deployDir, { recursive: true });
+      process.chdir(deployDir);
 
-        // Send initial status and logs
-        sendStatus(ws, {
-            deploymentId,
-            status: 'in_progress',
-            message: 'Starting deployment...'
-        });
+      // Send initial status and logs
+      sendStatus(ws, {
+          deploymentId,
+          status: 'in_progress',
+          message: 'Starting deployment...'
+      });
 
-        // Cleanup existing containers and networks
-        try {
-            sendLogs(ws, deploymentId, `Cleaning up existing container: ${serviceName}`);
-            await executeCommand('docker-compose', ['down']).catch(() => {});
-            sendLogs(ws, deploymentId, 'Previous deployment cleaned up');
-        } catch (error) {
-            logger.warn('Cleanup warning:', error);
-        }
+      // Initialize port manager and allocate ports
+      await portManager.initialize();
+      const { hostPort, containerPort } = await portManager.allocatePort(serviceName);
 
-        // Retrieve and set up environment variables
-        sendLogs(ws, deploymentId, 'Retrieving environment variables...');
-        let envVars = {};
-        let envFilePath;
-        try {
-            logger.info(`Fetching env vars for deployment ${deploymentId}`);
-            const { data } = await apiClient.post(`/api/deploy/env-vars/${deploymentId}`, {
-                token: envVarsToken
-            });
-            
-            if (!data || !data.variables) {
-                throw new Error('Invalid response format for environment variables');
-            }
-            
-            envVars = data.variables;
-            logger.info('Successfully retrieved environment variables');
-        } catch (error) {
-            logger.error('Environment variables setup failed:', error);
-            throw new Error(`Environment variables setup failed: ${error.message}`);
-        }
+      // Cleanup existing containers and networks
+      try {
+          sendLogs(ws, deploymentId, `Cleaning up existing container: ${serviceName}`);
+          await executeCommand('docker-compose', ['down']).catch(() => {});
+          sendLogs(ws, deploymentId, 'Previous deployment cleaned up');
+      } catch (error) {
+          logger.warn('Cleanup warning:', error);
+      }
 
-        // Clone repository
-        sendLogs(ws, deploymentId, 'Cloning repository...');
-        const repoUrl = `https://x-access-token:${githubToken}@github.com/${repositoryOwner}/${repositoryName}.git`;
-        await executeCommand('git', ['clone', '-b', branch, repoUrl, '.']);
-        sendLogs(ws, deploymentId, 'Repository cloned successfully');
+      // Retrieve and set up environment variables
+      sendLogs(ws, deploymentId, 'Retrieving environment variables...');
+      let envVars = {};
+      let envFilePath;
+      try {
+          logger.info(`Fetching env vars for deployment ${deploymentId}`);
+          const { data } = await apiClient.post(`/api/deploy/env-vars/${deploymentId}`, {
+              token: envVarsToken
+          });
+          
+          if (!data || !data.variables) {
+              throw new Error('Invalid response format for environment variables');
+          }
+          
+          envVars = data.variables;
+          logger.info('Successfully retrieved environment variables');
+      } catch (error) {
+          logger.error('Environment variables setup failed:', error);
+          throw new Error(`Environment variables setup failed: ${error.message}`);
+      }
 
-        // Initialize environment manager and write env files
-        const envManager = new EnvironmentManager(deployDir);
-        envFilePath = await envManager.writeEnvFile(envVars, environment);
-        
-        // Also create a regular .env file
-        await fs.copyFile(envFilePath, path.join(deployDir, '.env'));
-        
-        sendLogs(ws, deploymentId, 'Environment variables configured successfully');
+      // Clone repository
+      sendLogs(ws, deploymentId, 'Cloning repository...');
+      const repoUrl = `https://x-access-token:${githubToken}@github.com/${repositoryOwner}/${repositoryName}.git`;
+      await executeCommand('git', ['clone', '-b', branch, repoUrl, '.']);
+      sendLogs(ws, deploymentId, 'Repository cloned successfully');
 
-        // Initialize template handler
-        const templateHandler = new TemplateHandler(
-            path.join('/opt/cloudlunacy/templates'),
-            deployConfig
-        );
+      // Initialize environment manager and write env files
+      const envManager = new EnvironmentManager(deployDir);
+      envFilePath = await envManager.writeEnvFile(envVars, environment);
+      
+      // Also create a regular .env file
+      await fs.copyFile(envFilePath, path.join(deployDir, '.env'));
+      
+      sendLogs(ws, deploymentId, 'Environment variables configured successfully');
 
-        // Generate deployment files
-        sendLogs(ws, deploymentId, 'Generating deployment configuration...');
-        const files = await templateHandler.generateDeploymentFiles({
-            appType,
-            appName,
-            environment,
-            port,
-            envFile: path.basename(envFilePath),
-            buildConfig: {
-                nodeVersion: '18',
-                buildOutputDir: 'build',
-                cacheControl: 'public, max-age=31536000'
-            },
-            domain: domain || `${appName}-${environment}.yourdomain.com`
-        });
+      // Initialize template handler
+      const templateHandler = new TemplateHandler(
+          path.join('/opt/cloudlunacy/templates'),
+          deployConfig
+      );
 
-        // Write deployment files
-        await Promise.all([
-            fs.writeFile('Dockerfile', files.dockerfile),
-            fs.writeFile('docker-compose.yml', files.dockerCompose),
-        ]);
+      // Generate deployment files
+      sendLogs(ws, deploymentId, 'Generating deployment configuration...');
+      const files = await templateHandler.generateDeploymentFiles({
+          appType,
+          appName,
+          environment,
+          containerPort,
+          hostPort,
+          envFile: path.basename(envFilePath),
+          domain,
+          buildConfig: {
+              nodeVersion: '18',
+              buildOutputDir: 'build',
+              cacheControl: 'public, max-age=31536000'
+          }
+      });
 
-        sendLogs(ws, deploymentId, 'Deployment configuration generated successfully');
+      // Write deployment files
+      await Promise.all([
+          fs.writeFile('Dockerfile', files.dockerfile),
+          fs.writeFile('docker-compose.yml', files.dockerCompose),
+      ]);
 
-        // Validate docker-compose file
-        try {
-            sendLogs(ws, deploymentId, 'Validating deployment configuration...');
-            const { stdout: configOutput } = await executeCommand('docker-compose', ['config']);
-            sendLogs(ws, deploymentId, 'Docker Compose configuration:');
-            sendLogs(ws, deploymentId, configOutput);
-            sendLogs(ws, deploymentId, 'Deployment configuration validated');
-        } catch (error) {
-            throw new Error(`Invalid docker-compose configuration: ${error.message}`);
-        }
+      sendLogs(ws, deploymentId, 'Deployment configuration generated successfully');
 
-        // Build and start containers
-        sendLogs(ws, deploymentId, 'Building application...');
-        await executeCommand('docker-compose', ['up', '-d', '--build']);
-        sendLogs(ws, deploymentId, 'Application built and started successfully');
+      // Validate docker-compose file
+      try {
+          sendLogs(ws, deploymentId, 'Validating deployment configuration...');
+          const { stdout: configOutput } = await executeCommand('docker-compose', ['config']);
+          sendLogs(ws, deploymentId, 'Docker Compose configuration:');
+          sendLogs(ws, deploymentId, configOutput);
+          sendLogs(ws, deploymentId, 'Deployment configuration validated');
+      } catch (error) {
+          throw new Error(`Invalid docker-compose configuration: ${error.message}`);
+      }
 
-        // Verify deployment
-        sendLogs(ws, deploymentId, 'Verifying deployment...');
-        const health = await checkDeploymentHealth(serviceName, domain);
-        
-        if (!health.healthy) {
-            throw new Error(`Deployment health check failed: ${health.message}`);
-        }
+      // Build and start containers
+      sendLogs(ws, deploymentId, 'Building application...');
+      await executeCommand('docker-compose', ['up', '-d', '--build']);
+      sendLogs(ws, deploymentId, 'Application built and started successfully');
 
-        // Send success status
-        sendStatus(ws, {
-            deploymentId,
-            status: 'success',
-            message: 'Deployment completed successfully',
-            domain
-        });
+      // Verify deployment
+      sendLogs(ws, deploymentId, 'Verifying deployment...');
+      const health = await checkDeploymentHealth(serviceName, domain);
+      
+      if (!health.healthy) {
+          throw new Error(`Deployment health check failed: ${health.message}`);
+      }
 
-    } catch (error) {
-        logger.error(`Deployment ${deploymentId} failed:`, error);
-        
-        // Send detailed error message
-        sendStatus(ws, {
-            deploymentId,
-            status: 'failed',
-            message: error.message || 'Deployment failed'
-        });
+      // Send success status
+      sendStatus(ws, {
+          deploymentId,
+          status: 'success',
+          message: 'Deployment completed successfully',
+          domain
+      });
 
-        // Cleanup on failure
-        try {
-            await executeCommand('docker-compose', ['down']).catch(() => {});
-            await fs.rm(deployDir, { recursive: true, force: true });
-        } catch (cleanupError) {
-            logger.error('Cleanup failed:', cleanupError);
-        }
-    } finally {
-        // Always return to original directory
-        process.chdir(currentDir);
-    }
+  } catch (error) {
+      logger.error(`Deployment ${deploymentId} failed:`, error);
+      
+      // Send detailed error message
+      sendStatus(ws, {
+          deploymentId,
+          status: 'failed',
+          message: error.message || 'Deployment failed'
+      });
+
+      // Cleanup on failure
+      try {
+          await executeCommand('docker-compose', ['down']).catch(() => {});
+          await fs.rm(deployDir, { recursive: true, force: true });
+          // Release allocated port
+          await portManager.releasePort(serviceName);
+      } catch (cleanupError) {
+          logger.error('Cleanup failed:', cleanupError);
+      }
+  } finally {
+      // Always return to original directory
+      process.chdir(currentDir);
+  }
 }
 
 function sendStatus(ws, data) {

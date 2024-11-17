@@ -15,32 +15,18 @@ services:
       - .env.{{environment}}
     restart: unless-stopped
     networks:
-      - app-network
-      - traefik-proxy
+      - traefik-network
     labels:
       - "traefik.enable=true"
-      - "traefik.docker.network=traefik-proxy"
-      - "traefik.http.routers.{{sanitizedAppName}}.rule=Host(`{{traefik.domain}}`)"
-      - "traefik.http.routers.{{sanitizedAppName}}.entrypoints=websecure"
-      - "traefik.http.routers.{{sanitizedAppName}}.tls=true"
-      - "traefik.http.routers.{{sanitizedAppName}}.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.{{sanitizedAppName}}.rule=Host(`{{domain}}`)"
       - "traefik.http.services.{{sanitizedAppName}}.loadbalancer.server.port={{containerPort}}"
-      - "traefik.http.routers.{{sanitizedAppName}}.middlewares={{traefik.middlewares}}"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:{{containerPort}}/health"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 15s
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
 
 networks:
-  app-network:
-    name: {{sanitizedAppName}}-network
-    driver: bridge
-  traefik-proxy:
+  traefik-network:
     external: true

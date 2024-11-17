@@ -25,25 +25,25 @@ RUN {{{buildCommand}}}
 {{/if}}
 
 # Set up health check endpoint and error handling
-RUN echo 'const http = require("http"); \n\
-const server = http.createServer((req, res) => { \n\
-  if (req.url === "/health") { \n\
-    res.writeHead(200); \n\
-    res.end("OK"); \n\
-  } \n\
-}); \n\
-server.listen({{containerPort}});' > healthcheck.js
+RUN echo 'const http = require("http"); \
+const server = http.createServer((req, res) => { \
+  if (req.url === "/health") { \
+    res.writeHead(200); \
+    res.end("OK"); \
+  } \
+}); \
+server.listen(process.env.PORT || {{containerPort}});' > healthcheck.js
 
 # Create error handling script
-RUN echo 'require("dotenv").config(); \n\
-process.on("uncaughtException", (error) => { \n\
-  console.error("Uncaught Exception:", error); \n\
-  process.exit(1); \n\
-}); \n\
-process.on("unhandledRejection", (reason, promise) => { \n\
-  console.error("Unhandled Rejection at:", promise, "reason:", reason); \n\
-  process.exit(1); \n\
-}); \n\
+RUN echo 'require("dotenv").config(); \
+process.on("uncaughtException", (error) => { \
+  console.error("Uncaught Exception:", error); \
+  process.exit(1); \
+}); \
+process.on("unhandledRejection", (reason, promise) => { \
+  console.error("Unhandled Rejection at:", promise, "reason:", reason); \
+  process.exit(1); \
+}); \
 require("./healthcheck");' > load-env.js
 
 # Create non-root user
@@ -57,7 +57,7 @@ USER appuser
 EXPOSE {{containerPort}}
 
 {{#if startCommand}}
-CMD ["sh", "-c", "{{{startCommand}}}"]
+CMD ["sh", "-c", "{{{startCommand}}}"] 
 {{else}}
 CMD ["sh", "-c", "node load-env.js & npm start"]
 {{/if}}
