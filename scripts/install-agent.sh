@@ -391,14 +391,15 @@ services:
       - traefik-network
 networks:
   traefik-network:
-    name: traefik-network
-    driver: bridge
+    external: true
 EOF
 
     chown "$USERNAME":"$USERNAME" "$TRAEFIK_DIR/docker-compose.yml"
 
-    # Create the Docker network
-    docker network create traefik-network || true
+    # Create the Docker network if it doesn't exist
+    if ! docker network ls | grep -q "traefik-network"; then
+        docker network create traefik-network
+    fi
 
     # Start Traefik using Docker Compose
     cd "$TRAEFIK_DIR"
