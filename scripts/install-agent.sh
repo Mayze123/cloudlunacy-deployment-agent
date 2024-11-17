@@ -109,16 +109,16 @@ update_system() {
 
 # Function to install dependencies
 install_dependencies() {
-    log "Installing dependencies (curl, wget, git, jq)..."
+    log "Installing dependencies (curl, wget, git, jq, lsof)..."
     case "$OS_TYPE" in
         ubuntu | debian | raspbian)
-            apt-get install -y curl wget git jq
+            apt-get install -y curl wget git jq lsof
             ;;
         centos | fedora | rhel | ol | rocky | almalinux | amzn)
             if command -v dnf >/dev/null 2>&1; then
-                dnf install -y curl wget git jq
+                dnf install -y curl wget git jq lsof
             else
-                yum install -y curl wget git jq
+                yum install -y curl wget git jq lsof
             fi
             ;;
         *)
