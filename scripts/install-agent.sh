@@ -295,20 +295,20 @@ install_nginx() {
         groupadd nginx
         log "Created nginx group"
     fi
-
+    # Add nginx user to necessary groups
     # Set up Nginx directories and permissions
     log "Setting up Nginx configuration directories..."
     mkdir -p /etc/nginx/sites-available
     mkdir -p /etc/nginx/sites-enabled
-    
+        sed -i '/http {/a \    include /etc/nginx/sites-enabled/*;' /etc/nginx/nginx.conf
     # Add nginx user to necessary groups
     usermod -aG nginx cloudlunacy
-    
+    # Add server_names_hash_bucket_size if not present
     # Update nginx configuration to include sites-enabled
     if ! grep -q "include /etc/nginx/sites-enabled/\*" /etc/nginx/nginx.conf; then
         sed -i '/http {/a \    include /etc/nginx/sites-enabled/*;' /etc/nginx/nginx.conf
     fi
-    
+    # Set permissions
     # Add server_names_hash_bucket_size if not present
     if ! grep -q "server_names_hash_bucket_size" /etc/nginx/nginx.conf; then
         sed -i '/http {/a \    server_names_hash_bucket_size 128;' /etc/nginx/nginx.conf
@@ -321,11 +321,11 @@ install_nginx() {
     chmod 775 /etc/nginx/sites-enabled
     
     # Add cloudlunacy user to sudoers for specific nginx commands
-    echo "cloudlunacy ALL=(ALL) NOPASSWD: /usr/sbin/nginx, /bin/systemctl reload nginx, /bin/systemctl restart nginx" | EDITOR="tee -a" visudo
+ 
     
     # Test and reload nginx
     nginx -t && systemctl reload nginx
-    
+    log "Creating dedicated user and directories..."
     log "Nginx setup completed."
 }
 
