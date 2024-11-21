@@ -41,7 +41,7 @@ async function deployApp(payload, ws) {
       await executeCommand('which', ['docker-compose']);
       
       // Set up deployment directory
-      await fs.mkdir(deployDir, { recursive: true });
+      await fs.promises.mkdir(deployDir, { recursive: true });
       process.chdir(deployDir);
 
       // Send initial status and logs
@@ -100,7 +100,7 @@ async function deployApp(payload, ws) {
       envFilePath = await envManager.writeEnvFile(envVars, environment);
       
       // Also create a regular .env file
-      await fs.copyFile(envFilePath, path.join(deployDir, '.env'));
+      await fs.promises.copyFile(envFilePath, path.join(deployDir, '.env'));
       
       sendLogs(ws, deploymentId, 'Environment variables configured successfully');
 
@@ -129,8 +129,8 @@ async function deployApp(payload, ws) {
 
       // Write deployment files
       await Promise.all([
-          fs.writeFile('Dockerfile', files.dockerfile),
-          fs.writeFile('docker-compose.yml', files.dockerCompose),
+          fs.promises.writeFile('Dockerfile', files.dockerfile),
+          fs.promises.writeFile('docker-compose.yml', files.dockerCompose),
       ]);
 
       sendLogs(ws, deploymentId, 'Deployment configuration generated successfully');
@@ -180,7 +180,7 @@ async function deployApp(payload, ws) {
       // Cleanup on failure
       try {
           await executeCommand('docker-compose', ['down']).catch(() => {});
-          await fs.rm(deployDir, { recursive: true, force: true });
+          await fs.promises.rm(deployDir, { recursive: true, force: true });
           // Release allocated port
           await portManager.releasePort(serviceName);
       } catch (cleanupError) {
