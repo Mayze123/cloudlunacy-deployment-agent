@@ -56,12 +56,16 @@ async function deployApp(payload, ws) {
       const { hostPort, containerPort } = await portManager.allocatePort(serviceName);
 
       // Cleanup existing containers and networks
-      try {
+      if (fs.existsSync('docker-compose.yml')) {
+        try {
           sendLogs(ws, deploymentId, `Cleaning up existing container: ${serviceName}`);
-          await executeCommand('docker-compose', ['down']).catch(() => {});
+          await executeCommand('docker-compose', ['down']);
           sendLogs(ws, deploymentId, 'Previous deployment cleaned up');
-      } catch (error) {
+        } catch (error) {
           logger.warn('Cleanup warning:', error);
+        }
+      } else {
+        logger.info('No existing docker-compose.yml found; skipping cleanup.');
       }
 
       // Retrieve and set up environment variables

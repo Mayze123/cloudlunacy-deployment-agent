@@ -391,6 +391,7 @@ EOF
 version: "3.8"
 services:
   traefik:
+    container_name: traefik
     image: traefik:v2.10
     command:
       - "--configFile=/traefik.yml"
@@ -440,6 +441,7 @@ RestartSec=5
 User=$USERNAME
 Group=docker
 Environment=HOME=$BASE_DIR
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
 EnvironmentFile=$ENV_FILE
 
 [Install]
