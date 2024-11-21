@@ -216,8 +216,8 @@ function sendLogs(ws, deploymentId, log) {
 
 async function checkDeploymentHealth(serviceName, domain) {
     try {
-        // Wait for container to start
-        await new Promise(resolve => setTimeout(resolve, 10000));
+        // Increase initial wait time to 30 seconds
+        await new Promise(resolve => setTimeout(resolve, 30000));
 
         // Check container status
         const { stdout: status } = await executeCommand('docker', [
@@ -231,22 +231,64 @@ async function checkDeploymentHealth(serviceName, domain) {
             throw new Error('Container is not running');
         }
 
-        // Traefik should automatically route traffic based on labels
-
-        // Check domain accessibility if provided
+        // If domain is provided, perform progressive health checks
         if (domain) {
             logger.info(`Verifying domain configuration for ${domain}`);
-
-            // Check if site is accessible via curl
-            const curlCheck = await executeCommand(
-                'curl',
-                ['--max-time', '10', '-I', `http://${domain}`],
-                { silent: true }
-            );
-
-            if (!curlCheck.stdout.includes('200 OK')) {
-                throw new Error(`Domain ${domain} is not accessible`);
+            
+            // Check internal container health first
+            const containerHealth = await executeCommand('docker', [
+                'inspect',
+                '--format',
+                '{{.State.Health.Status}}',
+                serviceName
+            ], { silent: true });
+            
+            if (containerHealth.stdout && !containerHealth.stdout.includes('healthy')) {
+                throw new Error(`Container health check failed: ${containerHealth.stdout}`);
             }
+
+            // Check Traefik router configuration
+            const traefikCheck = await executeCommand('docker', [
+                'exec',
+                'traefik',
+                'traefik',
+                'healthcheck'
+            ], { silent: true });
+
+            if (!traefikCheck.stdout.includes('ok')) {
+                throw new Error('Traefik router configuration check failed');
+            }
+
+            // Progressive domain checks with retries
+            const maxRetries = 5;
+            for (let i = 0; i < maxRetries; i++) {
+                try {
+                    // Try both container port and domain
+                    const containerCheck = await executeCommand(
+                        'curl',
+                        ['--max-time', '5', '-I', `http://localhost:${process.env.PORT || 8080}`],
+                        { silent: true }
+                    );
+
+                    const domainCheck = await executeCommand(
+                        'curl',
+                        ['--max-time', '5', '-I', `http://${domain}`, '-H', `Host: ${domain}`],
+                        { silent: true }
+                    );
+
+                    if (containerCheck.stdout.includes('200 OK') && domainCheck.stdout.includes('200 OK')) {
+                        logger.info('Health checks passed successfully');
+                        return { healthy: true };
+                    }
+                } catch (error) {
+                    logger.warn(`Health check attempt ${i + 1}/${maxRetries} failed:`, error.message);
+                }
+                
+                // Wait before next retry
+                await new Promise(resolve => setTimeout(resolve, 10000));
+            }
+            
+            throw new Error(`Domain ${domain} is not accessible after ${maxRetries} attempts`);
         }
 
         return { healthy: true };
@@ -258,5 +300,6 @@ async function checkDeploymentHealth(serviceName, domain) {
         };
     }
 }
+
 
 module.exports = deployApp;
