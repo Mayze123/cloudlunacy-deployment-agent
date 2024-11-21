@@ -216,79 +216,135 @@ function sendLogs(ws, deploymentId, log) {
 
 async function checkDeploymentHealth(serviceName, domain) {
     try {
+        logger.info(`Starting health check for service: ${serviceName}`);
+        
         // Increase initial wait time to 30 seconds
         await new Promise(resolve => setTimeout(resolve, 30000));
 
-        // Check container status
-        const { stdout: status } = await executeCommand('docker', [
-            'inspect',
-            '--format',
-            '{{.State.Status}}',
-            serviceName
-        ], { silent: true });
+        // Get container logs first for debugging
+        try {
+            const { stdout: containerLogs } = await executeCommand('docker', [
+                'logs',
+                '--tail', '50',
+                serviceName
+            ], { silent: true });
+            
+            logger.info('Recent container logs:', containerLogs);
+            
+            // Check for common error patterns in logs
+            if (containerLogs.includes('Error:') || containerLogs.includes('error:')) {
+                throw new Error(`Container startup errors detected in logs: ${containerLogs}`);
+            }
+        } catch (logError) {
+            logger.warn('Failed to fetch container logs:', logError);
+        }
 
-        if (!status || !status.includes('running')) {
-            throw new Error('Container is not running');
+        // Check container status with detailed output
+        try {
+            const { stdout: inspectOutput } = await executeCommand('docker', [
+                'inspect',
+                serviceName
+            ], { silent: true });
+            
+            const containerInfo = JSON.parse(inspectOutput)[0];
+            logger.info('Container state:', containerInfo.State);
+            
+            if (!containerInfo.State.Running) {
+                throw new Error(`Container is not running. State: ${JSON.stringify(containerInfo.State)}`);
+            }
+        } catch (inspectError) {
+            throw new Error(`Failed to inspect container: ${inspectError.message}`);
         }
 
         // If domain is provided, perform progressive health checks
         if (domain) {
             logger.info(`Verifying domain configuration for ${domain}`);
             
-            // Check internal container health first
-            const containerHealth = await executeCommand('docker', [
-                'inspect',
-                '--format',
-                '{{.State.Health.Status}}',
-                serviceName
-            ], { silent: true });
-            
-            if (containerHealth.stdout && !containerHealth.stdout.includes('healthy')) {
-                throw new Error(`Container health check failed: ${containerHealth.stdout}`);
+            // Check if Traefik is running first
+            try {
+                const { stdout: traefikStatus } = await executeCommand('docker', [
+                    'inspect',
+                    '--format',
+                    '{{.State.Status}}',
+                    'traefik'
+                ], { silent: true });
+
+                if (!traefikStatus.includes('running')) {
+                    throw new Error('Traefik container is not running');
+                }
+                
+                logger.info('Traefik is running');
+            } catch (traefikError) {
+                throw new Error(`Traefik check failed: ${traefikError.message}`);
             }
 
-            // Check Traefik router configuration
-            const traefikCheck = await executeCommand('docker', [
-                'exec',
-                'traefik',
-                'traefik',
-                'healthcheck'
-            ], { silent: true });
-
-            if (!traefikCheck.stdout.includes('ok')) {
-                throw new Error('Traefik router configuration check failed');
+            // Check internal container health
+            try {
+                const { stdout: networkList } = await executeCommand('docker', [
+                    'network',
+                    'inspect',
+                    'traefik-network'
+                ], { silent: true });
+                
+                logger.info('Network configuration:', networkList);
+            } catch (networkError) {
+                logger.warn('Failed to inspect network:', networkError);
             }
 
             // Progressive domain checks with retries
             const maxRetries = 5;
             for (let i = 0; i < maxRetries; i++) {
-                try {
-                    // Try both container port and domain
-                    const containerCheck = await executeCommand(
-                        'curl',
-                        ['--max-time', '5', '-I', `http://localhost:${process.env.PORT || 8080}`],
-                        { silent: true }
-                    );
-
-                    const domainCheck = await executeCommand(
-                        'curl',
-                        ['--max-time', '5', '-I', `http://${domain}`, '-H', `Host: ${domain}`],
-                        { silent: true }
-                    );
-
-                    if (containerCheck.stdout.includes('200 OK') && domainCheck.stdout.includes('200 OK')) {
-                        logger.info('Health checks passed successfully');
-                        return { healthy: true };
-                    }
-                } catch (error) {
-                    logger.warn(`Health check attempt ${i + 1}/${maxRetries} failed:`, error.message);
-                }
+                logger.info(`Starting health check attempt ${i + 1}/${maxRetries}`);
                 
-                // Wait before next retry
-                await new Promise(resolve => setTimeout(resolve, 10000));
+                try {
+                    // Check container's internal health endpoint
+                    const { stdout: containerHealth, stderr: containerHealthErr } = await executeCommand('docker', [
+                        'exec',
+                        serviceName,
+                        'curl',
+                        '-v',  // verbose output
+                        '--max-time',
+                        '5',
+                        'http://localhost:8080/health'
+                    ], { silent: true });
+                    
+                    logger.info(`Container health check response: ${containerHealth}`);
+                    if (containerHealthErr) {
+                        logger.warn('Container health check stderr:', containerHealthErr);
+                    }
+
+                    // Check domain through Traefik
+                    const { stdout: domainHealth, stderr: domainHealthErr } = await executeCommand('curl', [
+                        '-v',  // verbose output
+                        '--max-time',
+                        '5',
+                        '-H',
+                        `Host: ${domain}`,
+                        'http://localhost:80'
+                    ], { silent: true });
+                    
+                    logger.info(`Domain health check response: ${domainHealth}`);
+                    if (domainHealthErr) {
+                        logger.warn('Domain health check stderr:', domainHealthErr);
+                    }
+
+                    // If we get here without throwing, both checks passed
+                    logger.info('All health checks passed successfully');
+                    return { healthy: true };
+                    
+                } catch (checkError) {
+                    logger.warn(`Health check attempt ${i + 1} failed:`, checkError.message);
+                    
+                    // On last retry, collect debugging information
+                    if (i === maxRetries - 1) {
+                        const debugInfo = await collectDebugInfo(serviceName, domain);
+                        throw new Error(`Health checks failed after ${maxRetries} attempts. Debug info: ${JSON.stringify(debugInfo)}`);
+                    }
+                    
+                    // Wait before next retry
+                    await new Promise(resolve => setTimeout(resolve, 10000));
+                }
             }
-            
-            throw new Error(`Domain ${domain} is not accessible after ${maxRetries} attempts`);
         }
 
         return { healthy: true };
@@ -300,6 +356,66 @@ async function checkDeploymentHealth(serviceName, domain) {
         };
     }
 }
+
+async function collectDebugInfo(serviceName, domain) {
+    const debugInfo = {
+        containerState: null,
+        containerLogs: null,
+        traefikState: null,
+        networkInfo: null,
+        portBindings: null
+    };
+
+    try {
+        // Get container state
+        const { stdout: containerState } = await executeCommand('docker', [
+            'inspect',
+            '--format',
+            '{{json .State}}',
+            serviceName
+        ], { silent: true });
+        debugInfo.containerState = JSON.parse(containerState);
+
+        // Get container logs
+        const { stdout: containerLogs } = await executeCommand('docker', [
+            'logs',
+            '--tail',
+            '50',
+            serviceName
+        ], { silent: true });
+        debugInfo.containerLogs = containerLogs;
+
+        // Get Traefik state
+        const { stdout: traefikState } = await executeCommand('docker', [
+            'inspect',
+            '--format',
+            '{{json .State}}',
+            'traefik'
+        ], { silent: true });
+        debugInfo.traefikState = JSON.parse(traefikState);
+
+        // Get network information
+        const { stdout: networkInfo } = await executeCommand('docker', [
+            'network',
+            'inspect',
+            'traefik-network'
+        ], { silent: true });
+        debugInfo.networkInfo = JSON.parse(networkInfo);
+
+        // Get port bindings
+        const { stdout: portBindings } = await executeCommand('docker', [
+            'port',
+            serviceName
+        ], { silent: true });
+        debugInfo.portBindings = portBindings;
+
+    } catch (error) {
+        logger.warn('Error collecting debug info:', error);
+    }
+
+    return debugInfo;
+}
+
 
 
 module.exports = deployApp;
