@@ -1,25 +1,8 @@
 // utils/executor.js
 
-/**
- * Executor Utility
- * Description:
- * Provides a function to execute shell commands with proper error handling.
- * Ensures consistent execution of commands across different modules.
- */
-
 const { spawn } = require('child_process');
 const logger = require('./logger');
 
-/**
- * Executes a shell command asynchronously.
- * @param {String} command - The command to execute
- * @param {Array} args - The list of string arguments
- * @param {Object} options - Command execution options
- * @param {String} options.cwd - Working directory
- * @param {Boolean} options.ignoreError - Whether to ignore command errors
- * @param {Boolean} options.silent - Whether to suppress logging
- * @returns {Promise} - Resolves with command output object
- */
 function executeCommand(command, args = [], options = {}) {
     const {
         cwd = process.cwd(),
@@ -28,10 +11,11 @@ function executeCommand(command, args = [], options = {}) {
         env = { ...process.env }
     } = options;
 
-    // Append common paths if needed
-    env.PATH = env.PATH || '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin';
-    // Ensure standard directories are included
-    env.PATH += ':/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin';
+    // Ensure that env.PATH includes standard directories without duplicates
+    const standardPaths = ['/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'];
+    const currentPaths = (env.PATH || '').split(':');
+    const allPaths = new Set([...currentPaths, ...standardPaths]);
+    env.PATH = Array.from(allPaths).filter(Boolean).join(':');
 
     if (!silent) {
         logger.debug(`Executing command: ${command} ${args.join(' ')}`);
@@ -39,7 +23,7 @@ function executeCommand(command, args = [], options = {}) {
     }
 
     return new Promise((resolve, reject) => {
-        const cmd = spawn(command, args, { 
+        const cmd = spawn(command, args, {
             cwd,
             env,
             stdio: ['inherit', 'pipe', 'pipe']
@@ -96,19 +80,12 @@ function executeCommand(command, args = [], options = {}) {
     });
 }
 
-/**
- * Executes a command and returns only the stdout if successful
- * @param {String} command - The command to execute
- * @param {Array} args - The list of string arguments
- * @param {Object} options - Command execution options
- * @returns {Promise<String>} - Resolves with stdout string
- */
 async function getCommandOutput(command, args = [], options = {}) {
     const result = await executeCommand(command, args, { ...options, silent: true });
     return result.stdout;
 }
 
-module.exports = { 
+module.exports = {
     executeCommand,
     getCommandOutput
 };
