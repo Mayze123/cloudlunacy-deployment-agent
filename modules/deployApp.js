@@ -88,14 +88,40 @@ async function deployApp(payload, ws) {
         await fs.promises.mkdir(tempDir, { recursive: true });
         process.chdir(tempDir);
 
-        // Setup environment variables and clone repository
-        const [envVars] = await Promise.all([
-            setupEnvironment(deploymentId, envVarsToken, environment),
-            executeCommand('git', ['clone', '-b', branch, 
-                `https://x-access-token:${githubToken}@github.com/${repositoryOwner}/${repositoryName}.git`,
-                '.'
-            ])
-        ]);
+       // Setup environment variables
+       sendLogs(ws, deploymentId, 'Setting up environment...');
+       let envVars, envFilePath;
+       try {
+           const { data } = await apiClient.post(`/api/deploy/env-vars/${deploymentId}`, {
+               token: envVarsToken
+           });
+           
+           if (!data || !data.variables) {
+               throw new Error('Invalid response format for environment variables');
+           }
+           
+           envVars = data.variables;
+           logger.info('Successfully retrieved environment variables');
+
+           // Initialize environment manager and write env files
+           const envManager = new EnvironmentManager(tempDir); // Note: using tempDir instead of deployDir
+           envFilePath = await envManager.writeEnvFile(envVars, environment);
+           
+           // Copy the env file to .env as well (for compatibility)
+           await fs.promises.copyFile(envFilePath, path.join(tempDir, '.env'));
+           
+           logger.info(`Environment files written successfully for ${environment}`);
+       } catch (error) {
+           throw new Error(`Environment setup failed: ${error.message}`);
+       }
+
+           // Clone repository (after environment setup)
+           sendLogs(ws, deploymentId, 'Cloning repository...');
+           await executeCommand('git', ['clone', '-b', branch, 
+               `https://x-access-token:${githubToken}@github.com/${repositoryOwner}/${repositoryName}.git`,
+               '.'
+           ]);
+   
 
         // Generate deployment files with unique temp name
         const tempContainerName = `${serviceName}-${deploymentId.substring(0, 8)}`;
@@ -106,11 +132,11 @@ async function deployApp(payload, ws) {
 
         const files = await templateHandler.generateDeploymentFiles({
             appType,
-            appName: tempContainerName, // Use temporary name for new container
+            appName: tempContainerName,
             environment,
             containerPort,
             hostPort,
-            envFile: '.env',
+            envFile: path.basename(envFilePath), 
             domain,
             buildConfig: {
                 nodeVersion: '18',
@@ -200,20 +226,6 @@ async function deployApp(payload, ws) {
     } finally {
         process.chdir(currentDir);
     }
-}
-
-async function setupEnvironment(deploymentId, envVarsToken, environment) {
-    const { data } = await apiClient.post(`/api/deploy/env-vars/${deploymentId}`, {
-        token: envVarsToken
-    });
-    
-    if (!data || !data.variables) {
-        throw new Error('Invalid response format for environment variables');
-    }
-    
-    return Object.entries(data.variables)
-        .map(([key, value]) => `${key}=${value}`)
-        .join('\n');
 }
 
 function sendStatus(ws, data) {
