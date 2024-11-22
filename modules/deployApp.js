@@ -267,14 +267,30 @@ async function deployApp(payload, ws) {
             throw new Error(`Health check failed: ${health.message}`);
         }
 
-        // Connect to traefik network using the correct container name
-        const { stdout: containerId } = await executeCommand('docker-compose', ['ps', '-q'], {
-            env: {
-                ...process.env,
-                COMPOSE_PROJECT_NAME: projectName
-            }
-        });
-        await executeCommand('docker', ['network', 'connect', 'traefik-network', containerId.trim()]);
+       // Get container ID
+const { stdout: containerId } = await executeCommand('docker-compose', ['ps', '-q'], {
+    env: {
+        ...process.env,
+        COMPOSE_PROJECT_NAME: projectName
+    }
+});
+
+// Check if already connected to network
+const { stdout: networkInspect } = await executeCommand('docker', [
+    'inspect',
+    '--format',
+    '{{json .NetworkSettings.Networks}}',
+    containerId.trim()
+]);
+
+const networks = JSON.parse(networkInspect);
+if (!networks['traefik-network']) {
+    // Only connect if not already connected
+    await executeCommand('docker', ['network', 'connect', 'traefik-network', containerId.trim()]);
+    logger.info('Connected container to traefik-network');
+} else {
+    logger.info('Container already connected to traefik-network');
+}
 
         // Send success status
         sendStatus(ws, {
