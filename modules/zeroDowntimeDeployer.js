@@ -236,15 +236,12 @@ class ZeroDowntimeDeployer {
             }
     
             // Add Traefik labels to the new container
-            await Promise.all([
-                executeCommand('docker', [
-                    'container', 
-                    'label', 
-                    newContainer.id,
-                    `traefik.enable=true`,
-                    `traefik.http.routers.${newContainer.name}.rule=Host(\`${domain}\`)`,
-                    `traefik.http.services.${newContainer.name}.loadbalancer.server.port=8080`
-                ])
+            await executeCommand('docker', [
+                'label', 
+                newContainer.id,
+                `traefik.enable=true`,
+                `traefik.http.routers.${newContainer.name}.rule=Host(\`${domain}\`)`,
+                `traefik.http.services.${newContainer.name}.loadbalancer.server.port=8080`
             ]);
     
             // Wait for traefik to detect the new container
@@ -279,7 +276,7 @@ class ZeroDowntimeDeployer {
             logger.error('Traffic switch failed:', error);
             throw new Error(`Traffic switch failed: ${error.message}`);
         }
-    }
+    }    
 
     async performRollback(oldContainer, newContainer, domain) {
         logger.info('Initiating rollback procedure');
@@ -355,7 +352,6 @@ class ZeroDowntimeDeployer {
     
                     // Update Traefik labels
                     await executeCommand('docker', [
-                        'container', 
                         'label', 
                         oldContainer.id,
                         `traefik.enable=true`,
@@ -513,6 +509,28 @@ class ZeroDowntimeDeployer {
         ws 
     }) {
         try {
+            // Check for existing container with same name
+            try {
+                const { stdout: existingContainers } = await executeCommand('docker', [
+                    'ps',
+                    '-a',
+                    '--filter',
+                    `name=${serviceName}`,
+                    '--format',
+                    '{{.ID}}'
+                ]);
+    
+                if (existingContainers) {
+                    // Remove existing containers with this name
+                    const containerIds = existingContainers.split('\n').filter(id => id);
+                    for (const id of containerIds) {
+                        await executeCommand('docker', ['rm', '-f', id]).catch(logger.warn);
+                    }
+                }
+            } catch (error) {
+                logger.warn(`Failed to clean up old containers: ${error.message}`);
+            }
+    
             if (!this.templateHandler) {
                 this.templateHandler = new TemplateHandler(
                     path.join('/opt/cloudlunacy/templates'),
@@ -554,7 +572,7 @@ class ZeroDowntimeDeployer {
                 }
             });
     
-            // Start container
+            // Start container with project name to avoid conflicts
             await executeCommand('docker-compose', ['up', '-d'], {
                 env: {
                     ...process.env,
@@ -572,9 +590,8 @@ class ZeroDowntimeDeployer {
                 throw new Error('Failed to get container ID after startup');
             }
     
-            // Add initial labels for Traefik
+            // Add initial labels using docker label command
             await executeCommand('docker', [
-                'container', 
                 'label', 
                 containerId.trim(),
                 `traefik.enable=true`,
@@ -587,7 +604,7 @@ class ZeroDowntimeDeployer {
             logger.error('Container build/start failed:', error);
             throw new Error(`Failed to build and start container: ${error.message}`);
         }
-    }    
+    }  
 
     async gracefulContainerRemoval(container) {
         try {
