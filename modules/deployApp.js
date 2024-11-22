@@ -26,10 +26,9 @@ async function deployApp(payload, ws) {
     const serviceName = `${appName}-${environment}`.toLowerCase().replace(/[^a-z0-9-]/g, '-');
     const deployDir = path.join('/opt/cloudlunacy/deployments', deploymentId);
     const currentDir = process.cwd();
-    const tempContainerName = `${serviceName}-${deploymentId.substring(0, 8)}`;
     
     logger.info(`Starting deployment ${deploymentId} for ${appType} app: ${appName}`);
-    logger.info(`Using container name: ${tempContainerName}`);
+    logger.info(`Using service name: ${serviceName}`);
     
     try {
         // Check permissions before deployment
@@ -60,7 +59,7 @@ async function deployApp(payload, ws) {
 
         // Clean up any existing containers
         try {
-            // Find all containers with similar names
+            // Find all containers with the service name
             const { stdout: existingContainers } = await executeCommand('docker', [
                 'ps',
                 '-a',
@@ -107,7 +106,7 @@ async function deployApp(payload, ws) {
             throw new Error(`Environment setup failed: ${error.message}`);
         }
 
-        // Generate deployment files
+        // Generate deployment files with consistent service naming
         sendLogs(ws, deploymentId, 'Generating deployment files...');
         const templateHandler = new TemplateHandler(
             path.join('/opt/cloudlunacy/templates'),
@@ -116,7 +115,7 @@ async function deployApp(payload, ws) {
 
         const files = await templateHandler.generateDeploymentFiles({
             appType,
-            appName: serviceName, // Use service name instead of temp name for better readability
+            appName: serviceName,
             environment,
             containerPort,
             hostPort,
@@ -135,10 +134,6 @@ async function deployApp(payload, ws) {
             fs.writeFile('docker-compose.yml', files.dockerCompose)
         ]);
 
-        // Verify files were written correctly
-        logger.info('Dockerfile contents:', await fs.readFile('Dockerfile', 'utf-8'));
-        logger.info('docker-compose.yml contents:', await fs.readFile('docker-compose.yml', 'utf-8'));
-
         // Build container
         sendLogs(ws, deploymentId, 'Building container...');
         try {
@@ -156,19 +151,25 @@ async function deployApp(payload, ws) {
                 logger.warn('Build warnings:', buildResult.stderr);
             }
 
-            // Verify the image was created
-            const { stdout: imageList } = await executeCommand('docker', ['images', serviceName]);
-            logger.info('Built image details:', imageList);
+            // Verify the image exists
+            const { stdout: imageList } = await executeCommand('docker', ['images', '--format', '{{.Repository}}', serviceName]);
+            if (!imageList.includes(serviceName)) {
+                throw new Error('Image was not built successfully');
+            }
+            logger.info('Image built successfully:', imageList);
         } catch (error) {
             logger.error('Build failed:', error);
             throw new Error(`Container build failed: ${error.message}`);
         }
 
-        // Start container
+        // Start container with proper naming
         sendLogs(ws, deploymentId, 'Starting container...');
         try {
             // Stop any existing containers
             await executeCommand('docker-compose', ['down', '--remove-orphans']);
+            
+            // Set the container name in the environment
+            process.env.COMPOSE_PROJECT_NAME = serviceName;
             
             // Start new container
             const startResult = await executeCommand('docker-compose', ['up', '-d']);
@@ -177,22 +178,19 @@ async function deployApp(payload, ws) {
             // Wait for container initialization
             await new Promise(resolve => setTimeout(resolve, 10000));
 
-            // Get compose service status
-            const { stdout: composePs } = await executeCommand('docker-compose', ['ps']);
-            logger.info('Docker compose status:', composePs);
+            // Get container ID to verify it exists
+            const { stdout: containerId } = await executeCommand('docker-compose', ['ps', '-q']);
+            if (!containerId) {
+                throw new Error('Container was not created successfully');
+            }
 
-            // Get container status
-            const { stdout: containerList } = await executeCommand('docker', ['ps', '-a']);
-            logger.info('Docker container list:', containerList);
-
-            // Verify container is running
+            // Get container status using the actual container ID
             const { stdout: inspectOutput } = await executeCommand('docker', [
                 'inspect',
-                serviceName
+                containerId.trim()
             ]);
             const containerInfo = JSON.parse(inspectOutput)[0];
-            logger.info('Container inspection:', containerInfo);
-
+            
             if (!containerInfo.State.Running) {
                 const { stdout: logs } = await executeCommand('docker-compose', ['logs']);
                 logger.error('Container logs:', logs);
@@ -208,7 +206,7 @@ async function deployApp(payload, ws) {
                 const { stdout: logs } = await executeCommand('docker-compose', ['logs']);
                 logger.error('Container logs:', logs);
                 
-                const { stdout: events } = await executeCommand('docker', ['events', '--since=5m', '--until=0m', `--filter=container=${serviceName}`]);
+                const { stdout: events } = await executeCommand('docker', ['events', '--since=5m', '--until=0m', `--filter=name=${serviceName}`]);
                 logger.error('Docker events:', events);
             } catch (logError) {
                 logger.error('Failed to retrieve logs:', logError);
@@ -224,8 +222,9 @@ async function deployApp(payload, ws) {
             throw new Error(`Health check failed: ${health.message}`);
         }
 
-        // Connect to traefik network
-        await executeCommand('docker', ['network', 'connect', 'traefik-network', serviceName]);
+        // Connect to traefik network using the correct container name
+        const { stdout: containerId } = await executeCommand('docker-compose', ['ps', '-q']);
+        await executeCommand('docker', ['network', 'connect', 'traefik-network', containerId.trim()]);
 
         // Send success status
         sendStatus(ws, {
@@ -245,17 +244,12 @@ async function deployApp(payload, ws) {
             try {
                 const { stdout: composeLogs } = await executeCommand('docker-compose', ['logs']);
                 logger.error('Final compose logs:', composeLogs);
-
-                const { stdout: containerLogs } = await executeCommand('docker', ['logs', serviceName])
-                    .catch(() => ({ stdout: 'No container logs available' }));
-                logger.error('Final container logs:', containerLogs);
             } catch (logError) {
                 logger.warn('Could not retrieve final logs:', logError);
             }
 
             // Cleanup
             await executeCommand('docker-compose', ['down', '--volumes', '--remove-orphans']).catch(() => {});
-            await executeCommand('docker', ['rm', '-f', serviceName]).catch(() => {});
             await fs.rm(deployDir, { recursive: true, force: true });
         } catch (cleanupError) {
             logger.error('Cleanup failed:', cleanupError);
