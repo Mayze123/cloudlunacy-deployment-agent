@@ -19,16 +19,18 @@ async function deployApp(payload, ws) {
         branch,
         githubToken, 
         environment,
+        serviceName,
         domain,
         envVarsToken
     } = payload;
 
-    const serviceName = `${appName}-${environment}`.toLowerCase().replace(/[^a-z0-9-]/g, '-');
+    const projectName = `${deploymentId}-${serviceName}`.toLowerCase().replace(/[^a-z0-9-]/g, '-');
     const deployDir = path.join('/opt/cloudlunacy/deployments', deploymentId);
     const currentDir = process.cwd();
     
     logger.info(`Starting deployment ${deploymentId} for ${appType} app: ${appName}`);
     logger.info(`Using service name: ${serviceName}`);
+    logger.info(`Using project name: ${projectName}`);
     
     try {
         // Check permissions before deployment
@@ -64,7 +66,7 @@ async function deployApp(payload, ws) {
                 'ps',
                 '-a',
                 '--format', '{{.Names}}',
-                '--filter', `name=${serviceName}`
+                '--filter', `name=${projectName}`
             ]);
 
             if (existingContainers) {
@@ -140,17 +142,19 @@ async function deployApp(payload, ws) {
             // Remove any existing images
             await executeCommand('docker', ['rmi', '-f', serviceName]).catch(() => {});
             
-            // Enable build kit for better output
-            process.env.DOCKER_BUILDKIT = '1';
-            process.env.COMPOSE_DOCKER_CLI_BUILD = '1';
-            
-            // Build with detailed output
+            // Build with detailed output and consistent project name
             const buildResult = await executeCommand('docker-compose', [
                 'build',
                 '--no-cache',
                 '--progress=plain'
             ], {
-                logOutput: true // Enable detailed logging
+                logOutput: true,
+                env: {
+                    ...process.env,
+                    DOCKER_BUILDKIT: '1',
+                    COMPOSE_DOCKER_CLI_BUILD: '1',
+                    COMPOSE_PROJECT_NAME: projectName
+                }
             });
             
             logger.info('Build command completed');
@@ -162,12 +166,13 @@ async function deployApp(payload, ws) {
             }
 
             // Verify the build
-            const verification = await verifyBuild(serviceName);
+            const verification = await verifyBuild(serviceName, projectName);
             if (!verification.success) {
                 throw new Error(`Build verification failed: ${verification.error}\n${verification.logs}`);
             }
 
             logger.info(`Image built and verified successfully with ID: ${verification.imageId}`);
+            logger.info(`Image name: ${verification.imageName}`);
 
         } catch (error) {
             logger.error('Build failed:', error);
@@ -177,21 +182,34 @@ async function deployApp(payload, ws) {
         // Start container with proper naming
         sendLogs(ws, deploymentId, 'Starting container...');
         try {
-            // Stop any existing containers
-            await executeCommand('docker-compose', ['down', '--remove-orphans']);
+            // Stop any existing containers with consistent project name
+            await executeCommand('docker-compose', ['down', '--remove-orphans'], {
+                env: {
+                    ...process.env,
+                    COMPOSE_PROJECT_NAME: projectName
+                }
+            });
             
-            // Set the container name in the environment
-            process.env.COMPOSE_PROJECT_NAME = serviceName;
-            
-            // Start new container
-            const startResult = await executeCommand('docker-compose', ['up', '-d']);
+            // Start new container with consistent project name
+            const startResult = await executeCommand('docker-compose', ['up', '-d'], {
+                env: {
+                    ...process.env,
+                    COMPOSE_PROJECT_NAME: projectName
+                }
+            });
             logger.info('Start command output:', startResult.stdout);
 
             // Wait for container initialization
             await new Promise(resolve => setTimeout(resolve, 10000));
 
-            // Get container ID to verify it exists
-            const { stdout: containerId } = await executeCommand('docker-compose', ['ps', '-q']);
+            // Get container ID with consistent project name
+            const { stdout: containerId } = await executeCommand('docker-compose', ['ps', '-q'], {
+                env: {
+                    ...process.env,
+                    COMPOSE_PROJECT_NAME: projectName
+                }
+            });
+            
             if (!containerId) {
                 throw new Error('Container was not created successfully');
             }
@@ -204,7 +222,12 @@ async function deployApp(payload, ws) {
             const containerInfo = JSON.parse(inspectOutput)[0];
             
             if (!containerInfo.State.Running) {
-                const { stdout: logs } = await executeCommand('docker-compose', ['logs']);
+                const { stdout: logs } = await executeCommand('docker-compose', ['logs'], {
+                    env: {
+                        ...process.env,
+                        COMPOSE_PROJECT_NAME: projectName
+                    }
+                });
                 logger.error('Container logs:', logs);
                 throw new Error(`Container failed to start. State: ${JSON.stringify(containerInfo.State)}`);
             }
@@ -215,10 +238,20 @@ async function deployApp(payload, ws) {
             logger.error('Container start failed:', error);
             // Get all possible logs
             try {
-                const { stdout: logs } = await executeCommand('docker-compose', ['logs']);
+                const { stdout: logs } = await executeCommand('docker-compose', ['logs'], {
+                    env: {
+                        ...process.env,
+                        COMPOSE_PROJECT_NAME: projectName
+                    }
+                });
                 logger.error('Container logs:', logs);
                 
-                const { stdout: events } = await executeCommand('docker', ['events', '--since=5m', '--until=0m', `--filter=name=${serviceName}`]);
+                const { stdout: events } = await executeCommand('docker', [
+                    'events',
+                    '--since=5m',
+                    '--until=0m',
+                    `--filter=name=${projectName}`
+                ]);
                 logger.error('Docker events:', events);
             } catch (logError) {
                 logger.error('Failed to retrieve logs:', logError);
@@ -228,14 +261,19 @@ async function deployApp(payload, ws) {
 
         // Wait for container to be healthy
         sendLogs(ws, deploymentId, 'Waiting for container to be healthy...');
-        const health = await checkDeploymentHealth(serviceName, domain);
+        const health = await checkDeploymentHealth(projectName, domain);
         
         if (!health.healthy) {
             throw new Error(`Health check failed: ${health.message}`);
         }
 
         // Connect to traefik network using the correct container name
-        const { stdout: containerId } = await executeCommand('docker-compose', ['ps', '-q']);
+        const { stdout: containerId } = await executeCommand('docker-compose', ['ps', '-q'], {
+            env: {
+                ...process.env,
+                COMPOSE_PROJECT_NAME: projectName
+            }
+        });
         await executeCommand('docker', ['network', 'connect', 'traefik-network', containerId.trim()]);
 
         // Send success status
@@ -254,14 +292,24 @@ async function deployApp(payload, ws) {
         try {
             // Get final logs before cleanup
             try {
-                const { stdout: composeLogs } = await executeCommand('docker-compose', ['logs']);
+                const { stdout: composeLogs } = await executeCommand('docker-compose', ['logs'], {
+                    env: {
+                        ...process.env,
+                        COMPOSE_PROJECT_NAME: projectName
+                    }
+                });
                 logger.error('Final compose logs:', composeLogs);
             } catch (logError) {
                 logger.warn('Could not retrieve final logs:', logError);
             }
 
-            // Cleanup
-            await executeCommand('docker-compose', ['down', '--volumes', '--remove-orphans']).catch(() => {});
+            // Cleanup with consistent project name
+            await executeCommand('docker-compose', ['down', '--volumes', '--remove-orphans'], {
+                env: {
+                    ...process.env,
+                    COMPOSE_PROJECT_NAME: projectName
+                }
+            }).catch(() => {});
             await fs.rm(deployDir, { recursive: true, force: true });
         } catch (cleanupError) {
             logger.error('Cleanup failed:', cleanupError);
@@ -276,24 +324,31 @@ async function deployApp(payload, ws) {
         process.chdir(currentDir);
     }
 }
-
-async function verifyBuild(serviceName) {
+async function verifyBuild(serviceName, deploymentId) {
     try {
-        // Check if image exists with both latest tag and no tag
+        // In docker-compose, the image name includes the project name and service name
+        const expectedImagePrefix = `${deploymentId}-${serviceName}`;
+        
+        // Check if image exists with broader filter
         const { stdout: imageList } = await executeCommand('docker', [
             'images',
-            '--format', '{{.Repository}}:{{.Tag}}',
-            '--filter', `reference=${serviceName}*`
+            '--format', '{{.Repository}}:{{.Tag}}'
         ]);
-
-        if (!imageList.includes(serviceName)) {
+        
+        logger.debug('Available images:', imageList);
+        
+        // Check if any of the images match our expected prefix
+        const images = imageList.split('\n').filter(Boolean);
+        const matchingImage = images.find(img => img.includes(expectedImagePrefix));
+        
+        if (!matchingImage) {
             // Get build logs for debugging
             const { stdout: buildLogs } = await executeCommand('docker-compose', [
                 'logs',
                 '--no-color'
             ]).catch(() => ({ stdout: 'No build logs available' }));
 
-            // Also get any build-time container logs
+            // Get any build-time container logs
             const { stdout: containerLogs } = await executeCommand('docker', [
                 'ps',
                 '-a',
@@ -307,6 +362,8 @@ async function verifyBuild(serviceName) {
             }).catch(() => ({ stdout: 'Failed to get build container logs' }));
 
             logger.error('Build verification failed - Image not found');
+            logger.error('Available images:', imageList);
+            logger.error('Expected image prefix:', expectedImagePrefix);
             logger.error('Build logs:', buildLogs);
             logger.error('Build container logs:', containerLogs);
             
@@ -320,7 +377,7 @@ async function verifyBuild(serviceName) {
         // Verify image can be inspected
         const { stdout: inspectOutput } = await executeCommand('docker', [
             'inspect',
-            serviceName
+            matchingImage.split(':')[0]
         ]);
 
         const imageInfo = JSON.parse(inspectOutput)[0];
@@ -330,7 +387,8 @@ async function verifyBuild(serviceName) {
 
         return {
             success: true,
-            imageId: imageInfo.Id
+            imageId: imageInfo.Id,
+            imageName: matchingImage
         };
     } catch (error) {
         logger.error('Build verification error:', error);
