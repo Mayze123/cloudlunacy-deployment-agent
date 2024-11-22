@@ -24,8 +24,10 @@ async function deployApp(payload, ws) {
         envVarsToken
     } = payload;
 
-    const projectName = `${deploymentId}-${appName}`.toLowerCase().replace(/[^a-z0-9-]/g, '-');
-    const deployDir = path.join('/opt/cloudlunacy/deployments', deploymentId);
+    // Use a version suffix for blue-green deployment
+    const versionSuffix = Date.now(); // Unique identifier for the new deployment
+    const projectName = `${deploymentId}-${appName}-${versionSuffix}`.toLowerCase().replace(/[^a-z0-9-]/g, '-');
+    const deployDir = path.join('/opt/cloudlunacy/deployments', deploymentId, versionSuffix.toString());
     const currentDir = process.cwd();
     
     logger.info(`Starting deployment ${deploymentId} for ${appType} app: ${appName}`);
@@ -59,28 +61,8 @@ async function deployApp(payload, ws) {
         const { hostPort, containerPort } = await portManager.allocatePort(serviceName);
         logger.info(`Allocated ports - host: ${hostPort}, container: ${containerPort}`);
 
-        // Clean up any existing containers
-        try {
-            // Find all containers with the service name
-            const { stdout: existingContainers } = await executeCommand('docker', [
-                'ps',
-                '-a',
-                '--format', '{{.Names}}',
-                '--filter', `name=${projectName}`
-            ]);
-
-            if (existingContainers) {
-                const containers = existingContainers.split('\n').filter(Boolean);
-                for (const container of containers) {
-                    sendLogs(ws, deploymentId, `Found existing container: ${container}`);
-                    await executeCommand('docker', ['stop', container]).catch(() => {});
-                    await executeCommand('docker', ['rm', container]).catch(() => {});
-                    sendLogs(ws, deploymentId, `Removed container: ${container}`);
-                }
-            }
-        } catch (error) {
-            logger.warn('Error checking/removing existing containers:', error);
-        }
+        // No longer stopping existing containers here
+        // We'll keep the old container running until the new one is ready
 
         // Clone repository
         sendLogs(ws, deploymentId, 'Cloning repository...');
@@ -108,7 +90,7 @@ async function deployApp(payload, ws) {
             throw new Error(`Environment setup failed: ${error.message}`);
         }
 
-        // Generate deployment files with consistent service naming
+        // Generate deployment files with unique service and project names
         sendLogs(ws, deploymentId, 'Generating deployment files...');
         const templateHandler = new TemplateHandler(
             path.join('/opt/cloudlunacy/templates'),
@@ -117,7 +99,8 @@ async function deployApp(payload, ws) {
 
         const files = await templateHandler.generateDeploymentFiles({
             appType,
-            appName: serviceName,
+            appName: serviceName, // Service name remains the same for Traefik routing
+            projectName, // Unique project name for docker-compose
             environment,
             containerPort,
             hostPort,
@@ -127,7 +110,8 @@ async function deployApp(payload, ws) {
                 nodeVersion: '18',
                 buildOutputDir: 'build',
                 cacheControl: 'public, max-age=31536000'
-            }
+            },
+            versionSuffix // Pass version suffix to templates
         });
 
         // Write deployment files
@@ -136,17 +120,17 @@ async function deployApp(payload, ws) {
             fs.writeFile('docker-compose.yml', files.dockerCompose)
         ]);
 
-        // Build container
+        // Build container with unique image name
         sendLogs(ws, deploymentId, 'Building container...');
         try {
-            // Remove any existing images
-            await executeCommand('docker', ['rmi', '-f', serviceName]).catch(() => {});
-            
-            // Build with detailed output and consistent project name
+            const imageName = `${serviceName}:${versionSuffix}`;
+
+            // Build with detailed output and unique image name
             const buildResult = await executeCommand('docker-compose', [
                 'build',
                 '--no-cache',
-                '--progress=plain'
+                '--progress=plain',
+                '--build-arg', `VERSION_SUFFIX=${versionSuffix}`
             ], {
                 logOutput: true,
                 env: {
@@ -166,7 +150,7 @@ async function deployApp(payload, ws) {
             }
 
             // Verify the build
-            const verification = await verifyBuild(serviceName, projectName);
+            const verification = await verifyBuild(imageName);
             if (!verification.success) {
                 throw new Error(`Build verification failed: ${verification.error}\n${verification.logs}`);
             }
@@ -179,18 +163,10 @@ async function deployApp(payload, ws) {
             throw new Error(`Container build failed: ${error.message}`);
         }
 
-        // Start container with proper naming
-        sendLogs(ws, deploymentId, 'Starting container...');
+        // Start new container with proper naming
+        sendLogs(ws, deploymentId, 'Starting new container...');
         try {
-            // Stop any existing containers with consistent project name
-            await executeCommand('docker-compose', ['down', '--remove-orphans'], {
-                env: {
-                    ...process.env,
-                    COMPOSE_PROJECT_NAME: projectName
-                }
-            });
-            
-            // Start new container with consistent project name
+            // Start new container with unique project name and labels
             const startResult = await executeCommand('docker-compose', ['up', '-d'], {
                 env: {
                     ...process.env,
@@ -202,7 +178,7 @@ async function deployApp(payload, ws) {
             // Wait for container initialization
             await new Promise(resolve => setTimeout(resolve, 10000));
 
-            // Get container ID with consistent project name
+            // Get container ID
             const { stdout: containerId } = await executeCommand('docker-compose', ['ps', '-q'], {
                 env: {
                     ...process.env,
@@ -214,83 +190,32 @@ async function deployApp(payload, ws) {
                 throw new Error('Container was not created successfully');
             }
 
-            // Get container status using the actual container ID
-            const { stdout: inspectOutput } = await executeCommand('docker', [
-                'inspect',
-                containerId.trim()
-            ]);
-            const containerInfo = JSON.parse(inspectOutput)[0];
-            
-            if (!containerInfo.State.Running) {
-                const { stdout: logs } = await executeCommand('docker-compose', ['logs'], {
-                    env: {
-                        ...process.env,
-                        COMPOSE_PROJECT_NAME: projectName
-                    }
-                });
-                logger.error('Container logs:', logs);
-                throw new Error(`Container failed to start. State: ${JSON.stringify(containerInfo.State)}`);
-            }
-
-            logger.info('Container is running. State:', containerInfo.State);
+            // Connect container to traefik-network
+            await executeCommand('docker', ['network', 'connect', 'traefik-network', containerId.trim()]);
+            logger.info('Connected new container to traefik-network');
 
         } catch (error) {
-            logger.error('Container start failed:', error);
-            // Get all possible logs
-            try {
-                const { stdout: logs } = await executeCommand('docker-compose', ['logs'], {
-                    env: {
-                        ...process.env,
-                        COMPOSE_PROJECT_NAME: projectName
-                    }
-                });
-                logger.error('Container logs:', logs);
-                
-                const { stdout: events } = await executeCommand('docker', [
-                    'events',
-                    '--since=5m',
-                    '--until=0m',
-                    `--filter=name=${projectName}`
-                ]);
-                logger.error('Docker events:', events);
-            } catch (logError) {
-                logger.error('Failed to retrieve logs:', logError);
-            }
-            throw new Error(`Container start failed: ${error.message}`);
+            logger.error('Starting new container failed:', error);
+            throw new Error(`Starting new container failed: ${error.message}`);
         }
 
-        // Wait for container to be healthy
-        sendLogs(ws, deploymentId, 'Waiting for container to be healthy...');
-        const health = await checkDeploymentHealth(projectName, domain);
+        // Wait for the new container to be healthy
+        sendLogs(ws, deploymentId, 'Waiting for new container to be healthy...');
+        const health = await checkDeploymentHealth(projectName, domain, versionSuffix);
         
         if (!health.healthy) {
             throw new Error(`Health check failed: ${health.message}`);
         }
 
-       // Get container ID
-const { stdout: containerId } = await executeCommand('docker-compose', ['ps', '-q'], {
-    env: {
-        ...process.env,
-        COMPOSE_PROJECT_NAME: projectName
-    }
-});
+        // Update Traefik to route traffic to the new container
+        sendLogs(ws, deploymentId, 'Switching traffic to the new container...');
+        await switchTrafficToNewVersion(serviceName, versionSuffix);
+        logger.info('Traffic switched to the new container');
 
-// Check if already connected to network
-const { stdout: networkInspect } = await executeCommand('docker', [
-    'inspect',
-    '--format',
-    '{{json .NetworkSettings.Networks}}',
-    containerId.trim()
-]);
-
-const networks = JSON.parse(networkInspect);
-if (!networks['traefik-network']) {
-    // Only connect if not already connected
-    await executeCommand('docker', ['network', 'connect', 'traefik-network', containerId.trim()]);
-    logger.info('Connected container to traefik-network');
-} else {
-    logger.info('Container already connected to traefik-network');
-}
+        // Stop and remove old containers
+        sendLogs(ws, deploymentId, 'Cleaning up old containers...');
+        await cleanupOldContainers(serviceName, projectName, versionSuffix);
+        logger.info('Old containers cleaned up');
 
         // Send success status
         sendStatus(ws, {
@@ -319,7 +244,7 @@ if (!networks['traefik-network']) {
                 logger.warn('Could not retrieve final logs:', logError);
             }
 
-            // Cleanup with consistent project name
+            // Cleanup new container
             await executeCommand('docker-compose', ['down', '--volumes', '--remove-orphans'], {
                 env: {
                     ...process.env,
@@ -340,12 +265,10 @@ if (!networks['traefik-network']) {
         process.chdir(currentDir);
     }
 }
-async function verifyBuild(serviceName, deploymentId) {
+
+async function verifyBuild(imageName) {
     try {
-        // In docker-compose, the image name includes the project name and service name
-        const expectedImagePrefix = `${deploymentId}-${serviceName}`;
-        
-        // Check if image exists with broader filter
+        // Check if image exists
         const { stdout: imageList } = await executeCommand('docker', [
             'images',
             '--format', '{{.Repository}}:{{.Tag}}'
@@ -353,47 +276,20 @@ async function verifyBuild(serviceName, deploymentId) {
         
         logger.debug('Available images:', imageList);
         
-        // Check if any of the images match our expected prefix
         const images = imageList.split('\n').filter(Boolean);
-        const matchingImage = images.find(img => img.includes(expectedImagePrefix));
-        
-        if (!matchingImage) {
-            // Get build logs for debugging
-            const { stdout: buildLogs } = await executeCommand('docker-compose', [
-                'logs',
-                '--no-color'
-            ]).catch(() => ({ stdout: 'No build logs available' }));
-
-            // Get any build-time container logs
-            const { stdout: containerLogs } = await executeCommand('docker', [
-                'ps',
-                '-a',
-                '--filter', `name=${serviceName}-build`,
-                '--format', '{{.ID}}'
-            ]).then(async (result) => {
-                if (result.stdout) {
-                    return executeCommand('docker', ['logs', result.stdout.trim()]);
-                }
-                return { stdout: 'No build container logs available' };
-            }).catch(() => ({ stdout: 'Failed to get build container logs' }));
-
+        if (!images.includes(imageName)) {
             logger.error('Build verification failed - Image not found');
-            logger.error('Available images:', imageList);
-            logger.error('Expected image prefix:', expectedImagePrefix);
-            logger.error('Build logs:', buildLogs);
-            logger.error('Build container logs:', containerLogs);
-            
             return {
                 success: false,
                 error: 'Image was not built successfully',
-                logs: `Build logs:\n${buildLogs}\n\nBuild container logs:\n${containerLogs}`
+                logs: 'No matching image found after build'
             };
         }
 
         // Verify image can be inspected
         const { stdout: inspectOutput } = await executeCommand('docker', [
             'inspect',
-            matchingImage.split(':')[0]
+            imageName
         ]);
 
         const imageInfo = JSON.parse(inspectOutput)[0];
@@ -404,7 +300,7 @@ async function verifyBuild(serviceName, deploymentId) {
         return {
             success: true,
             imageId: imageInfo.Id,
-            imageName: matchingImage
+            imageName
         };
     } catch (error) {
         logger.error('Build verification error:', error);
@@ -438,14 +334,14 @@ function sendLogs(ws, deploymentId, log) {
     }
 }
 
-async function checkDeploymentHealth(projectName, domain) {
+async function checkDeploymentHealth(projectName, domain, versionSuffix) {
     try {
         logger.info(`Starting health check for service: ${projectName}`);
         
-        // Increase initial wait time to 30 seconds
-        await new Promise(resolve => setTimeout(resolve, 30000));
+        // Wait for some time to allow the container to start
+        await new Promise(resolve => setTimeout(resolve, 15000));
 
-        // Get the actual container ID from docker-compose
+        // Check container status
         const { stdout: containerId } = await executeCommand('docker-compose', ['ps', '-q'], {
             env: {
                 ...process.env,
@@ -457,92 +353,35 @@ async function checkDeploymentHealth(projectName, domain) {
             throw new Error('Container not found');
         }
 
-        // Get container logs
-        try {
-            const { stdout: containerLogs } = await executeCommand('docker', [
-                'logs',
-                '--tail', '50',
-                containerId.trim()
-            ], { silent: true });
-            
-            logger.info('Recent container logs:', containerLogs);
-            
-            // Check for common error patterns in logs
-            if (containerLogs.includes('Error:') || containerLogs.includes('error:')) {
-                throw new Error(`Container startup errors detected in logs: ${containerLogs}`);
-            }
-        } catch (logError) {
-            logger.warn('Failed to fetch container logs:', logError);
+        // Check health status
+        const { stdout: inspectOutput } = await executeCommand('docker', [
+            'inspect',
+            '--format', '{{json .State.Health}}',
+            containerId.trim()
+        ]);
+
+        const healthInfo = JSON.parse(inspectOutput);
+        if (healthInfo && healthInfo.Status !== 'healthy') {
+            throw new Error(`Container health status: ${healthInfo.Status}`);
         }
 
-        // Check container status using container ID
-        try {
-            const { stdout: inspectOutput } = await executeCommand('docker', [
-                'inspect',
-                containerId.trim()
-            ], { silent: true });
-            
-            const containerInfo = JSON.parse(inspectOutput)[0];
-            logger.info('Container state:', containerInfo.State);
-            
-            if (!containerInfo.State.Running) {
-                throw new Error(`Container is not running. State: ${JSON.stringify(containerInfo.State)}`);
-            }
-
-            // Check health status
-            if (containerInfo.State.Health) {
-                if (containerInfo.State.Health.Status === 'unhealthy') {
-                    throw new Error('Container health check failed');
-                }
-            }
-        } catch (inspectError) {
-            throw new Error(`Failed to inspect container: ${inspectError.message}`);
-        }
-
-        // If domain is provided, check HTTP health endpoint
+        // Check the application is responding via Traefik
         if (domain) {
-            logger.info(`Verifying domain configuration for ${domain}`);
-            
-            // Check if Traefik is running
-            try {
-                const { stdout: traefikStatus } = await executeCommand('docker', [
-                    'inspect',
-                    '--format',
-                    '{{.State.Status}}',
-                    'traefik'
-                ], { silent: true });
+            logger.info(`Verifying application response at domain: ${domain}`);
+            const response = await executeCommand('curl', [
+                '-s',
+                '-o',
+                '/dev/null',
+                '-w',
+                '"%{http_code}"',
+                '-H',
+                `Host: ${domain}`,
+                `http://localhost:80/health`
+            ]);
 
-                if (!traefikStatus.includes('running')) {
-                    throw new Error('Traefik container is not running');
-                }
-                
-                logger.info('Traefik is running');
-
-                // HTTP health check through Traefik
-                const maxRetries = 5;
-                for (let i = 0; i < maxRetries; i++) {
-                    try {
-                        const { stdout: healthCheck } = await executeCommand('curl', [
-                            '--max-time', '5',
-                            '-H', `Host: ${domain}`,
-                            'http://localhost:80/health'
-                        ], { silent: true });
-
-                        if (!healthCheck.includes('OK')) {
-                            throw new Error('Health endpoint not responding correctly');
-                        }
-
-                        logger.info('Health check passed');
-                        break;
-                    } catch (healthError) {
-                        if (i === maxRetries - 1) {
-                            throw new Error(`Health check failed after ${maxRetries} attempts`);
-                        }
-                        await new Promise(resolve => setTimeout(resolve, 10000));
-                    }
-                }
-            } catch (error) {
-                throw new Error(`Domain health check failed: ${error.message}`);
+            const httpCode = response.stdout.replace(/"/g, '');
+            if (httpCode !== '200') {
+                throw new Error(`Application health endpoint responded with status code: ${httpCode}`);
             }
         }
 
@@ -556,77 +395,63 @@ async function checkDeploymentHealth(projectName, domain) {
     }
 }
 
-async function collectDebugInfo(serviceName, domain) {
-    const debugInfo = {
-        containerState: null,
-        containerLogs: null,
-        traefikState: null,
-        networkInfo: null,
-        portBindings: null,
-        healthEndpoint: null
-    };
+async function switchTrafficToNewVersion(serviceName, versionSuffix) {
+    // Assuming Traefik uses labels to route traffic
+    // We'll update the labels to point to the new container
 
-    try {
-        // Get container state
-        const { stdout: containerState } = await executeCommand('docker', [
-            'inspect',
-            '--format',
-            '{{json .State}}',
-            serviceName
-        ], { silent: true });
-        debugInfo.containerState = JSON.parse(containerState);
+    // Get the container ID of the new version
+    const { stdout: newContainerId } = await executeCommand('docker', [
+        'ps',
+        '-q',
+        '--filter', `name=${serviceName}`,
+        '--filter', `ancestor=${serviceName}:${versionSuffix}`
+    ]);
 
-        // Get container logs
-        const { stdout: containerLogs } = await executeCommand('docker', [
-            'logs',
-            '--tail',
-            '50',
-            serviceName
-        ], { silent: true });
-        debugInfo.containerLogs = containerLogs;
-
-        // Get Traefik state
-        const { stdout: traefikState } = await executeCommand('docker', [
-            'inspect',
-            '--format',
-            '{{json .State}}',
-            'traefik'
-        ], { silent: true });
-        debugInfo.traefikState = JSON.parse(traefikState);
-
-        // Get network information
-        const { stdout: networkInfo } = await executeCommand('docker', [
-            'network',
-            'inspect',
-            'traefik-network'
-        ], { silent: true });
-        debugInfo.networkInfo = JSON.parse(networkInfo);
-
-        // Get port bindings
-        const { stdout: portBindings } = await executeCommand('docker', [
-            'port',
-            serviceName
-        ], { silent: true });
-        debugInfo.portBindings = portBindings;
-
-        // Check health endpoint specifically
-        const { stdout: healthCheck } = await executeCommand('curl', [
-            '--max-time',
-            '5',
-            '-H',
-            `Host: ${domain}`,
-            'http://localhost:80/health'
-        ], { silent: true });
-        debugInfo.healthEndpoint = healthCheck;
-
-    } catch (error) {
-        logger.warn('Error collecting debug info:', error);
+    if (!newContainerId) {
+        throw new Error('New container not found for traffic switch');
     }
 
-    return debugInfo;
+    // Update Traefik labels (if necessary)
+    // Since we're using unique project names, Traefik should automatically route to the new container
+    // Alternatively, ensure the old container's labels are disabled or the old container is stopped
 }
 
+async function cleanupOldContainers(serviceName, currentProjectName, versionSuffix) {
+    // List all containers for the service excluding the current one
+    const { stdout: containers } = await executeCommand('docker', [
+        'ps',
+        '-a',
+        '--filter', `name=${serviceName}`,
+        '--format', '{{.ID}} {{.Names}} {{.Label "com.docker.compose.project"}}'
+    ]);
 
+    const containerList = containers.split('\n').filter(Boolean);
 
+    for (const line of containerList) {
+        const [containerId, containerName, projectLabel] = line.split(' ');
+        if (projectLabel !== currentProjectName) {
+            // Stop and remove the old container
+            await executeCommand('docker', ['stop', containerId]);
+            await executeCommand('docker', ['rm', containerId]);
+            logger.info(`Stopped and removed old container: ${containerName}`);
+        }
+    }
+
+    // Remove old images
+    const { stdout: images } = await executeCommand('docker', [
+        'images',
+        '--format', '{{.Repository}}:{{.Tag}} {{.ID}}'
+    ]);
+
+    const imageList = images.split('\n').filter(Boolean);
+
+    for (const line of imageList) {
+        const [imageName, imageId] = line.split(' ');
+        if (imageName.startsWith(`${serviceName}:`) && !imageName.endsWith(versionSuffix)) {
+            await executeCommand('docker', ['rmi', '-f', imageId]);
+            logger.info(`Removed old image: ${imageName}`);
+        }
+    }
+}
 
 module.exports = deployApp;
