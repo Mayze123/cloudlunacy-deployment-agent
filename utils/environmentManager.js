@@ -109,7 +109,5 @@ class EnvironmentManager {
       }
     }
   }
-  
-  module.exports = EnvironmentManager;
 
 module.exports = EnvironmentManager;

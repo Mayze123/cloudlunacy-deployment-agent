@@ -15,16 +15,12 @@
 // Import necessary modules
 const axios = require('axios');
 const WebSocket = require('ws');
-const fs = require('fs');
-const path = require('path');
 const dotenv = require('dotenv');
 const logger = require('./utils/logger');
-const { executeCommand } = require('./utils/executor');
 const { ensureDeploymentPermissions } = require('./utils/permissionCheck');
+const ZeroDowntimeDeployer = require('./modules/zeroDowntimeDeployer');
 
 
-const deployApp = require('./modules/deployApp');
-;
 
 // Load environment variables
 dotenv.config();
@@ -142,9 +138,8 @@ function handleMessage(message) {
                 process.env.GITHUB_TOKEN = message.payload.githubToken;
             }
             
-            deployApp(message.payload, ws)
+            ZeroDowntimeDeployer.deploy(message.payload, ws)
                 .finally(() => {
-                    // Clean up sensitive data
                     if (process.env.GITHUB_TOKEN) {
                         delete process.env.GITHUB_TOKEN;
                     }
