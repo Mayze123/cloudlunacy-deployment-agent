@@ -21,11 +21,12 @@
 #   - Provides post-installation verification and feedback
 #
 # Usage:
-#   sudo ./install-agent.sh <AGENT_TOKEN> <SERVER_ID> [BACKEND_BASE_URL] [GITHUB_SSH_KEY]
+#   sudo ./install-agent.sh <AGENT_TOKEN> <SERVER_ID> <EMAIL> [BACKEND_BASE_URL] [GITHUB_SSH_KEY]
 #
 # Arguments:
 #   AGENT_TOKEN      - Unique token for agent authentication
 #   SERVER_ID        - Unique identifier for the server
+#   EMAIL            - Email address for Traefik's Let's Encrypt
 #   BACKEND_BASE_URL - (Optional) Backend base URL; defaults to https://your-default-backend-url
 #   GITHUB_SSH_KEY   - (Optional) Path to existing SSH private key for accessing private repos
 # ------------------------------------------------------------------------------
@@ -64,9 +65,9 @@ log_error() {
 
 # Function to check for required arguments
 check_args() {
-    if [ "$#" -lt 2 ] || [ "$#" -gt 4 ]; then
+    if [ "$#" -lt 3 ] || [ "$#" -gt 5 ]; then
         log_error "Invalid number of arguments."
-        echo "Usage: $0 <AGENT_TOKEN> <SERVER_ID> [BACKEND_BASE_URL] [GITHUB_SSH_KEY]"
+        echo "Usage: $0 <AGENT_TOKEN> <SERVER_ID> <EMAIL> [BACKEND_BASE_URL] [GITHUB_SSH_KEY]"
         exit 1
     fi
 }
@@ -167,7 +168,7 @@ install_docker() {
                 apt-get update -y
                 apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
                 ;;
-            centos | rhel | fedora | rocky | almalinux | amzn)
+            centos | rhel | fedora | rocky | almalinux)
                 yum remove -y docker docker-client docker-client-latest docker-common docker-latest docker-latest-logrotate docker-logrotate docker-engine || true
                 yum install -y yum-utils
                 yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
@@ -369,7 +370,7 @@ setup_traefik() {
     mkdir -p "$TRAEFIK_DIR"
     chown "$USERNAME":"$USERNAME" "$TRAEFIK_DIR"
 
-    # Create Traefik configuration file
+    # Create Traefik Docker Compose file
     cat <<EOF > "$TRAEFIK_DIR/docker-compose.traefik.yml"
 version: '3.8'
 
@@ -384,7 +385,7 @@ services:
       - "--entrypoints.web.address=:80"
       - "--entrypoints.websecure.address=:443"
       - "--certificatesresolvers.myresolver.acme.tlschallenge=true"
-      - "--certificatesresolvers.myresolver.acme.email=m.taibou.i@gmail.com" 
+      - "--certificatesresolvers.myresolver.acme.email=$EMAIL" # Replace with your email
       - "--certificatesresolvers.myresolver.acme.storage=/letsencrypt/acme.json"
     ports:
       - "80:80"      # HTTP
@@ -397,7 +398,7 @@ services:
       - traefik-network
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.traefik.rule=Host(\`traefik.yourdomain.com\`)" # Replace with your desired Traefik dashboard domain
+      - "traefik.http.routers.traefik.rule=Host(\`traefik.${SERVER_ID}.yourdomain.com\`)" # Replace with your desired Traefik dashboard domain
       - "traefik.http.routers.traefik.entrypoints=websecure"
       - "traefik.http.routers.traefik.tls.certresolver=myresolver"
       - "traefik.http.routers.traefik.service=api@internal"
@@ -406,10 +407,6 @@ networks:
   traefik-network:
     external: true
 EOF
-
-    # Replace placeholders with actual values
-    sed -i "s/m.taibou.i@gmail.com/$BACKEND_URL/g" "$TRAEFIK_DIR/docker-compose.traefik.yml"
-    sed -i "s/traefik.yourdomain.com/traefik.${SERVER_ID}.yourdomain.com/g" "$TRAEFIK_DIR/docker-compose.traefik.yml"
 
     chown "$USERNAME":"$USERNAME" "$TRAEFIK_DIR/docker-compose.traefik.yml"
 
@@ -502,9 +499,6 @@ completion_message() {
     echo -e "Logs are located at: $BASE_DIR/logs/agent.log"
     echo -e "It's recommended to back up your environment file:"
     echo -e "cp $BASE_DIR/.env $BASE_DIR/.env.backup"
-
-    # Display SSH key instructions
-    # display_ssh_instructions
 }
 
 # Function to handle cleanup on error
@@ -545,8 +539,9 @@ main() {
 
     AGENT_TOKEN="$1"
     SERVER_ID="$2"
-    BACKEND_BASE_URL="${3:-https://your-default-backend-url}"
-    GITHUB_SSH_KEY="${4:-}"
+    EMAIL="$3"
+    BACKEND_BASE_URL="${4:-https://your-default-backend-url}"
+    GITHUB_SSH_KEY="${5:-}"
 
     BACKEND_URL="${BACKEND_BASE_URL}"
 
