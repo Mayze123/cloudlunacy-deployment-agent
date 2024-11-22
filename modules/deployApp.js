@@ -122,56 +122,49 @@ async function deployApp(payload, ws) {
             fs.promises.writeFile('docker-compose.yml', files.dockerCompose)
         ]);
 
-        // Build container with detailed output
-        sendLogs(ws, deploymentId, 'Building container...');
-        try {
-            // Remove any existing container with the same name
-            await executeCommand('docker', ['rm', '-f', tempContainerName]).catch(() => {});
-            
-            // Build with verbose output
-            const { stdout: buildOutput, stderr: buildError } = await executeCommand('docker-compose', [
-                'build',
-                '--no-cache',
-                '--progress=plain'
-            ]);
-            
-            logger.info('Build output:', buildOutput);
-            if (buildError) {
-                logger.warn('Build warnings:', buildError);
-            }
+  // Build container with detailed output
+sendLogs(ws, deploymentId, 'Building container...');
+try {
+    // Remove any existing container with the same name
+    await executeCommand('docker', ['rm', '-f', tempContainerName]).catch(() => {});
 
-            // Start container
-            sendLogs(ws, deploymentId, 'Starting container...');
-            const { stdout: upOutput, stderr: upError } = await executeCommand('docker-compose', ['up', '-d']);
-            logger.info('Container start output:', upOutput);
-            if (upError) {
-                logger.warn('Container start warnings:', upError);
-            }
+    // Build with verbose output
+    const buildResult = await executeCommand('docker-compose', [
+        'build',
+        '--no-cache',
+        '--progress=plain'
+    ]);
+    logger.info('Build output:', buildResult.stdout);
+    if (buildResult.stderr) {
+        logger.warn('Build warnings/errors:', buildResult.stderr);
+    }
 
-            // Verify container is running
-            const { stdout: psOutput } = await executeCommand('docker-compose', ['ps']);
-            logger.info('Container status:', psOutput);
+} catch (error) {
+    logger.error('Build failed:', error.stderr || error.message);
+    throw new Error(`Container build failed: ${error.stderr || error.message}`);
+}
 
-            if (!psOutput.includes(tempContainerName)) {
-                throw new Error('Container failed to start after creation');
-            }
+// Start container
+sendLogs(ws, deploymentId, 'Starting container...');
+try {
+    const startResult = await executeCommand('docker-compose', ['up', '-d']);
+    logger.info('Container start output:', startResult.stdout);
+    if (startResult.stderr) {
+        logger.warn('Container start warnings/errors:', startResult.stderr);
+    }
 
-        } catch (error) {
-            // Get detailed error information
-            try {
-                const { stdout: logs } = await executeCommand('docker-compose', ['logs']);
-                logger.error('Container logs:', logs);
-                if (error.stdout) {
-                    logger.error(`Standard Output: ${error.stdout}`);
-                }
-                if (error.stderr) {
-                    logger.error(`Standard Error: ${error.stderr}`);
-                }
-            } catch (logError) {
-                logger.error('Failed to retrieve logs:', logError);
-            }
-            throw new Error(`Container build/start failed: ${error.message}`);
-        }
+    // Verify container is running
+    const psResult = await executeCommand('docker-compose', ['ps']);
+    logger.info('Container status:', psResult.stdout);
+
+    if (!psResult.stdout.includes(tempContainerName)) {
+        throw new Error('Container failed to start after creation');
+    }
+
+} catch (error) {
+    logger.error('Container failed to start:', error.stderr || error.message);
+    throw new Error(`Container start failed: ${error.stderr || error.message}`);
+}
 
         // Wait for container to be healthy
         sendLogs(ws, deploymentId, 'Waiting for container to be healthy...');
