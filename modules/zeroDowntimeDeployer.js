@@ -146,7 +146,9 @@ class ZeroDowntimeDeployer {
 
         } finally {
             process.chdir(currentDir);
-            await this.cleanup(deployDir, rollbackNeeded);
+            if (!rollbackNeeded) {
+                await this.cleanup(deployDir, rollbackNeeded);
+            }
         }
     }
     async setupDirectories(deployDir, backupDir) {
