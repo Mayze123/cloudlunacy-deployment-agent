@@ -94,11 +94,10 @@ class TemplateHandler {
     logger.info('Merged config:', JSON.stringify(config, null, 2));
 
     const files = {};
-    const sanitizedAppName = `${appName}-${environment}`.toLowerCase().replace(/[^a-z0-9-]/g, '-');
 
     const templateContext = {
       appName,
-      sanitizedAppName,
+      sanitizedAppName: appName,
       environment,
       containerPort,
       hostPort,

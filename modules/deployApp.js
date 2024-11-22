@@ -24,7 +24,7 @@ async function deployApp(payload, ws) {
         envVarsToken
     } = payload;
 
-    const projectName = `${deploymentId}-${serviceName}`.toLowerCase().replace(/[^a-z0-9-]/g, '-');
+    const projectName = `${deploymentId}-${appName}`.toLowerCase().replace(/[^a-z0-9-]/g, '-');
     const deployDir = path.join('/opt/cloudlunacy/deployments', deploymentId);
     const currentDir = process.cwd();
     
