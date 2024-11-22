@@ -66,7 +66,7 @@ async function deployApp(payload, ws) {
         const tempContainerName = `${serviceName}-${deploymentId.substring(0, 8)}`;
 
         // Retrieve and set up environment variables
-        sendLogs(ws, deploymentId, 'Retrieving environment variables...');
+        sendLogs(ws, deploymentId, 'Setting up environment variables...');
         let envVars = {};
         let envFilePath;
         try {
@@ -80,22 +80,17 @@ async function deployApp(payload, ws) {
             
             envVars = data.variables;
             logger.info('Successfully retrieved environment variables');
+
+            const envManager = new EnvironmentManager(deployDir);
+            envFilePath = await envManager.writeEnvFile(envVars, environment);
+            await fs.promises.copyFile(envFilePath, path.join(deployDir, '.env'));
+            
+            logger.info(`Environment files written successfully`);
         } catch (error) {
-            throw new Error(`Environment variables setup failed: ${error.message}`);
+            throw new Error(`Environment setup failed: ${error.message}`);
         }
 
-        // Clone repository
-        sendLogs(ws, deploymentId, 'Cloning repository...');
-        const repoUrl = `https://x-access-token:${githubToken}@github.com/${repositoryOwner}/${repositoryName}.git`;
-        await executeCommand('git', ['clone', '-b', branch, repoUrl, '.']);
-        sendLogs(ws, deploymentId, 'Repository cloned successfully');
-
-        // Initialize environment manager and write env files
-        const envManager = new EnvironmentManager(deployDir);
-        envFilePath = await envManager.writeEnvFile(envVars, environment);
-        await fs.promises.copyFile(envFilePath, path.join(deployDir, '.env'));
-        
-        // Generate deployment files with temporary container name
+        // Generate deployment files
         const templateHandler = new TemplateHandler(
             path.join('/opt/cloudlunacy/templates'),
             deployConfig
@@ -103,7 +98,7 @@ async function deployApp(payload, ws) {
 
         const files = await templateHandler.generateDeploymentFiles({
             appType,
-            appName: tempContainerName, // Use temporary name for new container
+            appName: tempContainerName,
             environment,
             containerPort,
             hostPort,
@@ -122,36 +117,77 @@ async function deployApp(payload, ws) {
             fs.promises.writeFile('docker-compose.yml', files.dockerCompose)
         ]);
 
-        // Build and start new container
-        sendLogs(ws, deploymentId, 'Building and starting new container...');
-        await executeCommand('docker-compose', ['up', '-d', '--build']);
+        // Clone repository
+        sendLogs(ws, deploymentId, 'Cloning repository...');
+        const repoUrl = `https://x-access-token:${githubToken}@github.com/${repositoryOwner}/${repositoryName}.git`;
+        await executeCommand('git', ['clone', '-b', branch, repoUrl, '.']);
 
-        // Wait for new container to be healthy
-        sendLogs(ws, deploymentId, 'Waiting for new container to be healthy...');
+        // Build container with detailed output
+        sendLogs(ws, deploymentId, 'Building container...');
+        try {
+            // Remove any existing container with the same name
+            await executeCommand('docker', ['rm', '-f', tempContainerName]).catch(() => {});
+            
+            // Build with verbose output
+            const { stdout: buildOutput, stderr: buildError } = await executeCommand('docker-compose', [
+                'build',
+                '--no-cache',
+                '--progress=plain'
+            ]);
+            
+            logger.info('Build output:', buildOutput);
+            if (buildError) {
+                logger.warn('Build warnings:', buildError);
+            }
+
+            // Start container
+            sendLogs(ws, deploymentId, 'Starting container...');
+            const { stdout: upOutput, stderr: upError } = await executeCommand('docker-compose', ['up', '-d']);
+            logger.info('Container start output:', upOutput);
+            if (upError) {
+                logger.warn('Container start warnings:', upError);
+            }
+
+            // Verify container is running
+            const { stdout: psOutput } = await executeCommand('docker-compose', ['ps']);
+            logger.info('Container status:', psOutput);
+
+            if (!psOutput.includes(tempContainerName)) {
+                throw new Error('Container failed to start after creation');
+            }
+
+        } catch (error) {
+            // Get detailed error information
+            try {
+                const { stdout: logs } = await executeCommand('docker-compose', ['logs']);
+                logger.error('Container logs:', logs);
+            } catch (logError) {
+                logger.error('Failed to retrieve logs:', logError);
+            }
+            throw new Error(`Container build/start failed: ${error.message}`);
+        }
+
+        // Wait for container to be healthy
+        sendLogs(ws, deploymentId, 'Waiting for container to be healthy...');
         const health = await checkDeploymentHealth(tempContainerName, domain);
         
         if (!health.healthy) {
-            throw new Error(`New container health check failed: ${health.message}`);
+            throw new Error(`Health check failed: ${health.message}`);
         }
 
         // If we have an existing container, perform zero-downtime swap
         if (existingContainer) {
             sendLogs(ws, deploymentId, 'Performing zero-downtime swap...');
             
-            // Connect new container to traefik network first
             await executeCommand('docker', ['network', 'connect', 'traefik-network', tempContainerName]);
-            
-            // Wait for new container to be fully ready
             await new Promise(resolve => setTimeout(resolve, 5000));
             
             try {
-                // Disconnect and remove old container
                 await executeCommand('docker', ['network', 'disconnect', 'traefik-network', existingContainer]);
                 await executeCommand('docker', ['stop', existingContainer]);
                 await executeCommand('docker', ['rm', existingContainer]);
             } catch (swapError) {
                 logger.warn('Error during container swap:', swapError);
-                // Continue with deployment even if cleanup fails
             }
         }
 
@@ -170,14 +206,22 @@ async function deployApp(payload, ws) {
     } catch (error) {
         logger.error(`Deployment ${deploymentId} failed:`, error);
         
-        // Cleanup on failure
+        // Enhanced cleanup on failure
         try {
-            // Clean up temporary container if it exists
+            // Get logs before cleanup if possible
             const tempContainerName = `${serviceName}-${deploymentId.substring(0, 8)}`;
-            await executeCommand('docker', ['stop', tempContainerName]).catch(() => {});
-            await executeCommand('docker', ['rm', tempContainerName]).catch(() => {});
+            try {
+                const { stdout: finalLogs } = await executeCommand('docker-compose', ['logs']);
+                logger.error('Final container logs:', finalLogs);
+            } catch (logError) {
+                logger.warn('Could not retrieve final logs:', logError);
+            }
+
+            // Cleanup container
+            await executeCommand('docker-compose', ['down', '-v']).catch(() => {});
+            await executeCommand('docker', ['rm', '-f', tempContainerName]).catch(() => {});
             
-            // Clean up deployment directory
+            // Cleanup directory
             await fs.promises.rm(deployDir, { recursive: true, force: true });
         } catch (cleanupError) {
             logger.error('Cleanup failed:', cleanupError);
