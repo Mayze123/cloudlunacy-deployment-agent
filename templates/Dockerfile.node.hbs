@@ -24,27 +24,60 @@ COPY . .
 RUN {{{buildCommand}}}
 {{/if}}
 
-# Set up health check endpoint and error handling
+# Set up standalone health check server
 RUN echo 'const http = require("http"); \
+\
 const server = http.createServer((req, res) => { \
   if (req.url === "/health") { \
-    res.writeHead(200); \
-    res.end("OK"); \
+    res.writeHead(200, {"Content-Type": "application/json"}); \
+    res.end(JSON.stringify({ status: "OK" })); \
+  } else { \
+    res.writeHead(404); \
+    res.end(); \
   } \
 }); \
-server.listen(process.env.PORT || {{containerPort}});' > healthcheck.js
+\
+const port = process.env.HEALTH_PORT || 9000; \
+server.listen(port, () => { \
+  console.log(`Health check server listening on port ${port}`); \
+}); \
+\
+// Keep the process running \
+process.stdin.resume();' > health-server.js
 
-# Create error handling script
-RUN echo 'require("dotenv").config(); \
-process.on("uncaughtException", (error) => { \
-  console.error("Uncaught Exception:", error); \
-  process.exit(1); \
-}); \
-process.on("unhandledRejection", (reason, promise) => { \
-  console.error("Unhandled Rejection at:", promise, "reason:", reason); \
-  process.exit(1); \
-}); \
-require("./healthcheck");' > load-env.js
+# Create startup script
+RUN echo '#!/bin/sh \
+\
+# Start health check server in background \
+node health-server.js & \
+HEALTH_PID=$! \
+\
+# Start the main application \
+{{#if startCommand}} \
+{{{startCommand}}} & \
+{{else}} \
+npm start & \
+{{/if}} \
+MAIN_PID=$! \
+\
+# Error handling function \
+cleanup() { \
+    echo "Stopping processes..." \
+    kill $HEALTH_PID $MAIN_PID 2>/dev/null \
+    exit \
+} \
+\
+# Set up signal handling \
+trap cleanup INT TERM \
+\
+# Wait for either process to exit \
+wait -n \
+\
+# If we get here, one of the processes died \
+echo "A process exited unexpectedly" \
+cleanup' > start.sh
+
+RUN chmod +x start.sh
 
 # Create non-root user
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
@@ -53,11 +86,9 @@ RUN chown -R appuser:appgroup /app
 # Switch to non-root user
 USER appuser
 
-# Expose port
+# Expose ports
 EXPOSE {{containerPort}}
+EXPOSE 9000
 
-{{#if startCommand}}
-CMD ["sh", "-c", "{{{startCommand}}}"] 
-{{else}}
-CMD ["sh", "-c", "node load-env.js & npm start"]
-{{/if}}
+# Start both servers
+CMD ["./start.sh"]
