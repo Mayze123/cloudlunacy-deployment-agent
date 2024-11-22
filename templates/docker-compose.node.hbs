@@ -1,13 +1,13 @@
 version: '3.8'
 
 services:
-  {{sanitizedAppName}}:
-    container_name: {{sanitizedAppName}}
+  {{sanitizedAppName}}-{{deploymentColor}}:
     build:
       context: .
       dockerfile: Dockerfile
     ports:
       - "{{hostPort}}:{{containerPort}}"
+      # - "9000:9000" # Remove or restrict if not needed externally
     environment:
       - NODE_ENV={{environment}}
       - PORT={{containerPort}}
@@ -19,8 +19,8 @@ services:
       - traefik-network
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.{{sanitizedAppName}}.rule=Host(`{{domain}}`)"
-      - "traefik.http.services.{{sanitizedAppName}}.loadbalancer.server.port={{containerPort}}"
+      - "traefik.http.routers.{{sanitizedAppName}}-{{deploymentColor}}.rule=Host(`{{domain}}`)"
+      - "traefik.http.services.{{sanitizedAppName}}-{{deploymentColor}}.loadbalancer.server.port={{containerPort}}"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
       interval: 30s

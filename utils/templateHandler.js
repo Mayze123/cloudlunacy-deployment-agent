@@ -1,7 +1,4 @@
-const Handlebars = require('handlebars');
-const fs = require('fs').promises;
-const path = require('path');
-const logger = require('./logger');
+// TemplateHandler.js
 
 class TemplateHandler {
   constructor(templatesDir, deployConfig) {
@@ -87,7 +84,8 @@ class TemplateHandler {
       hostPort,
       envFile,
       buildConfig = {},
-      domain
+      domain,
+      deploymentColor
     } = appConfig;
 
     const config = this.mergeDefaults(appType, buildConfig);
@@ -103,6 +101,7 @@ class TemplateHandler {
       hostPort,
       envFile,
       domain,
+      deploymentColor,
       ...config
     };
 

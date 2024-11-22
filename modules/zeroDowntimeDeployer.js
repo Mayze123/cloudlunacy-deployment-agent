@@ -24,6 +24,27 @@ class ZeroDowntimeDeployer {
         this.deploymentLocks = new Set(); // Simple in-memory lock mechanism
     }
 
+    async getDeploymentColor(serviceName, environment) {
+        // Check existing projects to determine the next color
+        const colors = ['blue', 'green'];
+        for (const color of colors) {
+            const projectName = `${serviceName}-${environment}-${color}`.toLowerCase().replace(/[^a-z0-9-]/g, '-');
+            // Check if any container exists for this project
+            // Execute 'docker-compose -p projectName ps -q'
+            try {
+                const { stdout } = await executeCommand('docker-compose', ['-p', projectName, 'ps', '-q']);
+                if (!stdout.trim()) {
+                    // No containers running for this project, select this color
+                    return color;
+                }
+            } catch (error) {
+                logger.warn(`Error checking project ${projectName}: ${error.message}`);
+            }
+        }
+        // If both colors are in use, fallback or implement rotation logic
+        throw new Error('Both Blue and Green environments are currently active. Cannot deploy.');
+    }
+
     async deploy(payload, ws) {
         // Define schema for payload validation
         const payloadSchema = Joi.object({
@@ -81,8 +102,24 @@ class ZeroDowntimeDeployer {
 
         this.deploymentLocks.add(serviceLockKey);
 
-        const projectName = `${deploymentId}-${appName}`.toLowerCase().replace(/[^a-z0-9-]/g, '-');
-        const deployDir = path.join(this.deployBaseDir, deploymentId);
+        // Determine deployment color (blue or green)
+        let deploymentColor;
+        try {
+            deploymentColor = await this.getDeploymentColor(serviceName, environment);
+        } catch (error) {
+            logger.error(`Failed to determine deployment color: ${error.message}`);
+            this.sendError(ws, {
+                deploymentId,
+                status: 'failed',
+                message: `Deployment color determination failed: ${error.message}`
+            });
+            this.deploymentLocks.delete(serviceLockKey);
+            return;
+        }
+
+        // Use project name based on serviceName, environment, and color
+        const projectName = `${serviceName}-${environment}-${deploymentColor}`.toLowerCase().replace(/[^a-z0-9-]/g, '-');
+        const deployDir = path.join(this.deployBaseDir, deploymentId); // Deployment directory remains unique
         const backupDir = path.join(deployDir, 'backup');
 
         let oldContainer = null;
@@ -111,7 +148,7 @@ class ZeroDowntimeDeployer {
             // Clone repository into deployDir, handling existing backup
             await this.cloneRepository(deployDir, repositoryOwner, repositoryName, branch, githubToken);
 
-            // Rest of the deployment process...
+            // Get current container before deployment
             oldContainer = await this.getCurrentContainer(serviceName);
             if (oldContainer) {
                 await this.backupCurrentState(oldContainer, backupDir);
@@ -120,8 +157,7 @@ class ZeroDowntimeDeployer {
             await this.portManager.initialize().catch(logger.warn);
 
             const ports = await this.allocatePortsWithRetry(serviceName, oldContainer);
-            const blueGreenLabel = oldContainer ? 'green' : 'blue';
-            const newContainerName = `${serviceName}-${blueGreenLabel}`;
+            const newContainerName = `${serviceName}-${deploymentColor}`;
 
             newContainer = await this.buildAndStartContainer({
                 projectName,
@@ -188,6 +224,28 @@ class ZeroDowntimeDeployer {
         }
     }
 
+    async getDeploymentColor(serviceName, environment) {
+        // Define colors for Blue-Green
+        const colors = ['blue', 'green'];
+
+        // Check which colors are currently active
+        for (const color of colors) {
+            const projectName = `${serviceName}-${environment}-${color}`.toLowerCase().replace(/[^a-z0-9-]/g, '-');
+            try {
+                const { stdout } = await executeCommand('docker-compose', ['-p', projectName, 'ps', '-q']);
+                if (!stdout.trim()) {
+                    // This color is available for deployment
+                    return color;
+                }
+            } catch (error) {
+                logger.warn(`Error checking project ${projectName}: ${error.message}`);
+            }
+        }
+
+        // If both colors are active, throw an error or implement rotation
+        throw new Error('Both Blue and Green environments are currently active. Cannot deploy.');
+    }
+
     async setupDirectories(deployDir, backupDir) {
         try {
             // Ensure deployment directory exists
@@ -207,35 +265,35 @@ class ZeroDowntimeDeployer {
         // Embed the token in the clone URL
         const repoUrl = `https://x-access-token:${githubToken}@github.com/${repoOwner}/${repoName}.git`;
         const tempDir = path.join(path.dirname(deployDir), `${path.basename(deployDir)}_temp_${Date.now()}`);
-        
+
         try {
             logger.info(`Cloning repository into temporary directory: ${tempDir}`);
-            
+
             // Clone into temporary directory
             await executeCommand('git', ['clone', '-b', branch, repoUrl, tempDir]);
-            
+
             logger.info('Repository cloned successfully into temporary directory');
-            
+
             // Copy contents from tempDir to deployDir, excluding 'backup'
             const files = await fs.readdir(tempDir);
-            
+
             for (const file of files) {
                 if (file === 'backup') continue; // Skip backup directory if present in the repo
-                
+
                 const srcPath = path.join(tempDir, file);
                 const destPath = path.join(deployDir, file);
-                
+
                 const stat = await fs.lstat(srcPath);
-                
+
                 if (stat.isDirectory()) {
                     await fs.cp(srcPath, destPath, { recursive: true, force: true });
                 } else {
                     await fs.copyFile(srcPath, destPath);
                 }
             }
-            
+
             logger.info('Repository files merged into deployment directory successfully');
-            
+
         } catch (error) {
             logger.error(`Git clone failed: ${error.message}`);
             throw new Error(`Git clone failed: ${error.message}`);
@@ -252,13 +310,13 @@ class ZeroDowntimeDeployer {
         try {
             const timestamp = new Date().toISOString().replace(/[:.]/g, '-').toLowerCase();
             const backupName = `backup-${container.name}-${timestamp}`;
-            
+
             await executeCommand('docker', [
                 'commit',
                 container.id,
                 backupName
             ]);
-            
+
             // Save backup metadata
             const backupMetadata = {
                 containerId: container.id,
@@ -266,7 +324,7 @@ class ZeroDowntimeDeployer {
                 timestamp: new Date().toISOString(),
                 backupName
             };
-            
+
             await fs.writeFile(
                 path.join(backupDir, 'backup-metadata.json'),
                 JSON.stringify(backupMetadata, null, 2)
@@ -361,13 +419,23 @@ class ZeroDowntimeDeployer {
     }
 
     async allocatePortsWithRetry(serviceName, oldContainer) {
+        // Attempt to reuse the old port if available
+        if (oldContainer) {
+            const oldHostPort = await this.portManager.getHostPort(serviceName);
+            if (oldHostPort && !(await this.portManager.isPortInUse(oldHostPort))) {
+                logger.info(`Reusing old port ${oldHostPort} for service ${serviceName}`);
+                return { hostPort: oldHostPort, containerPort: 8080 };
+            }
+        }
+
+        // Allocate new port if old port is unavailable
         let attempts = 0;
         const maxAttempts = 3;
 
         while (attempts < maxAttempts) {
             try {
                 const { hostPort, containerPort } = await this.portManager.allocatePort(serviceName);
-                
+
                 const inUse = await this.portManager.isPortInUse(hostPort);
                 if (!inUse) {
                     logger.info(`Port ${hostPort} is available for use.`);
@@ -375,8 +443,6 @@ class ZeroDowntimeDeployer {
                 }
 
                 logger.warn(`Port ${hostPort} is already in use. Skipping allocation.`);
-                // Optionally, implement a mechanism to notify or select another port without killing processes
-
             } catch (error) {
                 attempts++;
                 logger.warn(`Port allocation attempt ${attempts} failed: ${error.message}`);
@@ -397,7 +463,7 @@ class ZeroDowntimeDeployer {
         while (!healthy && attempts < this.healthCheckRetries) {
             try {
                 await new Promise(resolve => setTimeout(resolve, this.healthCheckInterval));
-                
+
                 const healthCheck = await executeCommand('curl', ['-f', `http://${domain}/health`]);
 
                 if (healthCheck.stdout.includes('OK')) {
@@ -502,20 +568,9 @@ class ZeroDowntimeDeployer {
 
             logger.info(`Container ${serviceName} started with ID ${newContainerId.trim()}`);
 
-            // Add initial labels using docker label command
-            // Note: The 'docker label' command does not exist. Instead, labels should be defined in the docker-compose.yml.
-            // Remove the following block if labels are already set in the docker-compose.yml
-            /*
-            await executeCommand('docker', [
-                'label', 
-                newContainerId.trim(),
-                `traefik.enable=true`,
-                `traefik.http.services.${serviceName}.loadbalancer.server.port=${ports.containerPort}`
-            ]);
-            */
+            // No need to add labels here if they're defined in docker-compose.yml
 
             return { id: newContainerId.trim(), name: serviceName };
-
         } catch (error) {
             logger.error('Container build/start failed:', error);
             throw new Error(`Failed to build and start container: ${error.message}`);
@@ -526,8 +581,16 @@ class ZeroDowntimeDeployer {
         try {
             logger.info(`Gracefully removing container: ${container.name}`);
 
-            // Stop and remove the container using Docker Compose
-            const projectName = container.name; // Assuming project name is same as container name
+            // Extract serviceName and environment from container name
+            const parts = container.name.split('-');
+            if (parts.length < 3) {
+                throw new Error(`Invalid container name format: ${container.name}`);
+            }
+            const serviceName = parts.slice(0, -1).join('-'); // Handles service names with hyphens
+            const environment = parts[parts.length - 1]; // Assuming last part is environment
+
+            const projectName = `${serviceName}-${environment}`.toLowerCase().replace(/[^a-z0-9-]/g, '-');
+
             await executeCommand('docker-compose', [
                 '-p', projectName,
                 'down', '-v'
