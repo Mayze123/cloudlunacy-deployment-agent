@@ -204,39 +204,38 @@ class ZeroDowntimeDeployer {
     }
 
     async cloneRepository(deployDir, repoOwner, repoName, branch, githubToken) {
-        const repoUrl = `https://github.com/${repoOwner}/${repoName}.git`;
+        // Embed the token in the clone URL
+        const repoUrl = `https://x-access-token:${githubToken}@github.com/${repoOwner}/${repoName}.git`;
         const tempDir = path.join(path.dirname(deployDir), `${path.basename(deployDir)}_temp_${Date.now()}`);
-
+        
         try {
             logger.info(`Cloning repository into temporary directory: ${tempDir}`);
-
+            
             // Clone into temporary directory
-            await executeCommand('git', ['clone', '-b', branch, repoUrl, tempDir], {
-                env: { ...process.env, GITHUB_TOKEN: githubToken }
-            });
-
+            await executeCommand('git', ['clone', '-b', branch, repoUrl, tempDir]);
+            
             logger.info('Repository cloned successfully into temporary directory');
-
+            
             // Copy contents from tempDir to deployDir, excluding 'backup'
             const files = await fs.readdir(tempDir);
-
+            
             for (const file of files) {
                 if (file === 'backup') continue; // Skip backup directory if present in the repo
-
+                
                 const srcPath = path.join(tempDir, file);
                 const destPath = path.join(deployDir, file);
-
+                
                 const stat = await fs.lstat(srcPath);
-
+                
                 if (stat.isDirectory()) {
                     await fs.cp(srcPath, destPath, { recursive: true, force: true });
                 } else {
                     await fs.copyFile(srcPath, destPath);
                 }
             }
-
+            
             logger.info('Repository files merged into deployment directory successfully');
-
+            
         } catch (error) {
             logger.error(`Git clone failed: ${error.message}`);
             throw new Error(`Git clone failed: ${error.message}`);
@@ -398,12 +397,10 @@ class ZeroDowntimeDeployer {
         while (!healthy && attempts < this.healthCheckRetries) {
             try {
                 await new Promise(resolve => setTimeout(resolve, this.healthCheckInterval));
+                
+                const healthCheck = await executeCommand('curl', ['-f', `http://${domain}/health`]);
 
-                // Use external health check instead of docker exec
-                const healthUrl = `http://${domain}/health`;
-                const { stdout, stderr } = await executeCommand('curl', ['-f', healthUrl]);
-
-                if (stdout.includes('OK')) {
+                if (healthCheck.stdout.includes('OK')) {
                     healthy = true;
                     logger.info(`Health check passed for container ${container.name}`);
                     break;
@@ -505,6 +502,18 @@ class ZeroDowntimeDeployer {
 
             logger.info(`Container ${serviceName} started with ID ${newContainerId.trim()}`);
 
+            // Add initial labels using docker label command
+            // Note: The 'docker label' command does not exist. Instead, labels should be defined in the docker-compose.yml.
+            // Remove the following block if labels are already set in the docker-compose.yml
+            /*
+            await executeCommand('docker', [
+                'label', 
+                newContainerId.trim(),
+                `traefik.enable=true`,
+                `traefik.http.services.${serviceName}.loadbalancer.server.port=${ports.containerPort}`
+            ]);
+            */
+
             return { id: newContainerId.trim(), name: serviceName };
 
         } catch (error) {
@@ -600,11 +609,9 @@ class ZeroDowntimeDeployer {
     sendError(ws, data) {
         if (ws && ws.readyState === ws.OPEN) {
             ws.send(JSON.stringify({
-                type: 'error',
+                type: 'status',
                 payload: {
-                    deploymentId: data.deploymentId,
-                    status: 'failed',
-                    message: data.message || 'Deployment failed',
+                    ...data,
                     timestamp: new Date().toISOString()
                 }
             }));
