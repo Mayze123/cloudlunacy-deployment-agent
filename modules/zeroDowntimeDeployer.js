@@ -212,37 +212,68 @@ class ZeroDowntimeDeployer {
 
     async switchTraffic(oldContainer, newContainer, domain) {
         try {
-            // First try to disconnect old container if it exists
-            if (oldContainer) {
-                await executeCommand('docker', [
-                    'network',
-                    'disconnect',
-                    'traefik-network',
-                    oldContainer.id
-                ]).catch(() => {});
-            }
-
-            // Wait a moment for network changes to propagate
-            await new Promise(resolve => setTimeout(resolve, 2000));
-
-            // Connect new container to traefik network
-            await executeCommand('docker', [
-                'network',
-                'connect',
-                'traefik-network',
+            // First verify if the new container exists
+            await executeCommand('docker', ['inspect', newContainer.id]);
+    
+            // Check if new container is already connected to traefik network
+            const { stdout: networkInfo } = await executeCommand('docker', [
+                'inspect',
+                '--format',
+                '{{json .NetworkSettings.Networks}}',
                 newContainer.id
             ]);
-
-            // Update traefik labels
+    
+            const networks = JSON.parse(networkInfo);
+            
+            if (!networks['traefik-network']) {
+                // Connect new container to traefik network only if not already connected
+                await executeCommand('docker', [
+                    'network',
+                    'connect',
+                    'traefik-network',
+                    newContainer.id
+                ]);
+            }
+    
+            // Update traefik labels using container update instead of label command
             await executeCommand('docker', [
-                'label',
-                newContainer.id,
-                `traefik.http.routers.${newContainer.name}.rule=Host(\`${domain}\`)`
+                'container',
+                'update',
+                '--label-add',
+                `traefik.http.routers.${newContainer.name}.rule=Host(\`${domain}\`)`,
+                '--label-add',
+                'traefik.enable=true',
+                newContainer.id
             ]);
-
+    
             // Wait for traefik to detect the new container
             await new Promise(resolve => setTimeout(resolve, 5000));
-
+    
+            // If old container exists, try to disconnect it
+            if (oldContainer) {
+                try {
+                    const { stdout: oldNetworkInfo } = await executeCommand('docker', [
+                        'inspect',
+                        '--format',
+                        '{{json .NetworkSettings.Networks}}',
+                        oldContainer.id
+                    ]);
+    
+                    const oldNetworks = JSON.parse(oldNetworkInfo);
+                    
+                    if (oldNetworks['traefik-network']) {
+                        await executeCommand('docker', [
+                            'network',
+                            'disconnect',
+                            'traefik-network',
+                            oldContainer.id
+                        ]);
+                    }
+                } catch (error) {
+                    logger.warn(`Failed to disconnect old container: ${error.message}`);
+                }
+            }
+    
         } catch (error) {
             logger.error('Traffic switch failed:', error);
             throw new Error(`Traffic switch failed: ${error.message}`);
@@ -251,64 +282,79 @@ class ZeroDowntimeDeployer {
 
     async performRollback(oldContainer, newContainer, domain) {
         logger.info('Initiating rollback procedure');
-
+    
         try {
+            // First handle the new container
             if (newContainer) {
-                // First remove new container from network
-                await executeCommand('docker', [
-                    'network',
-                    'disconnect',
-                    'traefik-network',
-                    newContainer.id
-                ]).catch(() => {});
-
-                // Wait for network changes
-                await new Promise(resolve => setTimeout(resolve, 2000));
-
-                // Stop and remove new container
-                await executeCommand('docker', ['stop', newContainer.id]).catch(() => {});
-                await executeCommand('docker', ['rm', newContainer.id]).catch(() => {});
-            }
-
-            if (oldContainer) {
-                // Verify old container is not connected before connecting
                 try {
-                    await executeCommand('docker', [
-                        'network',
+                    // Check if new container is connected to traefik network
+                    const { stdout: networkInfo } = await executeCommand('docker', [
                         'inspect',
-                        'traefik-network',
                         '--format',
-                        '{{.Containers}}'
+                        '{{json .NetworkSettings.Networks}}',
+                        newContainer.id
                     ]);
+    
+                    const networks = JSON.parse(networkInfo);
                     
-                    // If old container is still connected, disconnect it first
-                    await executeCommand('docker', [
-                        'network',
-                        'disconnect',
-                        'traefik-network',
-                        oldContainer.id
-                    ]).catch(() => {});
+                    if (networks['traefik-network']) {
+                        await executeCommand('docker', [
+                            'network',
+                            'disconnect',
+                            'traefik-network',
+                            newContainer.id
+                        ]);
+                    }
+    
+                    // Stop and remove new container
+                    await executeCommand('docker', ['stop', '--time=30', newContainer.id]);
+                    await executeCommand('docker', ['rm', '-f', newContainer.id]);
                 } catch (error) {
-                    // Network inspection failed, assume container is not connected
+                    logger.warn(`Failed to cleanup new container: ${error.message}`);
                 }
-
-                // Wait before reconnecting
-                await new Promise(resolve => setTimeout(resolve, 2000));
-
-                // Reconnect old container
-                await executeCommand('docker', [
-                    'network',
-                    'connect',
-                    'traefik-network',
-                    oldContainer.id
-                ]);
-
-                // Restore labels
-                await executeCommand('docker', [
-                    'label',
-                    oldContainer.id,
-                    `traefik.http.routers.${oldContainer.name}.rule=Host(\`${domain}\`)`
-                ]);
+            }
+    
+            // Then handle the old container
+            if (oldContainer) {
+                try {
+                    // Check if old container exists
+                    await executeCommand('docker', ['inspect', oldContainer.id]);
+    
+                    // Check old container's network connections
+                    const { stdout: oldNetworkInfo } = await executeCommand('docker', [
+                        'inspect',
+                        '--format',
+                        '{{json .NetworkSettings.Networks}}',
+                        oldContainer.id
+                    ]);
+    
+                    const oldNetworks = JSON.parse(oldNetworkInfo);
+                    
+                    // Connect to traefik network if not already connected
+                    if (!oldNetworks['traefik-network']) {
+                        await executeCommand('docker', [
+                            'network',
+                            'connect',
+                            'traefik-network',
+                            oldContainer.id
+                        ]);
+                    }
+    
+                    // Update traefik labels
+                    await executeCommand('docker', [
+                        'container',
+                        'update',
+                        '--label-add',
+                        `traefik.http.routers.${oldContainer.name}.rule=Host(\`${domain}\`)`,
+                        '--label-add',
+                        'traefik.enable=true',
+                        oldContainer.id
+                    ]);
+    
+                } catch (error) {
+                    logger.error('Failed to restore old container:', error);
+                    throw new Error(`Failed to restore old container: ${error.message}`);
+                }
             }
         } catch (error) {
             logger.error('Rollback operation failed:', error);
@@ -461,8 +507,7 @@ class ZeroDowntimeDeployer {
                     require('../deployConfig.json')
                 );
             }
-
-            // Generate deployment files
+    
             const files = await this.templateHandler.generateDeploymentFiles({
                 appType: payload.appType,
                 appName: serviceName,
@@ -478,20 +523,12 @@ class ZeroDowntimeDeployer {
                     retries: 3
                 }
             });
-
-            // Write deployment files
+    
             await Promise.all([
                 fs.writeFile(path.join(deployDir, 'Dockerfile'), files.dockerfile),
                 fs.writeFile(path.join(deployDir, 'docker-compose.yml'), files.dockerCompose)
             ]);
-
-            // Verify files were written
-            await Promise.all([
-                fs.access(path.join(deployDir, 'Dockerfile')),
-                fs.access(path.join(deployDir, 'docker-compose.yml')),
-                fs.access(envFilePath)
-            ]);
-
+    
             // Build container
             await executeCommand('docker-compose', [
                 'build',
@@ -504,40 +541,38 @@ class ZeroDowntimeDeployer {
                     COMPOSE_PROJECT_NAME: projectName
                 }
             });
-
+    
             // Start container
             await executeCommand('docker-compose', ['up', '-d'], {
                 env: {
                     ...process.env,
                     COMPOSE_PROJECT_NAME: projectName,
-                    DOCKER_CLIENT_TIMEOUT: '240',
-                    COMPOSE_HTTP_TIMEOUT: '240'
+                    COMPOSE_HTTP_TIMEOUT: '300'
                 }
             });
-
+    
             // Get container ID
             const { stdout: containerId } = await executeCommand('docker-compose', ['ps', '-q'], {
                 env: { COMPOSE_PROJECT_NAME: projectName }
             });
-
+    
             if (!containerId.trim()) {
                 throw new Error('Failed to get container ID after startup');
             }
-
-            // Verify container is running
-            const { stdout: containerState } = await executeCommand('docker', [
-                'inspect',
-                '--format',
-                '{{.State.Status}}',
+    
+            // Add initial Traefik labels during container creation
+            await executeCommand('docker', [
+                'container',
+                'update',
+                '--label-add',
+                `traefik.http.services.${serviceName}.loadbalancer.server.port=${ports.containerPort}`,
+                '--label-add',
+                'traefik.enable=true',
                 containerId.trim()
             ]);
-
-            if (containerState.trim() !== 'running') {
-                throw new Error(`Container is not running, current state: ${containerState.trim()}`);
-            }
-
+    
             return { id: containerId.trim(), name: serviceName };
-
+    
         } catch (error) {
             logger.error('Container build/start failed:', error);
             throw new Error(`Failed to build and start container: ${error.message}`);
