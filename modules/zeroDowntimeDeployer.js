@@ -108,17 +108,8 @@ class ZeroDowntimeDeployer {
                 throw new Error('Failed to set up environment variables');
             }
 
-            // Clean deployment directory without changing process.cwd()
-            const files = await fs.readdir(deployDir);
-            for (const file of files) {
-                if (file === 'backup') continue; // Skip backup directory
-                await fs.rm(path.join(deployDir, file), { recursive: true, force: true });
-            }
-
-            // Clone repository into deployDir
-            logger.info(`Cloning repository into ${deployDir}`);
-            const repoUrl = `https://x-access-token:${githubToken}@github.com/${repositoryOwner}/${repositoryName}.git`;
-            await executeCommand('git', ['clone', '-b', branch, repoUrl, deployDir]);
+            // Clone repository into deployDir, handling existing backup
+            await this.cloneRepository(deployDir, repositoryOwner, repositoryName, branch, githubToken);
 
             // Rest of the deployment process...
             oldContainer = await this.getCurrentContainer(serviceName);
@@ -199,7 +190,7 @@ class ZeroDowntimeDeployer {
 
     async setupDirectories(deployDir, backupDir) {
         try {
-            // Ensure parent directories exist
+            // Ensure deployment directory exists
             await fs.mkdir(deployDir, { recursive: true });
 
             // Create backup directory
@@ -209,6 +200,52 @@ class ZeroDowntimeDeployer {
         } catch (error) {
             logger.error(`Failed to setup directories: ${error.message}`);
             throw new Error(`Directory setup failed: ${error.message}`);
+        }
+    }
+
+    async cloneRepository(deployDir, repoOwner, repoName, branch, githubToken) {
+        const repoUrl = `https://github.com/${repoOwner}/${repoName}.git`;
+        const tempDir = path.join(path.dirname(deployDir), `${path.basename(deployDir)}_temp_${Date.now()}`);
+
+        try {
+            logger.info(`Cloning repository into temporary directory: ${tempDir}`);
+
+            // Clone into temporary directory
+            await executeCommand('git', ['clone', '-b', branch, repoUrl, tempDir], {
+                env: { ...process.env, GITHUB_TOKEN: githubToken }
+            });
+
+            logger.info('Repository cloned successfully into temporary directory');
+
+            // Copy contents from tempDir to deployDir, excluding 'backup'
+            const files = await fs.readdir(tempDir);
+
+            for (const file of files) {
+                if (file === 'backup') continue; // Skip backup directory if present in the repo
+
+                const srcPath = path.join(tempDir, file);
+                const destPath = path.join(deployDir, file);
+
+                const stat = await fs.lstat(srcPath);
+
+                if (stat.isDirectory()) {
+                    await fs.cp(srcPath, destPath, { recursive: true, force: true });
+                } else {
+                    await fs.copyFile(srcPath, destPath);
+                }
+            }
+
+            logger.info('Repository files merged into deployment directory successfully');
+
+        } catch (error) {
+            logger.error(`Git clone failed: ${error.message}`);
+            throw new Error(`Git clone failed: ${error.message}`);
+        } finally {
+            // Clean up temporary directory
+            if (await this.directoryExists(tempDir)) {
+                await fs.rm(tempDir, { recursive: true, force: true });
+                logger.info(`Temporary directory ${tempDir} removed`);
+            }
         }
     }
 
@@ -317,7 +354,7 @@ class ZeroDowntimeDeployer {
             ]);
 
             const [name, id, status] = containerInfo.trim().split(' ');
-            return { name, id, status };
+            return { name: name.replace('/', ''), id, status };
         } catch (error) {
             logger.warn(`Error getting current container: ${error.message}`);
             return null;
@@ -413,8 +450,8 @@ class ZeroDowntimeDeployer {
             }
 
             const files = await this.templateHandler.generateDeploymentFiles({
-                appType,
-                appName,
+                appType: payload.appType,
+                appName: serviceName,
                 environment,
                 containerPort: ports.containerPort,
                 hostPort: ports.hostPort,
