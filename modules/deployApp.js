@@ -25,6 +25,7 @@ async function deployApp(payload, ws) {
 
     const serviceName = `${appName}-${environment}`.toLowerCase().replace(/[^a-z0-9-]/g, '-');
     const deployDir = path.join('/opt/cloudlunacy/deployments', serviceName);
+    const tempDir = path.join(deployDir, `temp-${deploymentId}`);
     const currentDir = process.cwd();
     
     logger.info(`Starting deployment ${deploymentId} for ${appType} app: ${appName}`);
@@ -51,9 +52,17 @@ async function deployApp(payload, ws) {
             }
         }
 
-        // Create deployment directory if it doesn't exist
+        // Ensure base deployment directory exists
         await fs.promises.mkdir(deployDir, { recursive: true });
-        process.chdir(deployDir);
+
+        // Clean up any existing temporary directory
+        if (await fs.promises.access(tempDir).catch(() => false)) {
+            await fs.promises.rm(tempDir, { recursive: true, force: true });
+        }
+
+        // Create fresh temporary directory
+        await fs.promises.mkdir(tempDir, { recursive: true });
+        process.chdir(tempDir);
 
         // Send initial status
         sendStatus(ws, {
@@ -79,51 +88,41 @@ async function deployApp(payload, ws) {
 
             if (!portMappingValid) {
                 logger.warn('Invalid port mapping detected for running container');
-                // We'll continue with deployment as the new container will have correct mapping
             }
         }
 
-        // Clone new code to a temporary directory
-        const tempDir = path.join(deployDir, `temp-${deploymentId}`);
-        await fs.promises.mkdir(tempDir, { recursive: true });
-        process.chdir(tempDir);
+        // Setup environment variables first
+        sendLogs(ws, deploymentId, 'Setting up environment...');
+        let envVars, envFilePath;
+        try {
+            const { data } = await apiClient.post(`/api/deploy/env-vars/${deploymentId}`, {
+                token: envVarsToken
+            });
+            
+            if (!data || !data.variables) {
+                throw new Error('Invalid response format for environment variables');
+            }
+            
+            envVars = data.variables;
+            logger.info('Successfully retrieved environment variables');
 
-       // Setup environment variables
-       sendLogs(ws, deploymentId, 'Setting up environment...');
-       let envVars, envFilePath;
-       try {
-           const { data } = await apiClient.post(`/api/deploy/env-vars/${deploymentId}`, {
-               token: envVarsToken
-           });
-           
-           if (!data || !data.variables) {
-               throw new Error('Invalid response format for environment variables');
-           }
-           
-           envVars = data.variables;
-           logger.info('Successfully retrieved environment variables');
+            const envManager = new EnvironmentManager(tempDir);
+            envFilePath = await envManager.writeEnvFile(envVars, environment);
+            await fs.promises.copyFile(envFilePath, path.join(tempDir, '.env'));
+            
+            logger.info(`Environment files written successfully for ${environment}`);
+        } catch (error) {
+            throw new Error(`Environment setup failed: ${error.message}`);
+        }
 
-           // Initialize environment manager and write env files
-           const envManager = new EnvironmentManager(tempDir); // Note: using tempDir instead of deployDir
-           envFilePath = await envManager.writeEnvFile(envVars, environment);
-           
-           // Copy the env file to .env as well (for compatibility)
-           await fs.promises.copyFile(envFilePath, path.join(tempDir, '.env'));
-           
-           logger.info(`Environment files written successfully for ${environment}`);
-       } catch (error) {
-           throw new Error(`Environment setup failed: ${error.message}`);
-       }
+        // Clone repository
+        sendLogs(ws, deploymentId, 'Cloning repository...');
+        await executeCommand('git', ['clone', '-b', branch, 
+            `https://x-access-token:${githubToken}@github.com/${repositoryOwner}/${repositoryName}.git`,
+            '.'
+        ]);
 
-           // Clone repository (after environment setup)
-           sendLogs(ws, deploymentId, 'Cloning repository...');
-           await executeCommand('git', ['clone', '-b', branch, 
-               `https://x-access-token:${githubToken}@github.com/${repositoryOwner}/${repositoryName}.git`,
-               '.'
-           ]);
-   
-
-        // Generate deployment files with unique temp name
+        // Generate deployment files
         const tempContainerName = `${serviceName}-${deploymentId.substring(0, 8)}`;
         const templateHandler = new TemplateHandler(
             path.join('/opt/cloudlunacy/templates'),
@@ -136,7 +135,7 @@ async function deployApp(payload, ws) {
             environment,
             containerPort,
             hostPort,
-            envFile: path.basename(envFilePath), 
+            envFile: path.basename(envFilePath),
             domain,
             buildConfig: {
                 nodeVersion: '18',
@@ -145,11 +144,10 @@ async function deployApp(payload, ws) {
             }
         });
 
-        // Write configuration files
+        // Write deployment files
         await Promise.all([
             fs.promises.writeFile('Dockerfile', files.dockerfile),
-            fs.promises.writeFile('docker-compose.yml', files.dockerCompose),
-            fs.promises.writeFile('.env', envVars)
+            fs.promises.writeFile('docker-compose.yml', files.dockerCompose)
         ]);
 
         // Build and start new container
@@ -168,16 +166,17 @@ async function deployApp(payload, ws) {
         if (runningContainer) {
             sendLogs(ws, deploymentId, 'Performing zero-downtime swap...');
             
-            // Switch traffic to new container
             await executeCommand('docker', ['network', 'connect', 'traefik-network', tempContainerName]);
-            
-            // Wait for Traefik to update
             await new Promise(resolve => setTimeout(resolve, 5000));
             
-            // Remove old container from network and stop it
-            await executeCommand('docker', ['network', 'disconnect', 'traefik-network', runningContainer]);
-            await executeCommand('docker', ['stop', runningContainer]);
-            await executeCommand('docker', ['rm', runningContainer]);
+            try {
+                await executeCommand('docker', ['network', 'disconnect', 'traefik-network', runningContainer]);
+                await executeCommand('docker', ['stop', runningContainer]);
+                await executeCommand('docker', ['rm', runningContainer]);
+            } catch (swapError) {
+                logger.warn('Error during container swap:', swapError);
+                // Continue with deployment even if cleanup fails
+            }
         }
 
         // Rename temp container to final name
@@ -194,8 +193,9 @@ async function deployApp(payload, ws) {
             throw new Error('Final port mapping verification failed');
         }
 
-        // Cleanup temp directory
-        await fs.promises.rm(tempDir, { recursive: true, force: true });
+        // Move successful deployment to final location
+        await fs.promises.rm(deployDir, { recursive: true, force: true });
+        await fs.promises.rename(tempDir, deployDir);
 
         // Send success status
         sendStatus(ws, {
@@ -216,6 +216,13 @@ async function deployApp(payload, ws) {
             await executeCommand('docker', ['rm', tempContainerName]).catch(() => {});
         } catch (cleanupError) {
             logger.error('Cleanup after failure error:', cleanupError);
+        }
+
+        // Clean up temporary directory
+        try {
+            await fs.promises.rm(tempDir, { recursive: true, force: true });
+        } catch (cleanupError) {
+            logger.error('Failed to clean up temporary directory:', cleanupError);
         }
 
         sendStatus(ws, {
