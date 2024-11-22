@@ -140,23 +140,35 @@ async function deployApp(payload, ws) {
             // Remove any existing images
             await executeCommand('docker', ['rmi', '-f', serviceName]).catch(() => {});
             
+            // Enable build kit for better output
+            process.env.DOCKER_BUILDKIT = '1';
+            process.env.COMPOSE_DOCKER_CLI_BUILD = '1';
+            
+            // Build with detailed output
             const buildResult = await executeCommand('docker-compose', [
                 'build',
                 '--no-cache',
                 '--progress=plain'
-            ]);
+            ], {
+                logOutput: true // Enable detailed logging
+            });
             
-            logger.info('Build output:', buildResult.stdout);
+            logger.info('Build command completed');
+            if (buildResult.stdout) {
+                logger.info('Build output:', buildResult.stdout);
+            }
             if (buildResult.stderr) {
                 logger.warn('Build warnings:', buildResult.stderr);
             }
 
-            // Verify the image exists
-            const { stdout: imageList } = await executeCommand('docker', ['images', '--format', '{{.Repository}}', serviceName]);
-            if (!imageList.includes(serviceName)) {
-                throw new Error('Image was not built successfully');
+            // Verify the build
+            const verification = await verifyBuild(serviceName);
+            if (!verification.success) {
+                throw new Error(`Build verification failed: ${verification.error}\n${verification.logs}`);
             }
-            logger.info('Image built successfully:', imageList);
+
+            logger.info(`Image built and verified successfully with ID: ${verification.imageId}`);
+
         } catch (error) {
             logger.error('Build failed:', error);
             throw new Error(`Container build failed: ${error.message}`);
@@ -262,6 +274,71 @@ async function deployApp(payload, ws) {
         });
     } finally {
         process.chdir(currentDir);
+    }
+}
+
+async function verifyBuild(serviceName) {
+    try {
+        // Check if image exists with both latest tag and no tag
+        const { stdout: imageList } = await executeCommand('docker', [
+            'images',
+            '--format', '{{.Repository}}:{{.Tag}}',
+            '--filter', `reference=${serviceName}*`
+        ]);
+
+        if (!imageList.includes(serviceName)) {
+            // Get build logs for debugging
+            const { stdout: buildLogs } = await executeCommand('docker-compose', [
+                'logs',
+                '--no-color'
+            ]).catch(() => ({ stdout: 'No build logs available' }));
+
+            // Also get any build-time container logs
+            const { stdout: containerLogs } = await executeCommand('docker', [
+                'ps',
+                '-a',
+                '--filter', `name=${serviceName}-build`,
+                '--format', '{{.ID}}'
+            ]).then(async (result) => {
+                if (result.stdout) {
+                    return executeCommand('docker', ['logs', result.stdout.trim()]);
+                }
+                return { stdout: 'No build container logs available' };
+            }).catch(() => ({ stdout: 'Failed to get build container logs' }));
+
+            logger.error('Build verification failed - Image not found');
+            logger.error('Build logs:', buildLogs);
+            logger.error('Build container logs:', containerLogs);
+            
+            return {
+                success: false,
+                error: 'Image was not built successfully',
+                logs: `Build logs:\n${buildLogs}\n\nBuild container logs:\n${containerLogs}`
+            };
+        }
+
+        // Verify image can be inspected
+        const { stdout: inspectOutput } = await executeCommand('docker', [
+            'inspect',
+            serviceName
+        ]);
+
+        const imageInfo = JSON.parse(inspectOutput)[0];
+        if (!imageInfo || !imageInfo.Id) {
+            throw new Error('Invalid image inspection result');
+        }
+
+        return {
+            success: true,
+            imageId: imageInfo.Id
+        };
+    } catch (error) {
+        logger.error('Build verification error:', error);
+        return {
+            success: false,
+            error: error.message,
+            logs: error.stderr || 'No error logs available'
+        };
     }
 }
 
