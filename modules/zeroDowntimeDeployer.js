@@ -1,13 +1,12 @@
-// ZeroDowntimeDeployer.js
+// deploy/ZeroDowntimeDeployer.js
 
 const { executeCommand } = require('../utils/executor');
 const logger = require('../utils/logger');
 const fs = require('fs').promises;
 const path = require('path');
 const TemplateHandler = require('../utils/templateHandler');
-const portManager = require('../utils/portManager');
 const { ensureDeploymentPermissions } = require('../utils/permissionCheck');
-const apiClient = require('../utils/apiClient');
+const apiClient = require('../utils/apiClient'); 
 const EnvironmentManager = require('../utils/environmentManager');
 const Joi = require('joi');
 
@@ -17,7 +16,6 @@ class ZeroDowntimeDeployer {
         this.healthCheckInterval = parseInt(process.env.HEALTH_CHECK_INTERVAL, 10) || 10000;
         this.startupGracePeriod = parseInt(process.env.STARTUP_GRACE_PERIOD, 10) || 30000;
         this.rollbackTimeout = parseInt(process.env.ROLLBACK_TIMEOUT, 10) || 180000;
-        this.portManager = portManager;
         this.templateHandler = null;
         this.deployBaseDir = process.env.DEPLOY_BASE_DIR || '/opt/cloudlunacy/deployments';
         this.templatesDir = process.env.TEMPLATES_DIR || '/opt/cloudlunacy/templates';
@@ -102,24 +100,27 @@ class ZeroDowntimeDeployer {
             // Initialize environment manager
             envManager = new EnvironmentManager(deployDir);
 
-            // Setup environment before git clone
-            const envFilePath = await this.setupEnvironment(deploymentId, envVarsToken, envManager, environment);
-            if (!envFilePath) {
-                throw new Error('Failed to set up environment variables');
+            // Setup environment by fetching environment variables via apiClient
+            const envVars = await this.fetchEnvironmentVariables(envVarsToken, deploymentId);
+            if (!envVars) {
+                throw new Error('Failed to retrieve environment variables');
             }
+
+            // Write environment variables to .env file
+            const envFilePath = await envManager.writeEnvFile(envVars, environment);
+            logger.info('Environment variables written to .env file');
 
             // Clone repository into deployDir, handling existing backup
             await this.cloneRepository(deployDir, repositoryOwner, repositoryName, branch, githubToken);
 
-            // Rest of the deployment process...
+            // Backup old container if exists
             oldContainer = await this.getCurrentContainer(serviceName);
             if (oldContainer) {
                 await this.backupCurrentState(oldContainer, backupDir);
             }
 
-            await this.portManager.initialize().catch(logger.warn);
+            // No need to allocate ports since Traefik handles routing
 
-            const ports = await this.allocatePortsWithRetry(serviceName, oldContainer);
             const blueGreenLabel = oldContainer ? 'green' : 'blue';
             const newContainerName = `${serviceName}-${blueGreenLabel}`;
 
@@ -128,14 +129,13 @@ class ZeroDowntimeDeployer {
                 serviceName: newContainerName,
                 deployDir,
                 domain,
-                ports,
                 envFilePath,
                 environment,
                 payload: value,
                 ws
             });
 
-            await envManager.updateDockerCompose(envFilePath, newContainerName);
+            // No need to update docker-compose with envFilePath as it's already included
 
             const envSetupOk = await envManager.verifyEnvironmentSetup(newContainer.name);
             if (!envSetupOk) {
@@ -147,15 +147,15 @@ class ZeroDowntimeDeployer {
 
             if (oldContainer) {
                 await this.gracefulContainerRemoval(oldContainer);
-                await this.portManager.releasePort(oldContainer.name);
+                // No ports to release
             }
 
             this.sendSuccess(ws, {
                 deploymentId,
                 status: 'success',
                 message: 'Zero-downtime deployment completed successfully',
-                domain,
-                port: ports.hostPort
+                domain
+                // port: ports.hostPort // No port
             });
 
         } catch (error) {
@@ -168,7 +168,7 @@ class ZeroDowntimeDeployer {
                 }
 
                 if (newContainer) {
-                    await this.portManager.releasePort(newContainer.name);
+                    // No ports to release
                 }
             } catch (rollbackError) {
                 logger.error('Rollback failed:', rollbackError);
@@ -188,6 +188,27 @@ class ZeroDowntimeDeployer {
         }
     }
 
+    async fetchEnvironmentVariables(envVarsToken, deploymentId) {
+        try {
+            const response = await apiClient.get(`/api/deploy/env-vars/${deploymentId}`, {
+                headers: {
+                    'Authorization': `Bearer ${envVarsToken}`
+                }
+            });
+
+            if (response.status === 200 && response.data && response.data.variables) {
+                logger.info('Environment variables fetched successfully from API');
+                return response.data.variables;
+            } else {
+                logger.error('Invalid response structure from environment variables API');
+                return null;
+            }
+        } catch (error) {
+            logger.error(`Failed to fetch environment variables: ${error.message}`);
+            return null;
+        }
+    }
+
     async setupDirectories(deployDir, backupDir) {
         try {
             // Ensure deployment directory exists
@@ -203,62 +224,62 @@ class ZeroDowntimeDeployer {
         }
     }
 
-async cloneRepository(deployDir, repoOwner, repoName, branch, githubToken) {
-    // Embed the token in the clone URL
-    const repoUrl = `https://x-access-token:${githubToken}@github.com/${repoOwner}/${repoName}.git`;
-    const tempDir = path.join(path.dirname(deployDir), `${path.basename(deployDir)}_temp_${Date.now()}`);
-    
-    try {
-        logger.info(`Cloning repository into temporary directory: ${tempDir}`);
-        
-        // Clone into temporary directory
-        await executeCommand('git', ['clone', '-b', branch, repoUrl, tempDir]);
-        
-        logger.info('Repository cloned successfully into temporary directory');
-        
-        // Copy contents from tempDir to deployDir, excluding 'backup'
-        const files = await fs.readdir(tempDir);
-        
-        for (const file of files) {
-            if (file === 'backup') continue; // Skip backup directory if present in the repo
-            
-            const srcPath = path.join(tempDir, file);
-            const destPath = path.join(deployDir, file);
-            
-            const stat = await fs.lstat(srcPath);
-            
-            if (stat.isDirectory()) {
-                await fs.cp(srcPath, destPath, { recursive: true, force: true });
-            } else {
-                await fs.copyFile(srcPath, destPath);
+    async cloneRepository(deployDir, repoOwner, repoName, branch, githubToken) {
+        // Embed the token in the clone URL
+        const repoUrl = `https://x-access-token:${githubToken}@github.com/${repoOwner}/${repoName}.git`;
+        const tempDir = path.join(path.dirname(deployDir), `${path.basename(deployDir)}_temp_${Date.now()}`);
+
+        try {
+            logger.info(`Cloning repository into temporary directory: ${tempDir}`);
+
+            // Clone into temporary directory
+            await executeCommand('git', ['clone', '-b', branch, repoUrl, tempDir]);
+
+            logger.info('Repository cloned successfully into temporary directory');
+
+            // Copy contents from tempDir to deployDir, excluding 'backup'
+            const files = await fs.readdir(tempDir);
+
+            for (const file of files) {
+                if (file === 'backup') continue; // Skip backup directory if present in the repo
+
+                const srcPath = path.join(tempDir, file);
+                const destPath = path.join(deployDir, file);
+
+                const stat = await fs.lstat(srcPath);
+
+                if (stat.isDirectory()) {
+                    await fs.cp(srcPath, destPath, { recursive: true, force: true });
+                } else {
+                    await fs.copyFile(srcPath, destPath);
+                }
+            }
+
+            logger.info('Repository files merged into deployment directory successfully');
+
+        } catch (error) {
+            logger.error(`Git clone failed: ${error.message}`);
+            throw new Error(`Git clone failed: ${error.message}`);
+        } finally {
+            // Clean up temporary directory
+            if (await this.directoryExists(tempDir)) {
+                await fs.rm(tempDir, { recursive: true, force: true });
+                logger.info(`Temporary directory ${tempDir} removed`);
             }
         }
-        
-        logger.info('Repository files merged into deployment directory successfully');
-        
-    } catch (error) {
-        logger.error(`Git clone failed: ${error.message}`);
-        throw new Error(`Git clone failed: ${error.message}`);
-    } finally {
-        // Clean up temporary directory
-        if (await this.directoryExists(tempDir)) {
-            await fs.rm(tempDir, { recursive: true, force: true });
-            logger.info(`Temporary directory ${tempDir} removed`);
-        }
     }
-}
 
     async backupCurrentState(container, backupDir) {
         try {
             const timestamp = new Date().toISOString().replace(/[:.]/g, '-').toLowerCase();
             const backupName = `backup-${container.name}-${timestamp}`;
-            
+
             await executeCommand('docker', [
                 'commit',
                 container.id,
                 backupName
             ]);
-            
+
             // Save backup metadata
             const backupMetadata = {
                 containerId: container.id,
@@ -266,7 +287,7 @@ async cloneRepository(deployDir, repoOwner, repoName, branch, githubToken) {
                 timestamp: new Date().toISOString(),
                 backupName
             };
-            
+
             await fs.writeFile(
                 path.join(backupDir, 'backup-metadata.json'),
                 JSON.stringify(backupMetadata, null, 2)
@@ -275,63 +296,6 @@ async cloneRepository(deployDir, repoOwner, repoName, branch, githubToken) {
             logger.info(`Backup created successfully: ${backupName}`);
         } catch (error) {
             logger.warn(`Backup failed: ${error.message}`);
-        }
-    }
-
-    async switchTraffic(oldContainer, newContainer, domain) {
-        try {
-            // Traffic is managed via Traefik labels in docker-compose.yml
-            // Since labels are already set during container creation, Traefik should handle routing automatically
-            // Implement a grace period to ensure Traefik picks up the new container
-
-            logger.info('Waiting for Traefik to update routes...');
-            await new Promise(resolve => setTimeout(resolve, 5000));
-
-            logger.info('Traffic switch completed successfully.');
-        } catch (error) {
-            logger.error('Traffic switch failed:', error);
-            throw new Error(`Traffic switch failed: ${error.message}`);
-        }
-    }
-
-    async performRollback(oldContainer, newContainer, domain) {
-        logger.info('Initiating rollback procedure');
-
-        try {
-            // Stop and remove new container
-            if (newContainer) {
-                logger.info(`Stopping and removing new container: ${newContainer.name}`);
-                await executeCommand('docker-compose', ['-p', newContainer.name, 'down', '-v']);
-            }
-
-            // Re-deploy old container if backup exists
-            if (oldContainer) {
-                const backupMetadataPath = path.join(path.dirname(oldContainer.name), 'backup', 'backup-metadata.json');
-                const exists = await this.fileExists(backupMetadataPath);
-                if (exists) {
-                    const backupMetadata = JSON.parse(await fs.readFile(backupMetadataPath, 'utf-8'));
-                    logger.info(`Restoring backup: ${backupMetadata.backupName}`);
-
-                    await executeCommand('docker', ['run', '-d', '--name', backupMetadata.containerName, backupMetadata.backupName]);
-
-                    // Wait for the restored container to be healthy
-                    await this.performHealthCheck({ id: backupMetadata.containerId, name: backupMetadata.containerName }, domain);
-                } else {
-                    logger.warn('No backup metadata found. Skipping restoration of old container.');
-                }
-            }
-        } catch (error) {
-            logger.error('Failed to restore old container:', error);
-            throw new Error(`Failed to restore old container: ${error.message}`);
-        }
-    }
-
-    async fileExists(filePath) {
-        try {
-            await fs.access(filePath);
-            return true;
-        } catch {
-            return false;
         }
     }
 
@@ -358,36 +322,6 @@ async cloneRepository(deployDir, repoOwner, repoName, branch, githubToken) {
             logger.warn(`Error getting current container: ${error.message}`);
             return null;
         }
-    }
-
-    async allocatePortsWithRetry(serviceName, oldContainer) {
-        let attempts = 0;
-        const maxAttempts = 3;
-
-        while (attempts < maxAttempts) {
-            try {
-                const { hostPort, containerPort } = await this.portManager.allocatePort(serviceName);
-                
-                const inUse = await this.portManager.isPortInUse(hostPort);
-                if (!inUse) {
-                    logger.info(`Port ${hostPort} is available for use.`);
-                    return { hostPort, containerPort };
-                }
-
-                logger.warn(`Port ${hostPort} is already in use. Skipping allocation.`);
-                // Optionally, implement a mechanism to notify or select another port without killing processes
-
-            } catch (error) {
-                attempts++;
-                logger.warn(`Port allocation attempt ${attempts} failed: ${error.message}`);
-                if (attempts === maxAttempts) {
-                    throw new Error('Failed to allocate ports after multiple attempts');
-                }
-                await new Promise(resolve => setTimeout(resolve, 1000));
-            }
-        }
-
-        throw new Error('Port allocation retries exhausted');
     }
 
     async performHealthCheck(container, domain) {
@@ -418,12 +352,27 @@ async cloneRepository(deployDir, repoOwner, repoName, branch, githubToken) {
         }
     }
 
+    async switchTraffic(oldContainer, newContainer, domain) {
+        try {
+            // Traffic is managed via Traefik labels in docker-compose.yml
+            // Since labels are already set during container creation, Traefik should handle routing automatically
+            // Implement a grace period to ensure Traefik picks up the new container
+
+            logger.info('Waiting for Traefik to update routes...');
+            await new Promise(resolve => setTimeout(resolve, 5000));
+
+            logger.info('Traffic switch completed successfully.');
+        } catch (error) {
+            logger.error('Traffic switch failed:', error);
+            throw new Error(`Traffic switch failed: ${error.message}`);
+        }
+    }
+
     async buildAndStartContainer({ 
         projectName, 
         serviceName, 
         deployDir, 
         domain, 
-        ports, 
         envFilePath, 
         environment,
         payload,
@@ -452,10 +401,10 @@ async cloneRepository(deployDir, repoOwner, repoName, branch, githubToken) {
                 appType: payload.appType,
                 appName: serviceName,
                 environment,
-                containerPort: ports.containerPort,
-                hostPort: ports.hostPort,
-                envFile: path.basename(envFilePath),
+                containerPort: payload.containerPort || 8080, // Assuming 8080
                 domain,
+                // hostPort: ports.hostPort, // No host port
+                envFile: path.basename(envFilePath),
                 health: {
                     checkPath: '/health',
                     interval: '30s',
@@ -512,79 +461,50 @@ async cloneRepository(deployDir, repoOwner, repoName, branch, githubToken) {
         }
     }  
 
-    async gracefulContainerRemoval(container) {
+    async performRollback(oldContainer, newContainer, domain) {
+        logger.info('Initiating rollback procedure');
+
         try {
-            logger.info(`Gracefully removing container: ${container.name}`);
-
-            // Stop and remove the container using Docker Compose
-            const projectName = container.name; // Assuming project name is same as container name
-            await executeCommand('docker-compose', [
-                '-p', projectName,
-                'down', '-v'
-            ]);
-
-            logger.info(`Container ${container.name} successfully removed`);
-        } catch (error) {
-            logger.warn(`Error removing old container: ${error.message}`);
-            throw error;
-        }
-    }
-
-    async validatePrerequisites() {
-        try {
-            await executeCommand('which', ['docker']);
-            await executeCommand('which', ['docker-compose']);
-            await this.validateNetworks();
-        } catch (error) {
-            throw new Error(`Prerequisite validation failed: ${error.message}`);
-        }
-    }
-
-    async validateNetworks() {
-        try {
-            const { stdout: networks } = await executeCommand('docker', ['network', 'ls', '--format', '{{.Name}}']);
-            if (!networks.includes('traefik-network')) {
-                await executeCommand('docker', ['network', 'create', 'traefik-network']);
-                logger.info('Created traefik-network');
-            } else {
-                logger.info('traefik-network already exists');
-            }
-        } catch (error) {
-            throw new Error(`Network validation failed: ${error.message}`);
-        }
-    }
-
-    async setupEnvironment(deploymentId, envVarsToken, envManager, environment) {
-        try {
-            const response = await apiClient.post(`/api/deploy/env-vars/${deploymentId}`, {
-                token: envVarsToken
-            });
-
-            if (!response.data || !response.data.variables) {
-                throw new Error('Invalid response format for environment variables');
+            // Stop and remove new container
+            if (newContainer) {
+                logger.info(`Stopping and removing new container: ${newContainer.name}`);
+                await executeCommand('docker-compose', ['-p', newContainer.name, 'down', '-v']);
             }
 
-            logger.info('Successfully retrieved environment variables');
-            const envFilePath = await envManager.writeEnvFile(response.data.variables, environment);
-            logger.info('Environment file written successfully');
+            // Re-deploy old container if backup exists
+            if (oldContainer) {
+                const backupMetadataPath = path.join('/opt/cloudlunacy/deployments', oldContainer.name, 'backup', 'backup-metadata.json');
+                const exists = await this.fileExists(backupMetadataPath);
+                if (exists) {
+                    const backupMetadata = JSON.parse(await fs.readFile(backupMetadataPath, 'utf-8'));
+                    logger.info(`Restoring backup: ${backupMetadata.backupName}`);
 
-            return envFilePath;
+                    // Restore the backup using Docker Compose
+                    const oldDeployDir = path.join(this.deployBaseDir, backupMetadata.containerName);
+                    await executeCommand('docker', ['run', '-d', '--name', backupMetadata.containerName, backupMetadata.backupName]);
+
+                    // Wait for the restored container to be healthy
+                    await this.performHealthCheck({ id: backupMetadata.containerId, name: backupMetadata.containerName }, domain);
+                } else {
+                    logger.warn('No backup metadata found. Skipping restoration of old container.');
+                }
+            }
         } catch (error) {
-            logger.error('Environment setup failed:', error);
-            throw new Error(`Environment setup failed: ${error.message}`);
+            logger.error('Failed to restore old container:', error);
+            throw new Error(`Failed to restore old container: ${error.message}`);
         }
     }
 
-    async performCommandWithTimeout(command, args, options = {}, timeout = 300000) { // default 5 minutes
-        return Promise.race([
-            executeCommand(command, args, options),
-            new Promise((_, reject) =>
-                setTimeout(() => reject(new Error('Command timed out')), timeout)
-            )
-        ]);
+    async fileExists(filePath) {
+        try {
+            await fs.access(filePath);
+            return true;
+        } catch {
+            return false;
+        }
     }
 
-    sendSuccess(ws, data) {
+    async sendSuccess(ws, data) {
         if (ws && ws.readyState === ws.OPEN) {
             ws.send(JSON.stringify({
                 type: 'status',
@@ -596,7 +516,7 @@ async cloneRepository(deployDir, repoOwner, repoName, branch, githubToken) {
         }
     }
 
-    sendError(ws, data) {
+    async sendError(ws, data) {
         if (ws && ws.readyState === ws.OPEN) {
             ws.send(JSON.stringify({
                 type: 'error',
@@ -633,6 +553,30 @@ async cloneRepository(deployDir, repoOwner, repoName, branch, githubToken) {
             return true;
         } catch {
             return false;
+        }
+    }
+
+    async validatePrerequisites() {
+        try {
+            await executeCommand('which', ['docker']);
+            await executeCommand('which', ['docker-compose']);
+            await this.validateNetworks();
+        } catch (error) {
+            throw new Error(`Prerequisite validation failed: ${error.message}`);
+        }
+    }
+
+    async validateNetworks() {
+        try {
+            const { stdout: networks } = await executeCommand('docker', ['network', 'ls', '--format', '{{.Name}}']);
+            if (!networks.includes('traefik-network')) {
+                await executeCommand('docker', ['network', 'create', 'traefik-network']);
+                logger.info('Created traefik-network');
+            } else {
+                logger.info('traefik-network already exists');
+            }
+        } catch (error) {
+            throw new Error(`Network validation failed: ${error.message}`);
         }
     }
 }

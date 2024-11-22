@@ -1,0 +1,37 @@
+# docker-compose.traefik.yml
+
+version: '3.8'
+
+services:
+  traefik:
+    image: traefik:v2.9
+    container_name: traefik
+    command:
+      - "--api=true"
+      - "--api.dashboard=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--certificatesresolvers.myresolver.acme.tlschallenge=true"
+      - "--certificatesresolvers.myresolver.acme.email=m.taibou.i@gmail.com" # Replace with your email
+      - "--certificatesresolvers.myresolver.acme.storage=/letsencrypt/acme.json"
+    ports:
+      - "80:80"      # HTTP
+      - "443:443"    # HTTPS
+      - "8080:8080"  # Traefik Dashboard (access via http://your-domain.com:8080)
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+      - "./letsencrypt:/letsencrypt"
+    networks:
+      - traefik-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.traefik.rule=Host(`traefik.yourdomain.com`)" # Replace with your desired Traefik dashboard domain
+      - "traefik.http.routers.traefik.service=api@internal"
+      - "traefik.http.routers.traefik.entrypoints=websecure"
+      - "traefik.http.routers.traefik.tls.certresolver=myresolver"
+
+networks:
+  traefik-network:
+    external: true

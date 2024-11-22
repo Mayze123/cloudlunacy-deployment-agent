@@ -1,9 +1,9 @@
 #!/bin/bash
 # ------------------------------------------------------------------------------
 # Installation Script for CloudLunacy Deployment Agent with Traefik
-# Version: 2.0.0
+# Version: 2.1.0
 # Author: Mahamadou Taibou
-# Date: 2024-11-17
+# Date: 2024-11-22
 #
 # Description:
 # This script installs and configures the CloudLunacy Deployment Agent on a VPS.
@@ -43,9 +43,9 @@ IFS=$'\n\t'
 display_info() {
     echo "-------------------------------------------------"
     echo "CloudLunacy Deployment Agent Installation Script"
-    echo "Version: 2.0.0"
+    echo "Version: 2.1.0"
     echo "Author: Mahamadou Taibou"
-    echo "Date: 2024-11-17"
+    echo "Date: 2024-11-22"
     echo "-------------------------------------------------"
 }
 
@@ -167,7 +167,7 @@ install_docker() {
                 apt-get update -y
                 apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
                 ;;
-            centos | rhel | fedora | rocky | almalinux)
+            centos | rhel | fedora | rocky | almalinux | amzn)
                 yum remove -y docker docker-client docker-client-latest docker-common docker-latest docker-latest-logrotate docker-logrotate docker-engine || true
                 yum install -y yum-utils
                 yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
@@ -254,8 +254,8 @@ setup_user_directories() {
     chmod -R 750 "$BASE_DIR"
 
     # Create subdirectories
-    mkdir -p "$BASE_DIR"/{logs,ssh,config,bin,deployments}
-    chown -R "$USERNAME":"$USERNAME" "$BASE_DIR"/{logs,ssh,config,bin,deployments}
+    mkdir -p "$BASE_DIR"/{logs,ssh,config,bin,deployments,traefik}
+    chown -R "$USERNAME":"$USERNAME" "$BASE_DIR"/{logs,ssh,config,bin,deployments,traefik}
 
     log "Directories created at $BASE_DIR."
 }
@@ -268,7 +268,7 @@ download_agent() {
     fi
     # Recreate the base directory and set ownership
     mkdir -p "$BASE_DIR"
-    chown "$USERNAME":"$USERNAME" "$BASE_DIR"
+    chown -R "$USERNAME":"$USERNAME" "$BASE_DIR"
 
     sudo -u "$USERNAME" git clone https://github.com/Mayze123/cloudlunacy-deployment-agent.git "$BASE_DIR"
     chown -R "$USERNAME":"$USERNAME" "$BASE_DIR"
@@ -365,59 +365,65 @@ setup_docker_permissions() {
 setup_traefik() {
     log "Setting up Traefik as a reverse proxy..."
 
-    TRAEFIK_DIR="/opt/traefik"
+    TRAEFIK_DIR="$BASE_DIR/traefik"
     mkdir -p "$TRAEFIK_DIR"
     chown "$USERNAME":"$USERNAME" "$TRAEFIK_DIR"
 
     # Create Traefik configuration file
-    cat <<EOF > "$TRAEFIK_DIR/traefik.yml"
-entryPoints:
-  web:
-    address: ":80"
+    cat <<EOF > "$TRAEFIK_DIR/docker-compose.traefik.yml"
+version: '3.8'
 
-providers:
-  docker:
-    endpoint: "unix:///var/run/docker.sock"
-    exposedByDefault: false
-
-log:
-  level: INFO
-EOF
-
-    chown "$USERNAME":"$USERNAME" "$TRAEFIK_DIR/traefik.yml"
-
-    # Create Docker Compose file for Traefik
-    cat <<EOF > "$TRAEFIK_DIR/docker-compose.yml"
-version: "3.8"
 services:
   traefik:
+    image: traefik:v2.9
     container_name: traefik
-    image: traefik:v2.10
     command:
-      - "--configFile=/traefik.yml"
+      - "--api.insecure=true" # Enable Traefik dashboard (secure in production)
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--certificatesresolvers.myresolver.acme.tlschallenge=true"
+      - "--certificatesresolvers.myresolver.acme.email=m.taibou.i@gmail.com" 
+      - "--certificatesresolvers.myresolver.acme.storage=/letsencrypt/acme.json"
     ports:
-      - "80:80"
+      - "80:80"      # HTTP
+      - "443:443"    # HTTPS
+      - "8080:8080"  # Traefik Dashboard (access via http://traefik.yourdomain.com:8080)
     volumes:
       - "/var/run/docker.sock:/var/run/docker.sock:ro"
-      - "./traefik.yml:/traefik.yml:ro"
-    restart: unless-stopped
+      - "./letsencrypt:/letsencrypt"
     networks:
       - traefik-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.traefik.rule=Host(\`traefik.yourdomain.com\`)" # Replace with your desired Traefik dashboard domain
+      - "traefik.http.routers.traefik.entrypoints=websecure"
+      - "traefik.http.routers.traefik.tls.certresolver=myresolver"
+      - "traefik.http.routers.traefik.service=api@internal"
+
 networks:
   traefik-network:
     external: true
 EOF
 
-    chown "$USERNAME":"$USERNAME" "$TRAEFIK_DIR/docker-compose.yml"
+    # Replace placeholders with actual values
+    sed -i "s/m.taibou.i@gmail.com/$BACKEND_URL/g" "$TRAEFIK_DIR/docker-compose.traefik.yml"
+    sed -i "s/traefik.yourdomain.com/traefik.${SERVER_ID}.yourdomain.com/g" "$TRAEFIK_DIR/docker-compose.traefik.yml"
+
+    chown "$USERNAME":"$USERNAME" "$TRAEFIK_DIR/docker-compose.traefik.yml"
 
     # Create the Docker network if it doesn't exist
     if ! docker network ls | grep -q "traefik-network"; then
         docker network create traefik-network
+        log "Created traefik-network."
+    else
+        log "traefik-network already exists."
     fi
 
     # Start Traefik using Docker Compose
     cd "$TRAEFIK_DIR"
-    sudo -u "$USERNAME" docker-compose up -d
+    sudo -u "$USERNAME" docker-compose -f docker-compose.traefik.yml up -d
 
     log "Traefik set up and running."
 }
@@ -442,7 +448,7 @@ User=$USERNAME
 Group=docker
 Environment=HOME=$BASE_DIR
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
-EnvironmentFile=$ENV_FILE
+EnvironmentFile=$BASE_DIR/.env
 
 [Install]
 WantedBy=multi-user.target
@@ -496,6 +502,9 @@ completion_message() {
     echo -e "Logs are located at: $BASE_DIR/logs/agent.log"
     echo -e "It's recommended to back up your environment file:"
     echo -e "cp $BASE_DIR/.env $BASE_DIR/.env.backup"
+
+    # Display SSH key instructions
+    # display_ssh_instructions
 }
 
 # Function to handle cleanup on error
@@ -558,7 +567,6 @@ main() {
     setup_traefik
     setup_service
     verify_installation
-    display_ssh_instructions
     completion_message
 }
 

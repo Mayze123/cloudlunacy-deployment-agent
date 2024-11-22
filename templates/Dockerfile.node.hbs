@@ -1,30 +1,22 @@
-FROM node:{{nodeVersion}}-alpine
+# Use official Node.js 18 Alpine image as the base
+FROM node:18-alpine
 
-# Install health check dependencies and common tools
+# Install necessary packages
 RUN apk add --no-cache wget curl bash nano
 
 # Set working directory
 WORKDIR /app
 
-# Install dependencies first (better layer caching)
+# Copy package.json and package-lock.json
 COPY package*.json ./
 
-{{#if useYarn}}
-RUN yarn install --production --frozen-lockfile
-{{else if usePnpm}}
-RUN npm install -g pnpm && pnpm install --frozen-lockfile --prod
-{{else}}
+# Install production dependencies
 RUN npm ci --only=production
-{{/if}}
 
-# Copy application code
+# Copy the rest of the application code
 COPY . .
 
-{{#if buildCommand}}
-RUN {{{buildCommand}}}
-{{/if}}
-
-# Set up standalone health check server
+# Create a health check server
 RUN printf '%s\n' \
   'const http = require("http");' \
   '' \
@@ -46,7 +38,7 @@ RUN printf '%s\n' \
   '// Keep the process running' \
   'process.stdin.resume();' > health-server.js
 
-# Create startup script
+# Create a start script
 RUN printf '%s\n' \
   '#!/bin/sh' \
   '' \
@@ -55,11 +47,7 @@ RUN printf '%s\n' \
   'HEALTH_PID=$!' \
   '' \
   '# Start the main application' \
-  {{#if startCommand}} \
-  '{{{startCommand}}} &' \
-  {{else}} \
   'npm start &' \
-  {{/if}} \
   'MAIN_PID=$!' \
   '' \
   '# Error handling function' \
@@ -79,18 +67,21 @@ RUN printf '%s\n' \
   'echo "A process exited unexpectedly"' \
   'cleanup' > start.sh
 
+# Make the start script executable
 RUN chmod +x start.sh
 
-# Create non-root user
+# Create a non-root user for security
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+
+# Change ownership of the application directory
 RUN chown -R appuser:appgroup /app
 
-# Switch to non-root user
+# Switch to the non-root user
 USER appuser
 
-# Expose ports
-EXPOSE {{containerPort}}
-EXPOSE 9000
+# Expose application and health check ports (optional, since Traefik handles routing)
+# EXPOSE 8080
+# EXPOSE 9000
 
-# Start both servers
+# Start the application using the start script
 CMD ["./start.sh"]

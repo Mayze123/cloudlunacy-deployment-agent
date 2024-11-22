@@ -1,3 +1,5 @@
+# docker-compose.node.hbs
+
 version: '3.8'
 
 services:
@@ -6,20 +8,23 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    ports:
-      - "{{hostPort}}:{{containerPort}}"
+    # Removed the ports section to avoid exposing individual host ports
+    # ports:
+    #   - "{{hostPort}}:{{containerPort}}"
     environment:
       - NODE_ENV={{environment}}
       - PORT={{containerPort}}
       - HEALTH_PORT=9000
     env_file:
-      - {{envFile}}
+      - .env
     restart: unless-stopped
     networks:
       - traefik-network
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.{{sanitizedAppName}}.rule=Host(`{{domain}}`)"
+      - "traefik.http.routers.{{sanitizedAppName}}.entrypoints=web,websecure"
+      - "traefik.http.routers.{{sanitizedAppName}}.tls.certresolver=myresolver"
       - "traefik.http.services.{{sanitizedAppName}}.loadbalancer.server.port={{containerPort}}"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
