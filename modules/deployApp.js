@@ -56,23 +56,23 @@ async function deployApp(payload, ws) {
         await portManager.initialize();
         const { hostPort, containerPort } = await portManager.allocatePort(serviceName);
 
-        // Check for existing deployment
-        const { stdout: existingContainer } = await executeCommand('docker', [
-            'ps',
-            '-a',
-            '--filter', `name=${serviceName}`,
-            '--format', '{{.Names}}'
-        ], { silent: true });
+        // Clean up any existing containers
+        try {
+            const { stdout: existingContainer } = await executeCommand('docker', [
+                'ps',
+                '-a',
+                '--filter', `name=${serviceName}`,
+                '--format', '{{.Names}}'
+            ]);
 
-        if (existingContainer) {
-            sendLogs(ws, deploymentId, `Found existing container: ${existingContainer}`);
-            try {
+            if (existingContainer) {
+                sendLogs(ws, deploymentId, `Found existing container: ${existingContainer}`);
                 await executeCommand('docker', ['stop', existingContainer]);
                 await executeCommand('docker', ['rm', existingContainer]);
                 sendLogs(ws, deploymentId, 'Removed existing container');
-            } catch (error) {
-                logger.warn('Error removing existing container:', error);
             }
+        } catch (error) {
+            logger.warn('Error checking/removing existing container:', error);
         }
 
         // Clone repository
@@ -129,25 +129,15 @@ async function deployApp(payload, ws) {
             fs.writeFile('docker-compose.yml', files.dockerCompose)
         ]);
 
-        // Verify and log deployment files
-        logger.info('Dockerfile contents:', await fs.readFile('Dockerfile', 'utf-8'));
-        logger.info('docker-compose.yml contents:', await fs.readFile('docker-compose.yml', 'utf-8'));
+        // Log file contents for debugging
+        const dockerfileContent = await fs.readFile('Dockerfile', 'utf-8');
+        const composeContent = await fs.readFile('docker-compose.yml', 'utf-8');
+        logger.info('Dockerfile contents:', dockerfileContent);
+        logger.info('docker-compose.yml contents:', composeContent);
 
         // Build container
         sendLogs(ws, deploymentId, 'Building container...');
         try {
-            // Clean up existing images
-            const { stdout: existingImages } = await executeCommand('docker', [
-                'images',
-                '--format', '{{.Repository}}',
-                tempContainerName
-            ]);
-            
-            if (existingImages) {
-                await executeCommand('docker', ['rmi', '-f', tempContainerName]);
-            }
-
-            // Build with detailed output
             const buildResult = await executeCommand('docker-compose', [
                 'build',
                 '--no-cache',
@@ -158,18 +148,6 @@ async function deployApp(payload, ws) {
             if (buildResult.stderr) {
                 logger.warn('Build warnings:', buildResult.stderr);
             }
-
-            // Verify image was created
-            const { stdout: imageCheck } = await executeCommand('docker', [
-                'images',
-                '--format', '{{.Repository}}:{{.Tag}}',
-                tempContainerName
-            ]);
-            
-            if (!imageCheck) {
-                throw new Error('Image was not created after build');
-            }
-            logger.info('Image created successfully:', imageCheck);
         } catch (error) {
             throw new Error(`Container build failed: ${error.message}`);
         }
@@ -177,45 +155,30 @@ async function deployApp(payload, ws) {
         // Start container
         sendLogs(ws, deploymentId, 'Starting container...');
         try {
-            // Clean up existing containers
-            await executeCommand('docker-compose', ['down', '--remove-orphans']);
-            
-            // Start container
             const startResult = await executeCommand('docker-compose', ['up', '-d']);
             logger.info('Start command output:', startResult.stdout);
-            if (startResult.stderr) {
-                logger.warn('Start command warnings:', startResult.stderr);
-            }
-
+            
             // Wait for container initialization
             await new Promise(resolve => setTimeout(resolve, 5000));
             
-            // Check container status
-            const { stdout: psOutput } = await executeCommand('docker-compose', ['ps']);
-            logger.info('Docker compose ps output:', psOutput);
+            // Verify container is running
+            const { stdout: containerStatus } = await executeCommand('docker', ['inspect', tempContainerName]);
+            const status = JSON.parse(containerStatus)[0];
             
-            if (!psOutput.includes(tempContainerName)) {
-                const { stdout: logs } = await executeCommand('docker-compose', ['logs']);
+            if (!status.State.Running) {
+                const { stdout: logs } = await executeCommand('docker', ['logs', tempContainerName]);
                 logger.error('Container logs:', logs);
-                throw new Error('Container was not created');
+                throw new Error(`Container is not running. State: ${JSON.stringify(status.State)}`);
             }
 
-            // Get detailed container information
-            const { stdout: inspectOutput } = await executeCommand('docker', ['inspect', tempContainerName]);
-            const containerInfo = JSON.parse(inspectOutput)[0];
-            
-            if (!containerInfo.State.Running) {
-                throw new Error(`Container is not running. State: ${JSON.stringify(containerInfo.State)}`);
-            }
-
-            logger.info('Container state:', containerInfo.State);
+            logger.info('Container is running. State:', status.State);
         } catch (error) {
-            // Get all available logs
+            // Get container logs if possible
             try {
-                const { stdout: logs } = await executeCommand('docker-compose', ['logs']);
+                const { stdout: logs } = await executeCommand('docker', ['logs', tempContainerName]);
                 logger.error('Container logs:', logs);
             } catch (logError) {
-                logger.error('Failed to retrieve logs:', logError);
+                logger.warn('Could not retrieve container logs:', logError);
             }
             throw new Error(`Container start failed: ${error.message}`);
         }
@@ -228,25 +191,9 @@ async function deployApp(payload, ws) {
             throw new Error(`Health check failed: ${health.message}`);
         }
 
-        // Perform zero-downtime swap if needed
-        if (existingContainer) {
-            sendLogs(ws, deploymentId, 'Performing zero-downtime swap...');
-            
-            await executeCommand('docker', ['network', 'connect', 'traefik-network', tempContainerName]);
-            await new Promise(resolve => setTimeout(resolve, 5000));
-            
-            try {
-                await executeCommand('docker', ['network', 'disconnect', 'traefik-network', existingContainer]);
-                await executeCommand('docker', ['stop', existingContainer]);
-                await executeCommand('docker', ['rm', existingContainer]);
-            } catch (swapError) {
-                logger.warn('Error during container swap:', swapError);
-            }
-        } else {
-            // If no existing container, just connect to traefik network
-            await executeCommand('docker', ['network', 'connect', 'traefik-network', tempContainerName]);
-        }
-
+        // Connect to traefik network
+        await executeCommand('docker', ['network', 'connect', 'traefik-network', tempContainerName]);
+        
         // Rename temporary container to final name
         await executeCommand('docker', ['rename', tempContainerName, serviceName]);
 
@@ -264,19 +211,21 @@ async function deployApp(payload, ws) {
         
         // Enhanced cleanup on failure
         try {
-            // Get logs before cleanup
+            // Try to get container logs if the container exists
             try {
-                const { stdout: finalLogs } = await executeCommand('docker-compose', ['logs']);
-                logger.error('Final container logs:', finalLogs);
+                await executeCommand('docker', ['logs', tempContainerName]);
             } catch (logError) {
-                logger.warn('Could not retrieve final logs:', logError);
+                logger.warn('Could not retrieve container logs:', logError);
             }
 
-            // Cleanup containers
-            await executeCommand('docker-compose', ['down', '-v']).catch(() => {});
-            await executeCommand('docker', ['rm', '-f', tempContainerName]).catch(() => {});
+            // Clean up container if it exists
+            try {
+                await executeCommand('docker', ['rm', '-f', tempContainerName]);
+            } catch (cleanupError) {
+                logger.warn('Could not remove container:', cleanupError);
+            }
             
-            // Cleanup directory
+            // Clean up directory
             await fs.rm(deployDir, { recursive: true, force: true });
         } catch (cleanupError) {
             logger.error('Cleanup failed:', cleanupError);
