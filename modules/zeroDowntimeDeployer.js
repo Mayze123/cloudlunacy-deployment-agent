@@ -44,27 +44,29 @@ class ZeroDowntimeDeployer {
         let envManager = null;
 
         try {
-            // Initial setup and validation
-            const permissionsOk = await ensureDeploymentPermissions();
-            if (!permissionsOk) {
-                throw new Error('Deployment failed: Permission check failed');
-            }
+          // Initial setup and validation
+          const permissionsOk = await ensureDeploymentPermissions();
+          if (!permissionsOk) {
+              throw new Error('Deployment failed: Permission check failed');
+          }
 
-            await this.validatePrerequisites(deployDir, backupDir);
-            await this.setupDirectories(deployDir, backupDir);
+          await this.validatePrerequisites(deployDir, backupDir);
+          
+          // Setup directories with proper cleanup
+          await this.setupDirectories(deployDir, backupDir);
 
-            // Initialize environment manager
-            envManager = new EnvironmentManager(deployDir);
+          // Initialize environment manager
+          envManager = new EnvironmentManager(deployDir);
 
-            // Set up environment variables
-            const envFilePath = await this.setupEnvironment(deploymentId, envVarsToken, envManager, environment);
-            if (!envFilePath) {
-                throw new Error('Failed to set up environment variables');
-            }
+          // Set up environment variables
+          const envFilePath = await this.setupEnvironment(deploymentId, envVarsToken, envManager, environment);
+          if (!envFilePath) {
+              throw new Error('Failed to set up environment variables');
+          }
 
-            // Clone repository
-            const repoUrl = `https://x-access-token:${githubToken}@github.com/${repositoryOwner}/${repositoryName}.git`;
-            await executeCommand('git', ['clone', '-b', branch, repoUrl, '.']);
+          // Clone repository after directory is clean
+          const repoUrl = `https://x-access-token:${githubToken}@github.com/${repositoryOwner}/${repositoryName}.git`;
+          await executeCommand('git', ['clone', '-b', branch, repoUrl, '.']);
 
             // Get existing container info for rollback
             oldContainer = await this.getCurrentContainer(serviceName);
@@ -147,12 +149,40 @@ class ZeroDowntimeDeployer {
             await this.cleanup(deployDir, rollbackNeeded);
         }
     }
-
     async setupDirectories(deployDir, backupDir) {
-        await fs.mkdir(deployDir, { recursive: true });
-        await fs.mkdir(backupDir, { recursive: true });
-        process.chdir(deployDir);
+        try {
+            // Create parent directories if they don't exist
+            await fs.mkdir(path.dirname(deployDir), { recursive: true });
+
+            // Clean up existing deployment directory
+            if (await this.directoryExists(deployDir)) {
+                logger.info(`Cleaning up existing deployment directory: ${deployDir}`);
+                await rimraf(deployDir);
+            }
+
+            // Create fresh directories
+            await fs.mkdir(deployDir, { recursive: true });
+            await fs.mkdir(backupDir, { recursive: true });
+
+            // Change to deployment directory
+            process.chdir(deployDir);
+            
+            logger.info(`Directories prepared successfully: ${deployDir}`);
+        } catch (error) {
+            logger.error(`Failed to setup directories: ${error.message}`);
+            throw new Error(`Directory setup failed: ${error.message}`);
+        }
     }
+
+    async directoryExists(dir) {
+        try {
+            await fs.access(dir);
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
 
     async validatePrerequisites(deployDir, backupDir) {
         await executeCommand('which', ['docker']);
