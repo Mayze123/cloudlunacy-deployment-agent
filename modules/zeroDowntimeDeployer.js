@@ -101,7 +101,7 @@ class ZeroDowntimeDeployer {
             envManager = new EnvironmentManager(deployDir);
 
             // Setup environment by fetching environment variables via apiClient
-            const envVars = await this.fetchEnvironmentVariables(envVarsToken, deploymentId);
+            const envVars = await this.fetchEnvironmentVariables(deploymentId, envVarsToken);
             if (!envVars) {
                 throw new Error('Failed to retrieve environment variables');
             }
@@ -188,21 +188,20 @@ class ZeroDowntimeDeployer {
         }
     }
 
-    async fetchEnvironmentVariables(envVarsToken, deploymentId) {
+    async fetchEnvironmentVariables(deploymentId, envVarsToken) {
         try {
-            const response = await apiClient.get(`/api/deploy/env-vars/${deploymentId}`, {
-                headers: {
-                    'Authorization': `Bearer ${envVarsToken}`
-                }
+            // Restore to POST request as per the old working code
+            const response = await apiClient.post(`/api/deploy/env-vars/${deploymentId}`, {
+                token: envVarsToken
             });
 
-            if (response.status === 200 && response.data && response.data.variables) {
-                logger.info('Environment variables fetched successfully from API');
-                return response.data.variables;
-            } else {
-                logger.error('Invalid response structure from environment variables API');
+            if (!response.data || !response.data.variables) {
+                logger.error('Invalid response format for environment variables API');
                 return null;
             }
+
+            logger.info('Successfully retrieved environment variables from API');
+            return response.data.variables;
         } catch (error) {
             logger.error(`Failed to fetch environment variables: ${error.message}`);
             return null;
