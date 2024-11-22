@@ -33,7 +33,6 @@ class ZeroDowntimeDeployer {
             envVarsToken
         } = payload;
 
-        // Sanitize project name for Docker compatibility
         const projectName = `${deploymentId}-${appName}`.toLowerCase().replace(/[^a-z0-9-]/g, '-');
         const deployDir = path.join('/opt/cloudlunacy/deployments', deploymentId);
         const backupDir = path.join(deployDir, 'backup');
@@ -43,10 +42,8 @@ class ZeroDowntimeDeployer {
         let newContainer = null;
         let rollbackNeeded = false;
         let envManager = null;
-        let envFilePath = null;
 
         try {
-            // Initial setup and validation
             const permissionsOk = await ensureDeploymentPermissions();
             if (!permissionsOk) {
                 throw new Error('Deployment failed: Permission check failed');
@@ -55,27 +52,24 @@ class ZeroDowntimeDeployer {
             await this.validatePrerequisites(deployDir, backupDir);
             await this.setupDirectories(deployDir, backupDir);
 
-            // Verify working directory
-            const currentWorkDir = process.cwd();
-            logger.info(`Current working directory: ${currentWorkDir}`);
-
-            // Initialize environment manager and setup environment variables
+            // Initialize environment manager
             envManager = new EnvironmentManager(deployDir);
-            envFilePath = await this.setupEnvironment(deploymentId, envVarsToken, envManager, environment);
             
+            // Setup environment before git clone
+            const envFilePath = await this.setupEnvironment(deploymentId, envVarsToken, envManager, environment);
             if (!envFilePath) {
                 throw new Error('Failed to set up environment variables');
             }
 
-            // Verify environment file exists
-            await fs.access(envFilePath);
+            // Temporarily move env file
+            const envFileName = path.basename(envFilePath);
+            const tempEnvPath = path.join(path.dirname(deployDir), envFileName);
+            await fs.rename(envFilePath, tempEnvPath);
 
-            // Clean directory before clone
-            const filesBeforeClone = await fs.readdir('.');
-            for (const file of filesBeforeClone) {
-                if (file !== '.env.production' && file !== '.env.development') {
-                    await fs.rm(file, { recursive: true, force: true });
-                }
+            // Clean directory
+            const files = await fs.readdir('.');
+            for (const file of files) {
+                await fs.rm(file, { recursive: true, force: true });
             }
 
             // Clone repository
@@ -83,23 +77,21 @@ class ZeroDowntimeDeployer {
             const repoUrl = `https://x-access-token:${githubToken}@github.com/${repositoryOwner}/${repositoryName}.git`;
             await executeCommand('git', ['clone', '-b', branch, repoUrl, '.']);
 
-            // Get existing container info
+            // Move env file back
+            await fs.rename(tempEnvPath, envFilePath);
+
+            // Rest of the deployment process...
             oldContainer = await this.getCurrentContainer(serviceName);
             if (oldContainer) {
                 await this.backupCurrentState(oldContainer, backupDir);
             }
 
-            // Initialize port manager if needed
             await this.portManager.initialize().catch(logger.warn);
-
-            // Allocate ports
+            
             const ports = await this.allocatePortsWithRetry(serviceName, oldContainer);
-
-            // Create new container with blue-green naming
             const blueGreenLabel = oldContainer ? 'green' : 'blue';
             const newContainerName = `${serviceName}-${blueGreenLabel}`;
 
-            // Build and start new container
             newContainer = await this.buildAndStartContainer({
                 projectName,
                 serviceName: newContainerName,
@@ -112,7 +104,6 @@ class ZeroDowntimeDeployer {
                 ws
             });
 
-            // Environment setup verification
             await envManager.updateDockerCompose(envFilePath, newContainerName);
             
             const envSetupOk = await envManager.verifyEnvironmentSetup(newContainer.name);
@@ -120,11 +111,9 @@ class ZeroDowntimeDeployer {
                 throw new Error('Environment verification failed');
             }
 
-            // Health check and traffic switch
             await this.performHealthCheck(newContainer, domain);
             await this.switchTraffic(oldContainer, newContainer, domain);
 
-            // Cleanup old container
             if (oldContainer) {
                 await this.gracefulContainerRemoval(oldContainer);
                 await this.portManager.releasePort(oldContainer.name);
