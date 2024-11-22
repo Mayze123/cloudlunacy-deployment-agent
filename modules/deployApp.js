@@ -239,7 +239,7 @@ async function checkDeploymentHealth(serviceName, domain) {
             logger.warn('Failed to fetch container logs:', logError);
         }
 
-        // Check container status with detailed output
+        // Check container status
         try {
             const { stdout: inspectOutput } = await executeCommand('docker', [
                 'inspect',
@@ -260,7 +260,7 @@ async function checkDeploymentHealth(serviceName, domain) {
         if (domain) {
             logger.info(`Verifying domain configuration for ${domain}`);
             
-            // Check if Traefik is running first
+            // Check if Traefik is running
             try {
                 const { stdout: traefikStatus } = await executeCommand('docker', [
                     'inspect',
@@ -278,19 +278,6 @@ async function checkDeploymentHealth(serviceName, domain) {
                 throw new Error(`Traefik check failed: ${traefikError.message}`);
             }
 
-            // Check internal container health
-            try {
-                const { stdout: networkList } = await executeCommand('docker', [
-                    'network',
-                    'inspect',
-                    'traefik-network'
-                ], { silent: true });
-                
-                logger.info('Network configuration:', networkList);
-            } catch (networkError) {
-                logger.warn('Failed to inspect network:', networkError);
-            }
-
             // Progressive domain checks with retries
             const maxRetries = 5;
             for (let i = 0; i < maxRetries; i++) {
@@ -302,7 +289,6 @@ async function checkDeploymentHealth(serviceName, domain) {
                         'exec',
                         serviceName,
                         'curl',
-                        '-v',  // verbose output
                         '--max-time',
                         '5',
                         'http://localhost:8080/health'
@@ -313,14 +299,17 @@ async function checkDeploymentHealth(serviceName, domain) {
                         logger.warn('Container health check stderr:', containerHealthErr);
                     }
 
-                    // Check domain through Traefik
+                    if (!containerHealth.includes('OK')) {
+                        throw new Error('Container health check failed - no OK response');
+                    }
+
+                    // Check domain health endpoint through Traefik
                     const { stdout: domainHealth, stderr: domainHealthErr } = await executeCommand('curl', [
-                        '-v',  // verbose output
                         '--max-time',
                         '5',
                         '-H',
                         `Host: ${domain}`,
-                        'http://localhost:80'
+                        'http://localhost:80/health'
                     ], { silent: true });
                     
                     logger.info(`Domain health check response: ${domainHealth}`);
@@ -328,20 +317,24 @@ async function checkDeploymentHealth(serviceName, domain) {
                         logger.warn('Domain health check stderr:', domainHealthErr);
                     }
 
-                    // If we get here without throwing, both checks passed
+                    if (!domainHealth.includes('OK')) {
+                        throw new Error('Domain health check failed - no OK response');
+                    }
+
+                    // If we get here, both checks passed
                     logger.info('All health checks passed successfully');
+                    logger.info(`Application is accessible at http://${domain}`);
+                    logger.info(`Health endpoint is available at http://${domain}/health`);
                     return { healthy: true };
                     
                 } catch (checkError) {
                     logger.warn(`Health check attempt ${i + 1} failed:`, checkError.message);
                     
-                    // On last retry, collect debugging information
                     if (i === maxRetries - 1) {
                         const debugInfo = await collectDebugInfo(serviceName, domain);
                         throw new Error(`Health checks failed after ${maxRetries} attempts. Debug info: ${JSON.stringify(debugInfo)}`);
                     }
                     
-                    // Wait before next retry
                     await new Promise(resolve => setTimeout(resolve, 10000));
                 }
             }
@@ -363,7 +356,8 @@ async function collectDebugInfo(serviceName, domain) {
         containerLogs: null,
         traefikState: null,
         networkInfo: null,
-        portBindings: null
+        portBindings: null,
+        healthEndpoint: null
     };
 
     try {
@@ -409,12 +403,23 @@ async function collectDebugInfo(serviceName, domain) {
         ], { silent: true });
         debugInfo.portBindings = portBindings;
 
+        // Check health endpoint specifically
+        const { stdout: healthCheck } = await executeCommand('curl', [
+            '--max-time',
+            '5',
+            '-H',
+            `Host: ${domain}`,
+            'http://localhost:80/health'
+        ], { silent: true });
+        debugInfo.healthEndpoint = healthCheck;
+
     } catch (error) {
         logger.warn('Error collecting debug info:', error);
     }
 
     return debugInfo;
 }
+
 
 
 
