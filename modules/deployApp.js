@@ -161,6 +161,12 @@ async function deployApp(payload, ws) {
             try {
                 const { stdout: logs } = await executeCommand('docker-compose', ['logs']);
                 logger.error('Container logs:', logs);
+                if (error.stdout) {
+                    logger.error(`Standard Output: ${error.stdout}`);
+                }
+                if (error.stderr) {
+                    logger.error(`Standard Error: ${error.stderr}`);
+                }
             } catch (logError) {
                 logger.error('Failed to retrieve logs:', logError);
             }
@@ -205,6 +211,12 @@ async function deployApp(payload, ws) {
 
     } catch (error) {
         logger.error(`Deployment ${deploymentId} failed:`, error);
+        if (error.stdout) {
+            logger.error(`Standard Output: ${error.stdout}`);
+        }
+        if (error.stderr) {
+            logger.error(`Standard Error: ${error.stderr}`);
+        }
         
         // Enhanced cleanup on failure
         try {

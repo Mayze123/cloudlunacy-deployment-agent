@@ -33,24 +33,29 @@ function executeCommand(command, args = [], options = {}) {
         let stderr = '';
 
         cmd.stdout.on('data', (data) => {
-            stdout += data.toString();
+            const output = data.toString();
+            stdout += output;
             if (!silent) {
-                logger.debug(`stdout: ${data.toString().trim()}`);
+                logger.debug(`stdout: ${output.trim()}`);
             }
         });
 
         cmd.stderr.on('data', (data) => {
-            stderr += data.toString();
+            const output = data.toString();
+            stderr += output;
             if (!silent) {
-                logger.debug(`stderr: ${data.toString().trim()}`);
+                logger.debug(`stderr: ${output.trim()}`);
             }
         });
 
         cmd.on('close', (code) => {
+            stdout = stdout.trim();
+            stderr = stderr.trim();
+
             const output = {
                 code,
-                stdout: stdout.trim(),
-                stderr: stderr.trim(),
+                stdout,
+                stderr,
                 success: code === 0
             };
 
@@ -59,8 +64,13 @@ function executeCommand(command, args = [], options = {}) {
                     logger.error(`Command failed: ${command} ${args.join(' ')}`);
                     logger.error(`Exit code: ${code}`);
                     if (stderr) logger.error(`stderr: ${stderr}`);
+                    if (stdout) logger.error(`stdout: ${stdout}`);
                 }
-                reject(new Error(`Command failed with exit code ${code}\nStderr: ${stderr}`));
+                const error = new Error(`Command failed with exit code ${code}`);
+                error.code = code;
+                error.stdout = stdout;
+                error.stderr = stderr;
+                reject(error);
             } else {
                 if (!silent && !ignoreError) {
                     logger.debug(`Command succeeded: ${command} ${args.join(' ')}`);
@@ -75,7 +85,9 @@ function executeCommand(command, args = [], options = {}) {
                 logger.error(`Failed to start command: ${command} ${args.join(' ')}`);
                 logger.error(`Error: ${error.message}`);
             }
-            reject(new Error(`Failed to execute command: ${error.message}`));
+            error.stdout = stdout.trim();
+            error.stderr = stderr.trim();
+            reject(error);
         });
     });
 }
