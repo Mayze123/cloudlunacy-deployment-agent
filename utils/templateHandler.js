@@ -3,6 +3,7 @@
 const fs = require('fs').promises;
 const path = require('path');
 const handlebars = require('handlebars');
+const logger = require('./logger'); 
 
 class TemplateHandler {
     constructor(templatesDir, deployConfig) {
@@ -11,37 +12,63 @@ class TemplateHandler {
     }
 
     async generateDeploymentFiles({ appType, appName, environment, containerPort, domain }) {
+        const appTypeLower = appType.toLowerCase();
+        logger.info(`Generating deployment files for appType: ${appTypeLower}`);
+
         // Load the appropriate template based on appType
-        const templateFile = this.deployConfig[appType]?.template;
-        if (!templateFile) {
+        const appConfig = this.deployConfig[appTypeLower];
+        if (!appConfig) {
             throw new Error(`No template found for appType: ${appType}`);
         }
 
-        const templatePath = path.join(this.templatesDir, templateFile);
-        const templateContent = await fs.readFile(templatePath, 'utf-8');
+        const { dockerfileTemplate, dockerComposeTemplate } = appConfig;
 
-        // Compile the Handlebars template
-        const template = handlebars.compile(templateContent);
+        if (!dockerfileTemplate || !dockerComposeTemplate) {
+            throw new Error(`Missing template definitions for appType: ${appType}`);
+        }
 
-        // Render the template with provided variables
-        const rendered = template({
+        const dockerfilePath = path.join(this.templatesDir, dockerfileTemplate);
+        const dockerComposePath = path.join(this.templatesDir, dockerComposeTemplate);
+
+        // Check if template files exist
+        try {
+            await fs.access(dockerfilePath);
+            await fs.access(dockerComposePath);
+            logger.info(`Template files found for appType: ${appType}`);
+        } catch (err) {
+            throw new Error(`Template file missing for appType: ${appType}. ${err.message}`);
+        }
+
+        // Read template contents
+        const [dockerfileContent, dockerComposeContent] = await Promise.all([
+            fs.readFile(dockerfilePath, 'utf-8'),
+            fs.readFile(dockerComposePath, 'utf-8')
+        ]);
+
+        // Compile Handlebars templates
+        const dockerfileTemplateCompiled = handlebars.compile(dockerfileContent);
+        const dockerComposeTemplateCompiled = handlebars.compile(dockerComposeContent);
+
+        // Render templates with provided variables
+        const renderedDockerfile = dockerfileTemplateCompiled({
             sanitizedAppName: appName.toLowerCase().replace(/[^a-z0-9-]/g, '-'),
             environment,
             containerPort,
             domain
         });
 
-        // Assuming the template includes both Dockerfile and docker-compose.yml separated by a delimiter
-        const delimiter = '---';
-        const [dockerfileContent, dockerComposeContent] = rendered.split(delimiter).map(part => part.trim());
+        const renderedDockerCompose = dockerComposeTemplateCompiled({
+            sanitizedAppName: appName.toLowerCase().replace(/[^a-z0-9-]/g, '-'),
+            environment,
+            containerPort,
+            domain
+        });
 
-        if (!dockerfileContent || !dockerComposeContent) {
-            throw new Error('Template must include both Dockerfile and docker-compose.yml separated by "---"');
-        }
+        logger.info(`Rendered deployment files for appType: ${appType}`);
 
         return {
-            dockerfile: dockerfileContent,
-            dockerCompose: dockerComposeContent
+            dockerfile: renderedDockerfile,
+            dockerCompose: renderedDockerCompose
         };
     }
 }
