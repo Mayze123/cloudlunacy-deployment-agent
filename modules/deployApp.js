@@ -1,6 +1,6 @@
 const { executeCommand } = require('../utils/executor');
 const logger = require('../utils/logger');
-const fs = require('fs');
+const fs = require('fs').promises; 
 const path = require('path');
 const TemplateHandler = require('../utils/templateHandler');
 const deployConfig = require('../deployConfig.json');
