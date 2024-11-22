@@ -1,5 +1,10 @@
 // TemplateHandler.js
 
+const Handlebars = require('handlebars');
+const fs = require('fs').promises;
+const path = require('path');
+const logger = require('./logger');
+
 class TemplateHandler {
   constructor(templatesDir, deployConfig) {
     this.templatesDir = templatesDir;
