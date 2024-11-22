@@ -52,138 +52,84 @@ async function deployApp(payload, ws) {
             }
         }
 
-        // Ensure base deployment directory exists
-        await fs.promises.mkdir(deployDir, { recursive: true });
-
-        // Clean up any existing temporary directory
-        if (await fs.promises.access(tempDir).catch(() => false)) {
-            await fs.promises.rm(tempDir, { recursive: true, force: true });
-        }
+        // Clean up any existing deployment artifacts
+        await cleanupExistingDeployment(deployDir, tempDir);
 
         // Create fresh temporary directory and change to it
         await fs.promises.mkdir(tempDir, { recursive: true });
         process.chdir(tempDir);
 
-        // Send initial status
         sendStatus(ws, {
             deploymentId,
             status: 'in_progress',
             message: 'Starting deployment...'
         });
 
-        // Setup environment variables first
-        sendLogs(ws, deploymentId, 'Setting up environment...');
-        let envVars, envFilePath;
-        try {
-            const { data } = await apiClient.post(`/api/deploy/env-vars/${deploymentId}`, {
-                token: envVarsToken
-            });
-            
-            if (!data || !data.variables) {
-                throw new Error('Invalid response format for environment variables');
-            }
-            
-            envVars = data.variables;
-            logger.info('Successfully retrieved environment variables');
-
-            const envManager = new EnvironmentManager(tempDir);
-            envFilePath = await envManager.writeEnvFile(envVars, environment);
-            await fs.promises.copyFile(envFilePath, path.join(tempDir, '.env'));
-            
-            logger.info(`Environment files written successfully for ${environment}`);
-        } catch (error) {
-            throw new Error(`Environment setup failed: ${error.message}`);
-        }
+        // Setup environment variables
+        const envFilePath = await setupEnvironment(deploymentId, envVarsToken, tempDir, environment, ws);
 
         // Clone repository
-        sendLogs(ws, deploymentId, 'Cloning repository...');
-        try {
-            await executeCommand('git', ['clone', '-b', branch, 
-                `https://x-access-token:${githubToken}@github.com/${repositoryOwner}/${repositoryName}.git`,
-                'repo'
-            ]);
-            
-            // Move all files from the cloned repo directory to tempDir
-            const repoDir = path.join(tempDir, 'repo');
-            const files = await fs.promises.readdir(repoDir);
-            for (const file of files) {
-                await fs.promises.rename(
-                    path.join(repoDir, file),
-                    path.join(tempDir, file)
-                );
-            }
-            // Remove the now-empty repo directory
-            await fs.promises.rmdir(repoDir);
-        } catch (error) {
-            throw new Error(`Repository clone failed: ${error.message}`);
-        }
+        await cloneRepository(repositoryOwner, repositoryName, branch, githubToken, deploymentId, ws);
 
         // Generate deployment files
         const tempContainerName = `${serviceName}-${deploymentId.substring(0, 8)}`;
-        const templateHandler = new TemplateHandler(
-            path.join('/opt/cloudlunacy/templates'),
-            deployConfig
+        const files = await generateDeploymentFiles(
+            appType, 
+            tempContainerName, 
+            environment, 
+            containerPort, 
+            hostPort, 
+            envFilePath, 
+            domain
         );
 
-        const files = await templateHandler.generateDeploymentFiles({
-            appType,
-            appName: tempContainerName,
-            environment,
-            containerPort,
-            hostPort,
-            envFile: path.basename(envFilePath),
-            domain,
-            buildConfig: {
-                nodeVersion: '18',
-                buildOutputDir: 'build',
-                cacheControl: 'public, max-age=31536000'
-            }
-        });
-
         // Write deployment files
-        await Promise.all([
-            fs.promises.writeFile('Dockerfile', files.dockerfile),
-            fs.promises.writeFile('docker-compose.yml', files.dockerCompose)
-        ]);
+        await writeDeploymentFiles(files);
 
-        // Build and start new container
-        sendLogs(ws, deploymentId, 'Building and starting new container...');
-        await executeCommand('docker-compose', ['up', '-d', '--build']);
+        // Build and start container with verbose output
+        sendLogs(ws, deploymentId, 'Building and starting container...');
+        try {
+            // Remove any existing container with the same name
+            await executeCommand('docker', ['rm', '-f', tempContainerName]).catch(() => {});
+            
+            // Build with verbose output
+            const buildResult = await executeCommand('docker-compose', ['build', '--no-cache', '--progress=plain']);
+            logger.info('Build output:', buildResult.stdout);
+            if (buildResult.stderr) logger.warn('Build stderr:', buildResult.stderr);
 
-        // Wait for new container to be healthy
-        sendLogs(ws, deploymentId, 'Waiting for new container to be healthy...');
+            // Start container
+            const upResult = await executeCommand('docker-compose', ['up', '-d']);
+            logger.info('Container start output:', upResult.stdout);
+            if (upResult.stderr) logger.warn('Container start stderr:', upResult.stderr);
+
+            // Immediate container verification
+            const containerInfo = await verifyContainerStartup(tempContainerName);
+            if (!containerInfo.running) {
+                throw new Error(`Container failed to start: ${containerInfo.error}`);
+            }
+
+        } catch (error) {
+            logger.error('Container build/start failed:', error);
+            // Get container logs if available
+            try {
+                const { stdout: logs } = await executeCommand('docker', ['logs', tempContainerName]);
+                logger.error('Container logs:', logs);
+            } catch (logError) {
+                logger.error('Failed to retrieve container logs:', logError);
+            }
+            throw new Error(`Container deployment failed: ${error.message}`);
+        }
+
+        // Wait for container to be healthy
+        sendLogs(ws, deploymentId, 'Waiting for container to be healthy...');
         const health = await checkDeploymentHealth(tempContainerName, containerPort, domain);
         
         if (!health.healthy) {
-            throw new Error(`New container health check failed: ${health.message}`);
+            throw new Error(`Health check failed: ${health.message}`);
         }
 
-        // Check for existing container
-        const { stdout: runningContainer } = await executeCommand('docker', [
-            'ps',
-            '--filter', `name=${serviceName}`,
-            '--format', '{{.Names}}'
-        ], { silent: true });
-
-        // If we have a running container, perform zero-downtime swap
-        if (runningContainer) {
-            sendLogs(ws, deploymentId, 'Performing zero-downtime swap...');
-            
-            await executeCommand('docker', ['network', 'connect', 'traefik-network', tempContainerName]);
-            await new Promise(resolve => setTimeout(resolve, 5000));
-            
-            try {
-                await executeCommand('docker', ['network', 'disconnect', 'traefik-network', runningContainer]);
-                await executeCommand('docker', ['stop', runningContainer]);
-                await executeCommand('docker', ['rm', runningContainer]);
-            } catch (swapError) {
-                logger.warn('Error during container swap:', swapError);
-                // Continue with deployment even if cleanup fails
-            }
-        }
-
-        // Rename temp container to final name
-        await executeCommand('docker', ['rename', tempContainerName, serviceName]);
+        // Perform zero-downtime swap
+        await performContainerSwap(serviceName, tempContainerName);
 
         // Verify final port mapping
         const finalMappingValid = await portManager.verifyPortMapping(
@@ -196,11 +142,9 @@ async function deployApp(payload, ws) {
             throw new Error('Final port mapping verification failed');
         }
 
-        // Move successful deployment to final location
-        await fs.promises.rm(deployDir, { recursive: true, force: true });
-        await fs.promises.rename(tempDir, deployDir);
+        // Finalize deployment
+        await finalizeDeployment(deployDir, tempDir);
 
-        // Send success status
         sendStatus(ws, {
             deploymentId,
             status: 'success',
@@ -211,31 +155,176 @@ async function deployApp(payload, ws) {
 
     } catch (error) {
         logger.error(`Deployment ${deploymentId} failed:`, error);
-        
-        // Cleanup temporary container if it exists
-        const tempContainerName = `${serviceName}-${deploymentId.substring(0, 8)}`;
-        try {
-            await executeCommand('docker', ['stop', tempContainerName]).catch(() => {});
-            await executeCommand('docker', ['rm', tempContainerName]).catch(() => {});
-        } catch (cleanupError) {
-            logger.error('Cleanup after failure error:', cleanupError);
-        }
-
-        // Clean up temporary directory
-        try {
-            await fs.promises.rm(tempDir, { recursive: true, force: true });
-        } catch (cleanupError) {
-            logger.error('Failed to clean up temporary directory:', cleanupError);
-        }
-
-        sendStatus(ws, {
-            deploymentId,
-            status: 'failed',
-            message: error.message || 'Deployment failed'
-        });
+        await handleDeploymentFailure(serviceName, deploymentId, tempDir, error, ws);
     } finally {
         process.chdir(currentDir);
     }
+}
+
+async function verifyContainerStartup(containerName) {
+    try {
+        // Wait a short time for container to initialize
+        await new Promise(resolve => setTimeout(resolve, 5000));
+
+        const { stdout: inspectOutput } = await executeCommand('docker', [
+            'inspect',
+            containerName
+        ]);
+        
+        const containerInfo = JSON.parse(inspectOutput)[0];
+        const state = containerInfo.State;
+
+        if (!state.Running) {
+            const error = state.Error || 'Container is not running';
+            const exitCode = state.ExitCode;
+            return {
+                running: false,
+                error: `Container failed to start (Exit Code: ${exitCode}): ${error}`
+            };
+        }
+
+        return { running: true };
+    } catch (error) {
+        return {
+            running: false,
+            error: `Failed to verify container: ${error.message}`
+        };
+    }
+}
+
+async function cleanupExistingDeployment(deployDir, tempDir) {
+    // Ensure base deployment directory exists
+    await fs.promises.mkdir(deployDir, { recursive: true });
+
+    // Clean up any existing temporary directory
+    if (await fs.promises.access(tempDir).catch(() => false)) {
+        await fs.promises.rm(tempDir, { recursive: true, force: true });
+    }
+}
+
+async function setupEnvironment(deploymentId, envVarsToken, tempDir, environment, ws) {
+    sendLogs(ws, deploymentId, 'Setting up environment...');
+    try {
+        const { data } = await apiClient.post(`/api/deploy/env-vars/${deploymentId}`, {
+            token: envVarsToken
+        });
+        
+        if (!data || !data.variables) {
+            throw new Error('Invalid response format for environment variables');
+        }
+        
+        const envManager = new EnvironmentManager(tempDir);
+        const envFilePath = await envManager.writeEnvFile(data.variables, environment);
+        await fs.promises.copyFile(envFilePath, path.join(tempDir, '.env'));
+        
+        return envFilePath;
+    } catch (error) {
+        throw new Error(`Environment setup failed: ${error.message}`);
+    }
+}
+
+async function cloneRepository(owner, repo, branch, token, deploymentId, ws) {
+    sendLogs(ws, deploymentId, 'Cloning repository...');
+    try {
+        await executeCommand('git', [
+            'clone',
+            '-b', branch,
+            `https://x-access-token:${token}@github.com/${owner}/${repo}.git`,
+            '.'
+        ]);
+    } catch (error) {
+        throw new Error(`Repository clone failed: ${error.message}`);
+    }
+}
+
+async function generateDeploymentFiles(appType, containerName, environment, containerPort, hostPort, envFile, domain) {
+    const templateHandler = new TemplateHandler(
+        path.join('/opt/cloudlunacy/templates'),
+        deployConfig
+    );
+
+    return templateHandler.generateDeploymentFiles({
+        appType,
+        appName: containerName,
+        environment,
+        containerPort,
+        hostPort,
+        envFile: path.basename(envFile),
+        domain,
+        buildConfig: {
+            nodeVersion: '18',
+            buildOutputDir: 'build',
+            cacheControl: 'public, max-age=31536000'
+        }
+    });
+}
+
+async function writeDeploymentFiles(files) {
+    await Promise.all([
+        fs.promises.writeFile('Dockerfile', files.dockerfile),
+        fs.promises.writeFile('docker-compose.yml', files.dockerCompose)
+    ]);
+}
+
+async function performContainerSwap(serviceName, tempContainerName) {
+    const { stdout: runningContainer } = await executeCommand('docker', [
+        'ps',
+        '--filter', `name=${serviceName}`,
+        '--format', '{{.Names}}'
+    ], { silent: true });
+
+    if (runningContainer) {
+        await executeCommand('docker', ['network', 'connect', 'traefik-network', tempContainerName]);
+        await new Promise(resolve => setTimeout(resolve, 5000));
+        
+        try {
+            await executeCommand('docker', ['network', 'disconnect', 'traefik-network', runningContainer]);
+            await executeCommand('docker', ['stop', runningContainer]);
+            await executeCommand('docker', ['rm', runningContainer]);
+        } catch (error) {
+            logger.warn('Error during container swap:', error);
+        }
+    }
+
+    await executeCommand('docker', ['rename', tempContainerName, serviceName]);
+}
+
+async function finalizeDeployment(deployDir, tempDir) {
+    await fs.promises.rm(deployDir, { recursive: true, force: true });
+    await fs.promises.rename(tempDir, deployDir);
+}
+
+async function handleDeploymentFailure(serviceName, deploymentId, tempDir, error, ws) {
+    const tempContainerName = `${serviceName}-${deploymentId.substring(0, 8)}`;
+    
+    // Get container logs before cleanup
+    try {
+        const { stdout: logs } = await executeCommand('docker', ['logs', tempContainerName]);
+        logger.error('Failed container logs:', logs);
+    } catch (logError) {
+        logger.warn('Could not retrieve container logs:', logError);
+    }
+
+    // Cleanup container
+    try {
+        await executeCommand('docker', ['stop', tempContainerName]).catch(() => {});
+        await executeCommand('docker', ['rm', tempContainerName]).catch(() => {});
+    } catch (cleanupError) {
+        logger.error('Cleanup after failure error:', cleanupError);
+    }
+
+    // Cleanup directory
+    try {
+        await fs.promises.rm(tempDir, { recursive: true, force: true });
+    } catch (cleanupError) {
+        logger.error('Failed to clean up temporary directory:', cleanupError);
+    }
+
+    sendStatus(ws, {
+        deploymentId,
+        status: 'failed',
+        message: error.message || 'Deployment failed'
+    });
 }
 
 function sendStatus(ws, data) {
