@@ -60,7 +60,7 @@ async function deployApp(payload, ws) {
             await fs.promises.rm(tempDir, { recursive: true, force: true });
         }
 
-        // Create fresh temporary directory
+        // Create fresh temporary directory and change to it
         await fs.promises.mkdir(tempDir, { recursive: true });
         process.chdir(tempDir);
 
@@ -70,26 +70,6 @@ async function deployApp(payload, ws) {
             status: 'in_progress',
             message: 'Starting deployment...'
         });
-
-        // Verify existing container and port mapping
-        const { stdout: runningContainer } = await executeCommand('docker', [
-            'ps',
-            '--filter', `name=${serviceName}`,
-            '--format', '{{.Names}}'
-        ], { silent: true });
-
-        if (runningContainer) {
-            // Verify current port mapping
-            const portMappingValid = await portManager.verifyPortMapping(
-                hostPort,
-                containerPort,
-                serviceName
-            );
-
-            if (!portMappingValid) {
-                logger.warn('Invalid port mapping detected for running container');
-            }
-        }
 
         // Setup environment variables first
         sendLogs(ws, deploymentId, 'Setting up environment...');
@@ -117,10 +97,26 @@ async function deployApp(payload, ws) {
 
         // Clone repository
         sendLogs(ws, deploymentId, 'Cloning repository...');
-        await executeCommand('git', ['clone', '-b', branch, 
-            `https://x-access-token:${githubToken}@github.com/${repositoryOwner}/${repositoryName}.git`,
-            '.'
-        ]);
+        try {
+            await executeCommand('git', ['clone', '-b', branch, 
+                `https://x-access-token:${githubToken}@github.com/${repositoryOwner}/${repositoryName}.git`,
+                'repo'
+            ]);
+            
+            // Move all files from the cloned repo directory to tempDir
+            const repoDir = path.join(tempDir, 'repo');
+            const files = await fs.promises.readdir(repoDir);
+            for (const file of files) {
+                await fs.promises.rename(
+                    path.join(repoDir, file),
+                    path.join(tempDir, file)
+                );
+            }
+            // Remove the now-empty repo directory
+            await fs.promises.rmdir(repoDir);
+        } catch (error) {
+            throw new Error(`Repository clone failed: ${error.message}`);
+        }
 
         // Generate deployment files
         const tempContainerName = `${serviceName}-${deploymentId.substring(0, 8)}`;
@@ -161,6 +157,13 @@ async function deployApp(payload, ws) {
         if (!health.healthy) {
             throw new Error(`New container health check failed: ${health.message}`);
         }
+
+        // Check for existing container
+        const { stdout: runningContainer } = await executeCommand('docker', [
+            'ps',
+            '--filter', `name=${serviceName}`,
+            '--format', '{{.Names}}'
+        ], { silent: true });
 
         // If we have a running container, perform zero-downtime swap
         if (runningContainer) {
