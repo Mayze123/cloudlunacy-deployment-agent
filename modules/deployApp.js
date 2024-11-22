@@ -40,87 +40,52 @@ async function deployApp(payload, ws) {
         await executeCommand('which', ['docker']);
         await executeCommand('which', ['docker-compose']);
         
-        // Set up deployment directory
-        await fs.promises.mkdir(deployDir, { recursive: true });
-        process.chdir(deployDir);
+// Set up deployment directory
+await fs.promises.mkdir(deployDir, { recursive: true });
+process.chdir(deployDir);
 
-        // Send initial status
-        sendStatus(ws, {
-            deploymentId,
-            status: 'in_progress',
-            message: 'Starting deployment...'
-        });
+// Send initial status
+sendStatus(ws, {
+    deploymentId,
+    status: 'in_progress',
+    message: 'Starting deployment...'
+});
 
-        // Initialize port manager and allocate ports
-        await portManager.initialize();
-        const { hostPort, containerPort } = await portManager.allocatePort(serviceName);
+// Initialize port manager and allocate ports
+await portManager.initialize();
+const { hostPort, containerPort } = await portManager.allocatePort(serviceName);
 
-        // Check for existing deployment
-        const { stdout: existingContainer } = await executeCommand('docker', [
-            'ps',
-            '--filter', `name=${serviceName}`,
-            '--format', '{{.Names}}'
-        ], { silent: true });
+// Clone repository
+sendLogs(ws, deploymentId, 'Cloning repository...');
+const repoUrl = `https://x-access-token:${githubToken}@github.com/${repositoryOwner}/${repositoryName}.git`;
+await executeCommand('git', ['clone', '-b', branch, repoUrl, '.']);
 
-        // Create temporary container name for new deployment
-        const tempContainerName = `${serviceName}-${deploymentId.substring(0, 8)}`;
+// Generate deployment files
+const templateHandler = new TemplateHandler(
+    path.join('/opt/cloudlunacy/templates'),
+    deployConfig
+);
 
-        // Retrieve and set up environment variables
-        sendLogs(ws, deploymentId, 'Setting up environment variables...');
-        let envVars = {};
-        let envFilePath;
-        try {
-            const { data } = await apiClient.post(`/api/deploy/env-vars/${deploymentId}`, {
-                token: envVarsToken
-            });
-            
-            if (!data || !data.variables) {
-                throw new Error('Invalid response format for environment variables');
-            }
-            
-            envVars = data.variables;
-            logger.info('Successfully retrieved environment variables');
+const files = await templateHandler.generateDeploymentFiles({
+    appType,
+    appName: tempContainerName,
+    environment,
+    containerPort,
+    hostPort,
+    envFile: path.basename(envFilePath),
+    domain,
+    buildConfig: {
+        nodeVersion: '18',
+        buildOutputDir: 'build',
+        cacheControl: 'public, max-age=31536000'
+    }
+});
 
-            const envManager = new EnvironmentManager(deployDir);
-            envFilePath = await envManager.writeEnvFile(envVars, environment);
-            await fs.promises.copyFile(envFilePath, path.join(deployDir, '.env'));
-            
-            logger.info(`Environment files written successfully`);
-        } catch (error) {
-            throw new Error(`Environment setup failed: ${error.message}`);
-        }
-
-        // Generate deployment files
-        const templateHandler = new TemplateHandler(
-            path.join('/opt/cloudlunacy/templates'),
-            deployConfig
-        );
-
-        const files = await templateHandler.generateDeploymentFiles({
-            appType,
-            appName: tempContainerName,
-            environment,
-            containerPort,
-            hostPort,
-            envFile: path.basename(envFilePath),
-            domain,
-            buildConfig: {
-                nodeVersion: '18',
-                buildOutputDir: 'build',
-                cacheControl: 'public, max-age=31536000'
-            }
-        });
-
-        // Write deployment files
-        await Promise.all([
-            fs.promises.writeFile('Dockerfile', files.dockerfile),
-            fs.promises.writeFile('docker-compose.yml', files.dockerCompose)
-        ]);
-
-        // Clone repository
-        sendLogs(ws, deploymentId, 'Cloning repository...');
-        const repoUrl = `https://x-access-token:${githubToken}@github.com/${repositoryOwner}/${repositoryName}.git`;
-        await executeCommand('git', ['clone', '-b', branch, repoUrl, '.']);
+// Write deployment files
+await Promise.all([
+    fs.promises.writeFile('Dockerfile', files.dockerfile),
+    fs.promises.writeFile('docker-compose.yml', files.dockerCompose)
+]);
 
         // Build container with detailed output
         sendLogs(ws, deploymentId, 'Building container...');
