@@ -7,7 +7,7 @@ const portManager = require('../utils/portManager');
 const { ensureDeploymentPermissions } = require('../utils/permissionCheck');
 const apiClient = require('../utils/apiClient');
 const EnvironmentManager = require('../utils/environmentManager');
-const rimraf = require('rimraf').promises;
+
 
 class ZeroDowntimeDeployer {
     constructor() {
@@ -45,29 +45,44 @@ class ZeroDowntimeDeployer {
         let envManager = null;
 
         try {
-          // Initial setup and validation
-          const permissionsOk = await ensureDeploymentPermissions();
-          if (!permissionsOk) {
-              throw new Error('Deployment failed: Permission check failed');
-          }
-
-          await this.validatePrerequisites(deployDir, backupDir);
-          
-          // Setup directories with proper cleanup
-          await this.setupDirectories(deployDir, backupDir);
-
-          // Initialize environment manager
-          envManager = new EnvironmentManager(deployDir);
-
-          // Set up environment variables
-          const envFilePath = await this.setupEnvironment(deploymentId, envVarsToken, envManager, environment);
-          if (!envFilePath) {
-              throw new Error('Failed to set up environment variables');
-          }
-
-          // Clone repository after directory is clean
-          const repoUrl = `https://x-access-token:${githubToken}@github.com/${repositoryOwner}/${repositoryName}.git`;
-          await executeCommand('git', ['clone', '-b', branch, repoUrl, '.']);
+                     // Initial setup and validation
+                     const permissionsOk = await ensureDeploymentPermissions();
+                     if (!permissionsOk) {
+                         throw new Error('Deployment failed: Permission check failed');
+                     }
+         
+                     await this.validatePrerequisites(deployDir, backupDir);
+                     
+                     // Setup directories with proper cleanup
+                     await this.setupDirectories(deployDir, backupDir);
+         
+                     // Verify we're in the correct directory
+                     const currentWorkDir = process.cwd();
+                     logger.info(`Current working directory: ${currentWorkDir}`);
+         
+                     // Initialize environment manager
+                     envManager = new EnvironmentManager(deployDir);
+         
+                     // Set up environment variables
+                     const envFilePath = await this.setupEnvironment(deploymentId, envVarsToken, envManager, environment);
+                     if (!envFilePath) {
+                         throw new Error('Failed to set up environment variables');
+                     }
+         
+                     // Double check directory is empty before cloning
+                     const filesBeforeClone = await fs.readdir('.');
+                     if (filesBeforeClone.length > 0) {
+                         logger.warn(`Directory not empty before clone, contents: ${filesBeforeClone.join(', ')}`);
+                         // Clean up any files that might have been created
+                         for (const file of filesBeforeClone) {
+                             await fs.rm(file, { recursive: true, force: true });
+                         }
+                     }
+         
+                     // Clone repository after directory is clean
+                     logger.info(`Cloning repository into ${process.cwd()}`);
+                     const repoUrl = `https://x-access-token:${githubToken}@github.com/${repositoryOwner}/${repositoryName}.git`;
+                     await executeCommand('git', ['clone', '-b', branch, repoUrl, '.']);
 
             // Get existing container info for rollback
             oldContainer = await this.getCurrentContainer(serviceName);
@@ -161,12 +176,27 @@ class ZeroDowntimeDeployer {
             // Clean up existing deployment directory
             if (await this.directoryExists(deployDir)) {
                 logger.info(`Cleaning up existing deployment directory: ${deployDir}`);
-                await rimraf(deployDir);
+                await fs.rm(deployDir, { recursive: true, force: true });
             }
 
             // Create fresh directories
             await fs.mkdir(deployDir, { recursive: true });
             await fs.mkdir(backupDir, { recursive: true });
+
+            // Ensure the directory is empty
+            const files = await fs.readdir(deployDir);
+            if (files.length > 0) {
+                for (const file of files) {
+                    const filePath = path.join(deployDir, file);
+                    await fs.rm(filePath, { recursive: true, force: true });
+                }
+            }
+
+            // Double check directory is empty
+            const checkFiles = await fs.readdir(deployDir);
+            if (checkFiles.length > 0) {
+                throw new Error('Failed to clean deployment directory');
+            }
 
             // Change to deployment directory
             process.chdir(deployDir);

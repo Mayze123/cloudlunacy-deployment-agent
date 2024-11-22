@@ -293,7 +293,7 @@ install_agent_dependencies() {
         sudo -u "$USERNAME" HOME="$BASE_DIR" npm install --cache "$NPM_CACHE_DIR" --no-fund --no-audit
     else
         sudo -u "$USERNAME" HOME="$BASE_DIR" npm init -y
-        sudo -u "$USERNAME" HOME="$BASE_DIR" npm install axios dotenv winston rimraf shelljs ws handlebars js-yaml --cache "$NPM_CACHE_DIR" --no-fund --no-audit
+        sudo -u "$USERNAME" HOME="$BASE_DIR" npm install axios dotenv winston shelljs ws handlebars js-yaml --cache "$NPM_CACHE_DIR" --no-fund --no-audit
     fi
 
     log "Agent dependencies installed."
