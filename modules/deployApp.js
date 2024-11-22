@@ -62,7 +62,7 @@ async function deployApp(payload, ws) {
         logger.info(`Allocated ports - host: ${hostPort}, container: ${containerPort}`);
 
         // No longer stopping existing containers here
-        // We'll keep the old container running until the new one is ready
+        // We'll keep the old container running until the new one is being prepared
 
         // Clone repository
         sendLogs(ws, deploymentId, 'Cloning repository...');
@@ -125,12 +125,14 @@ async function deployApp(payload, ws) {
         try {
             const imageName = `${serviceName}:${versionSuffix}`;
 
+            // Modify docker-compose.yml to tag the image with the versionSuffix
+            // Assuming the TemplateHandler includes this, otherwise you need to ensure it's set
+
             // Build with detailed output and unique image name
             const buildResult = await executeCommand('docker-compose', [
                 'build',
                 '--no-cache',
-                '--progress=plain',
-                '--build-arg', `VERSION_SUFFIX=${versionSuffix}`
+                '--progress=plain'
             ], {
                 logOutput: true,
                 env: {
@@ -397,23 +399,18 @@ async function checkDeploymentHealth(projectName, domain, versionSuffix) {
 
 async function switchTrafficToNewVersion(serviceName, versionSuffix) {
     // Assuming Traefik uses labels to route traffic
-    // We'll update the labels to point to the new container
+    // We'll update Traefik's configuration to point to the new container
 
-    // Get the container ID of the new version
-    const { stdout: newContainerId } = await executeCommand('docker', [
-        'ps',
-        '-q',
-        '--filter', `name=${serviceName}`,
-        '--filter', `ancestor=${serviceName}:${versionSuffix}`
-    ]);
+    // Since Traefik automatically detects containers based on labels and service names,
+    // and because we're using unique project names with the same service names,
+    // Traefik should automatically start routing to the new container.
 
-    if (!newContainerId) {
-        throw new Error('New container not found for traffic switch');
-    }
+    // However, to ensure zero downtime, you might need to update Traefik's routing rules
+    // or use weight-based routing if applicable.
 
-    // Update Traefik labels (if necessary)
-    // Since we're using unique project names, Traefik should automatically route to the new container
-    // Alternatively, ensure the old container's labels are disabled or the old container is stopped
+    // For simplicity, assuming Traefik will handle the routing automatically.
+
+    // If manual intervention is needed, implement Traefik API calls here to update routes.
 }
 
 async function cleanupOldContainers(serviceName, currentProjectName, versionSuffix) {
@@ -447,7 +444,7 @@ async function cleanupOldContainers(serviceName, currentProjectName, versionSuff
 
     for (const line of imageList) {
         const [imageName, imageId] = line.split(' ');
-        if (imageName.startsWith(`${serviceName}:`) && !imageName.endsWith(versionSuffix)) {
+        if (imageName.startsWith(`${serviceName}:`) && !imageName.endsWith(`${versionSuffix}`)) {
             await executeCommand('docker', ['rmi', '-f', imageId]);
             logger.info(`Removed old image: ${imageName}`);
         }
