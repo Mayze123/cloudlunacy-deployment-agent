@@ -10,186 +10,210 @@ const EnvironmentManager = require('../utils/environmentManager');
 const portManager = require('../utils/portManager');
 
 async function deployApp(payload, ws) {
-  const {
-      deploymentId,
-      appType,
-      appName,
-      repositoryOwner,
-      repositoryName,
-      branch,
-      githubToken, 
-      environment,
-      domain,
-      envVarsToken
-  } = payload;
+    const {
+        deploymentId,
+        appType,
+        appName,
+        repositoryOwner,
+        repositoryName,
+        branch,
+        githubToken, 
+        environment,
+        domain,
+        envVarsToken
+    } = payload;
 
-  const serviceName = `${appName}-${environment}`.toLowerCase().replace(/[^a-z0-9-]/g, '-');
-  const deployDir = path.join('/opt/cloudlunacy/deployments', deploymentId);
-  const currentDir = process.cwd();
-  
-  logger.info(`Starting deployment ${deploymentId} for ${appType} app: ${appName}`);
-  
-  try {
-      // Check permissions before deployment
-      const permissionsOk = await ensureDeploymentPermissions();
-      if (!permissionsOk) {
-          throw new Error('Deployment failed: Permission check failed');
-      }
-
-      // Check for required tools
-      await executeCommand('which', ['docker']);
-      await executeCommand('which', ['docker-compose']);
-      
-      // Set up deployment directory
-      await fs.promises.mkdir(deployDir, { recursive: true });
-      process.chdir(deployDir);
-
-      // Send initial status and logs
-      sendStatus(ws, {
-          deploymentId,
-          status: 'in_progress',
-          message: 'Starting deployment...'
-      });
-
-      // Initialize port manager and allocate ports
-      await portManager.initialize();
-      const { hostPort, containerPort } = await portManager.allocatePort(serviceName);
-
-      // Cleanup existing containers and networks
-      if (fs.existsSync('docker-compose.yml')) {
-        try {
-          sendLogs(ws, deploymentId, `Cleaning up existing container: ${serviceName}`);
-          await executeCommand('docker-compose', ['down']);
-          sendLogs(ws, deploymentId, 'Previous deployment cleaned up');
-        } catch (error) {
-          logger.warn('Cleanup warning:', error);
+    const serviceName = `${appName}-${environment}`.toLowerCase().replace(/[^a-z0-9-]/g, '-');
+    const deployDir = path.join('/opt/cloudlunacy/deployments', serviceName);
+    const currentDir = process.cwd();
+    
+    logger.info(`Starting deployment ${deploymentId} for ${appType} app: ${appName}`);
+    
+    try {
+        // Check permissions before deployment
+        const permissionsOk = await ensureDeploymentPermissions();
+        if (!permissionsOk) {
+            throw new Error('Deployment failed: Permission check failed');
         }
-      } else {
-        logger.info('No existing docker-compose.yml found; skipping cleanup.');
-      }
 
-      // Retrieve and set up environment variables
-      sendLogs(ws, deploymentId, 'Retrieving environment variables...');
-      let envVars = {};
-      let envFilePath;
-      try {
-          logger.info(`Fetching env vars for deployment ${deploymentId}`);
-          const { data } = await apiClient.post(`/api/deploy/env-vars/${deploymentId}`, {
-              token: envVarsToken
-          });
-          
-          if (!data || !data.variables) {
-              throw new Error('Invalid response format for environment variables');
-          }
-          
-          envVars = data.variables;
-          logger.info('Successfully retrieved environment variables');
-      } catch (error) {
-          logger.error('Environment variables setup failed:', error);
-          throw new Error(`Environment variables setup failed: ${error.message}`);
-      }
+        // Initialize port manager and get port mapping
+        await portManager.initialize();
+        const portInfo = await portManager.getPortInfo(appName, environment);
+        
+        let { hostPort, containerPort } = portInfo || await portManager.allocatePort(serviceName);
+        
+        // Verify port availability
+        if (portInfo) {
+            const isAvailable = await portManager.ensurePortAvailable(hostPort);
+            if (!isAvailable) {
+                logger.warn(`Port ${hostPort} could not be freed, allocating new port`);
+                ({ hostPort, containerPort } = await portManager.allocatePort(serviceName));
+            }
+        }
 
-      // Clone repository
-      sendLogs(ws, deploymentId, 'Cloning repository...');
-      const repoUrl = `https://x-access-token:${githubToken}@github.com/${repositoryOwner}/${repositoryName}.git`;
-      await executeCommand('git', ['clone', '-b', branch, repoUrl, '.']);
-      sendLogs(ws, deploymentId, 'Repository cloned successfully');
+        // Create deployment directory if it doesn't exist
+        await fs.promises.mkdir(deployDir, { recursive: true });
+        process.chdir(deployDir);
 
-      // Initialize environment manager and write env files
-      const envManager = new EnvironmentManager(deployDir);
-      envFilePath = await envManager.writeEnvFile(envVars, environment);
-      
-      // Also create a regular .env file
-      await fs.promises.copyFile(envFilePath, path.join(deployDir, '.env'));
-      
-      sendLogs(ws, deploymentId, 'Environment variables configured successfully');
+        // Send initial status
+        sendStatus(ws, {
+            deploymentId,
+            status: 'in_progress',
+            message: 'Starting deployment...'
+        });
 
-      // Initialize template handler
-      const templateHandler = new TemplateHandler(
-          path.join('/opt/cloudlunacy/templates'),
-          deployConfig
-      );
+        // Verify existing container and port mapping
+        const { stdout: runningContainer } = await executeCommand('docker', [
+            'ps',
+            '--filter', `name=${serviceName}`,
+            '--format', '{{.Names}}'
+        ], { silent: true });
 
-      // Generate deployment files
-      sendLogs(ws, deploymentId, 'Generating deployment configuration...');
-      const files = await templateHandler.generateDeploymentFiles({
-          appType,
-          appName,
-          environment,
-          containerPort,
-          hostPort,
-          envFile: path.basename(envFilePath),
-          domain,
-          buildConfig: {
-              nodeVersion: '18',
-              buildOutputDir: 'build',
-              cacheControl: 'public, max-age=31536000'
-          }
-      });
+        if (runningContainer) {
+            // Verify current port mapping
+            const portMappingValid = await portManager.verifyPortMapping(
+                hostPort,
+                containerPort,
+                serviceName
+            );
 
-      // Write deployment files
-      await Promise.all([
-          fs.promises.writeFile('Dockerfile', files.dockerfile),
-          fs.promises.writeFile('docker-compose.yml', files.dockerCompose),
-      ]);
+            if (!portMappingValid) {
+                logger.warn('Invalid port mapping detected for running container');
+                // We'll continue with deployment as the new container will have correct mapping
+            }
+        }
 
-      sendLogs(ws, deploymentId, 'Deployment configuration generated successfully');
+        // Clone new code to a temporary directory
+        const tempDir = path.join(deployDir, `temp-${deploymentId}`);
+        await fs.promises.mkdir(tempDir, { recursive: true });
+        process.chdir(tempDir);
 
-      // Validate docker-compose file
-      try {
-          sendLogs(ws, deploymentId, 'Validating deployment configuration...');
-          const { stdout: configOutput } = await executeCommand('docker-compose', ['config']);
-          sendLogs(ws, deploymentId, 'Docker Compose configuration:');
-          sendLogs(ws, deploymentId, configOutput);
-          sendLogs(ws, deploymentId, 'Deployment configuration validated');
-      } catch (error) {
-          throw new Error(`Invalid docker-compose configuration: ${error.message}`);
-      }
+        // Setup environment variables and clone repository
+        const [envVars] = await Promise.all([
+            setupEnvironment(deploymentId, envVarsToken, environment),
+            executeCommand('git', ['clone', '-b', branch, 
+                `https://x-access-token:${githubToken}@github.com/${repositoryOwner}/${repositoryName}.git`,
+                '.'
+            ])
+        ]);
 
-      // Build and start containers
-      sendLogs(ws, deploymentId, 'Building application...');
-      await executeCommand('docker-compose', ['up', '-d', '--build']);
-      sendLogs(ws, deploymentId, 'Application built and started successfully');
+        // Generate deployment files with unique temp name
+        const tempContainerName = `${serviceName}-${deploymentId.substring(0, 8)}`;
+        const templateHandler = new TemplateHandler(
+            path.join('/opt/cloudlunacy/templates'),
+            deployConfig
+        );
 
-      // Verify deployment
-      sendLogs(ws, deploymentId, 'Verifying deployment...');
-      const health = await checkDeploymentHealth(serviceName, domain);
-      
-      if (!health.healthy) {
-          throw new Error(`Deployment health check failed: ${health.message}`);
-      }
+        const files = await templateHandler.generateDeploymentFiles({
+            appType,
+            appName: tempContainerName, // Use temporary name for new container
+            environment,
+            containerPort,
+            hostPort,
+            envFile: '.env',
+            domain,
+            buildConfig: {
+                nodeVersion: '18',
+                buildOutputDir: 'build',
+                cacheControl: 'public, max-age=31536000'
+            }
+        });
 
-      // Send success status
-      sendStatus(ws, {
-          deploymentId,
-          status: 'success',
-          message: 'Deployment completed successfully',
-          domain
-      });
+        // Write configuration files
+        await Promise.all([
+            fs.promises.writeFile('Dockerfile', files.dockerfile),
+            fs.promises.writeFile('docker-compose.yml', files.dockerCompose),
+            fs.promises.writeFile('.env', envVars)
+        ]);
 
-  } catch (error) {
-      logger.error(`Deployment ${deploymentId} failed:`, error);
-      
-      // Send detailed error message
-      sendStatus(ws, {
-          deploymentId,
-          status: 'failed',
-          message: error.message || 'Deployment failed'
-      });
+        // Build and start new container
+        sendLogs(ws, deploymentId, 'Building and starting new container...');
+        await executeCommand('docker-compose', ['up', '-d', '--build']);
 
-      // Cleanup on failure
-      try {
-          await executeCommand('docker-compose', ['down']).catch(() => {});
-          await fs.promises.rm(deployDir, { recursive: true, force: true });
-          // Release allocated port
-          await portManager.releasePort(serviceName);
-      } catch (cleanupError) {
-          logger.error('Cleanup failed:', cleanupError);
-      }
-  } finally {
-      // Always return to original directory
-      process.chdir(currentDir);
-  }
+        // Wait for new container to be healthy
+        sendLogs(ws, deploymentId, 'Waiting for new container to be healthy...');
+        const health = await checkDeploymentHealth(tempContainerName, containerPort, domain);
+        
+        if (!health.healthy) {
+            throw new Error(`New container health check failed: ${health.message}`);
+        }
+
+        // If we have a running container, perform zero-downtime swap
+        if (runningContainer) {
+            sendLogs(ws, deploymentId, 'Performing zero-downtime swap...');
+            
+            // Switch traffic to new container
+            await executeCommand('docker', ['network', 'connect', 'traefik-network', tempContainerName]);
+            
+            // Wait for Traefik to update
+            await new Promise(resolve => setTimeout(resolve, 5000));
+            
+            // Remove old container from network and stop it
+            await executeCommand('docker', ['network', 'disconnect', 'traefik-network', runningContainer]);
+            await executeCommand('docker', ['stop', runningContainer]);
+            await executeCommand('docker', ['rm', runningContainer]);
+        }
+
+        // Rename temp container to final name
+        await executeCommand('docker', ['rename', tempContainerName, serviceName]);
+
+        // Verify final port mapping
+        const finalMappingValid = await portManager.verifyPortMapping(
+            hostPort,
+            containerPort,
+            serviceName
+        );
+
+        if (!finalMappingValid) {
+            throw new Error('Final port mapping verification failed');
+        }
+
+        // Cleanup temp directory
+        await fs.promises.rm(tempDir, { recursive: true, force: true });
+
+        // Send success status
+        sendStatus(ws, {
+            deploymentId,
+            status: 'success',
+            message: 'Deployment completed successfully',
+            domain,
+            port: hostPort
+        });
+
+    } catch (error) {
+        logger.error(`Deployment ${deploymentId} failed:`, error);
+        
+        // Cleanup temporary container if it exists
+        const tempContainerName = `${serviceName}-${deploymentId.substring(0, 8)}`;
+        try {
+            await executeCommand('docker', ['stop', tempContainerName]).catch(() => {});
+            await executeCommand('docker', ['rm', tempContainerName]).catch(() => {});
+        } catch (cleanupError) {
+            logger.error('Cleanup after failure error:', cleanupError);
+        }
+
+        sendStatus(ws, {
+            deploymentId,
+            status: 'failed',
+            message: error.message || 'Deployment failed'
+        });
+    } finally {
+        process.chdir(currentDir);
+    }
+}
+
+async function setupEnvironment(deploymentId, envVarsToken, environment) {
+    const { data } = await apiClient.post(`/api/deploy/env-vars/${deploymentId}`, {
+        token: envVarsToken
+    });
+    
+    if (!data || !data.variables) {
+        throw new Error('Invalid response format for environment variables');
+    }
+    
+    return Object.entries(data.variables)
+        .map(([key, value]) => `${key}=${value}`)
+        .join('\n');
 }
 
 function sendStatus(ws, data) {
