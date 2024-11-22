@@ -7,6 +7,7 @@ const portManager = require('../utils/portManager');
 const { ensureDeploymentPermissions } = require('../utils/permissionCheck');
 const apiClient = require('../utils/apiClient');
 const EnvironmentManager = require('../utils/environmentManager');
+const rimraf = require('rimraf').promises;
 
 class ZeroDowntimeDeployer {
     constructor() {
@@ -151,6 +152,7 @@ class ZeroDowntimeDeployer {
             }
         }
     }
+    
     async setupDirectories(deployDir, backupDir) {
         try {
             // Create parent directories if they don't exist
