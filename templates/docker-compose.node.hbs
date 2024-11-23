@@ -16,7 +16,7 @@ services:
       - PORT={{containerPort}}
       - HEALTH_PORT=9000
     env_file:
-      - .env
+      - {{envFile}}
     restart: unless-stopped
     networks:
       - traefik-network
