@@ -17,10 +17,10 @@ services:
       - traefik-network
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.{{sanitizedAppName}}-secure.rule=Host(`{{domain}}`)"
-      - "traefik.http.routers.{{sanitizedAppName}}-secure.entrypoints=websecure"
-      - "traefik.http.routers.{{sanitizedAppName}}-secure.tls.certresolver=myresolver"
+      - "traefik.http.routers.{{sanitizedAppName}}.rule=Host(`{{domain}}`)"
+      - "traefik.http.routers.{{sanitizedAppName}}.entrypoints=web"
       - "traefik.http.services.{{sanitizedAppName}}.loadbalancer.server.port={{containerPort}}"
+
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
       interval: 30s
