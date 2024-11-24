@@ -379,33 +379,19 @@ services:
     image: traefik:v2.9
     container_name: traefik
     command:
-      - "--api.insecure=true" # Enable Traefik dashboard (secure in production)
+      - "--api.insecure=true" # Enable Traefik dashboard (insecure access)
       - "--providers.docker=true"
       - "--providers.docker.exposedbydefault=false"
       - "--entrypoints.web.address=:80"
-      - "--entrypoints.websecure.address=:443"
-      # Use HTTP challenge instead of TLS challenge
-      - "--certificatesresolvers.myresolver.acme.httpchallenge=true"
-      - "--certificatesresolvers.myresolver.acme.httpchallenge.entrypoint=web"
-      # Remove or comment out the TLS challenge line
-      # - "--certificatesresolvers.myresolver.acme.tlschallenge=true"
-      - "--certificatesresolvers.myresolver.acme.email=$EMAIL"
-      - "--certificatesresolvers.myresolver.acme.storage=/letsencrypt/acme.json"
     ports:
       - "80:80"      # HTTP
-      - "443:443"    # HTTPS
-      - "8080:8080"  # Traefik Dashboard
+      # Remove port 443 mapping
+      # - "443:443"    # HTTPS
+      - "8080:8080"  # Traefik Dashboard (if needed)
     volumes:
       - "/var/run/docker.sock:/var/run/docker.sock:ro"
-      - "./letsencrypt:/letsencrypt"
     networks:
       - traefik-network
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.traefik.rule=Host(\`traefik.${SERVER_ID}.yourdomain.com\`)"
-      - "traefik.http.routers.traefik.entrypoints=websecure"
-      - "traefik.http.routers.traefik.tls.certresolver=myresolver"
-      - "traefik.http.routers.traefik.service=api@internal"
 
 networks:
   traefik-network:

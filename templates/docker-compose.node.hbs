@@ -17,19 +17,10 @@ services:
       - traefik-network
     labels:
       - "traefik.enable=true"
-
-      # HTTPS Router
       - "traefik.http.routers.{{sanitizedAppName}}-secure.rule=Host(`{{domain}}`)"
       - "traefik.http.routers.{{sanitizedAppName}}-secure.entrypoints=websecure"
       - "traefik.http.routers.{{sanitizedAppName}}-secure.tls.certresolver=myresolver"
       - "traefik.http.services.{{sanitizedAppName}}.loadbalancer.server.port={{containerPort}}"
-
-      # HTTP Router (for Let's Encrypt HTTP challenge)
-      - "traefik.http.routers.{{sanitizedAppName}}-insecure.rule=Host(`{{domain}}`)"
-      - "traefik.http.routers.{{sanitizedAppName}}-insecure.entrypoints=web"
-      - "traefik.http.middlewares.{{sanitizedAppName}}-https-redirect.redirectscheme.scheme=https"
-      - "traefik.http.routers.{{sanitizedAppName}}-insecure.middlewares={{sanitizedAppName}}-https-redirect"
-
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
       interval: 30s
