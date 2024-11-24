@@ -32,9 +32,13 @@ class TemplateHandler {
         const dockerfileTemplate = Handlebars.compile(dockerfileTemplateContent);
         const dockerComposeTemplate = Handlebars.compile(dockerComposeTemplateContent);
 
+        // Compute sanitizedAppName
+        const sanitizedAppName = appName.toLowerCase().replace(/[^a-z0-9-]/g, '-');
+
         // Render templates with variables
         const renderedDockerfile = dockerfileTemplate({
             appName,
+            sanitizedAppName,
             environment,
             containerPort,
             health
@@ -42,6 +46,7 @@ class TemplateHandler {
 
         const renderedDockerCompose = dockerComposeTemplate({
             appName,
+            sanitizedAppName,
             environment,
             containerPort,
             domain,
