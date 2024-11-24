@@ -146,8 +146,7 @@ class ZeroDowntimeDeployer {
             await this.switchTraffic(oldContainer, newContainer, domain);
 
             if (oldContainer) {
-                await this.gracefulContainerRemoval(oldContainer);
-                // No ports to release
+                await this.gracefulContainerRemoval(oldContainer, deployDir, projectName);
             }
 
             this.sendSuccess(ws, {
@@ -187,6 +186,20 @@ class ZeroDowntimeDeployer {
             }
         }
     }
+
+    async gracefulContainerRemoval(container, deployDir, projectName) {
+        try {
+            logger.info(`Stopping and removing container: ${container.name}`);
+            await executeCommand('docker-compose', ['-p', projectName, 'down', '-v'], {
+                cwd: deployDir
+            });
+            logger.info(`Container ${container.name} stopped and removed successfully`);
+        } catch (error) {
+            logger.error(`Failed to remove container ${container.name}:`, error);
+            throw new Error(`Failed to remove container ${container.name}: ${error.message}`);
+        }
+    }
+
 
     async fetchEnvironmentVariables(deploymentId, envVarsToken) {
         try {
