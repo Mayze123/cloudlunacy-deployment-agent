@@ -26,7 +26,7 @@ const ZeroDowntimeDeployer = require('./modules/zeroDowntimeDeployer');
 dotenv.config();
 
 // Configuration
-const BACKEND_URL = process.env.BACKEND_URL; // e.g., https://your-saas-platform.com/api/agent
+const BACKEND_URL = process.env.BACKEND_URL; 
 const AGENT_API_TOKEN = process.env.AGENT_API_TOKEN;
 const SERVER_ID = process.env.SERVER_ID;
 
