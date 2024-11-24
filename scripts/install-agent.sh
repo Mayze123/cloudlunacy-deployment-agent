@@ -370,8 +370,8 @@ setup_traefik() {
     mkdir -p "$TRAEFIK_DIR"
     chown "$USERNAME":"$USERNAME" "$TRAEFIK_DIR"
 
-    # Create Traefik Docker Compose file
-    cat <<EOF > "$TRAEFIK_DIR/docker-compose.traefik.yml"
+# Create Traefik Docker Compose file
+cat <<EOF > "$TRAEFIK_DIR/docker-compose.traefik.yml"
 version: '3.8'
 
 services:
@@ -384,13 +384,17 @@ services:
       - "--providers.docker.exposedbydefault=false"
       - "--entrypoints.web.address=:80"
       - "--entrypoints.websecure.address=:443"
-      - "--certificatesresolvers.myresolver.acme.tlschallenge=true"
-      - "--certificatesresolvers.myresolver.acme.email=$EMAIL" # Replace with your email
+      # Use HTTP challenge instead of TLS challenge
+      - "--certificatesresolvers.myresolver.acme.httpchallenge=true"
+      - "--certificatesresolvers.myresolver.acme.httpchallenge.entrypoint=web"
+      # Remove or comment out the TLS challenge line
+      # - "--certificatesresolvers.myresolver.acme.tlschallenge=true"
+      - "--certificatesresolvers.myresolver.acme.email=$EMAIL"
       - "--certificatesresolvers.myresolver.acme.storage=/letsencrypt/acme.json"
     ports:
       - "80:80"      # HTTP
       - "443:443"    # HTTPS
-      - "8080:8080"  # Traefik Dashboard (access via http://traefik.yourdomain.com:8080)
+      - "8080:8080"  # Traefik Dashboard
     volumes:
       - "/var/run/docker.sock:/var/run/docker.sock:ro"
       - "./letsencrypt:/letsencrypt"
@@ -398,7 +402,7 @@ services:
       - traefik-network
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.traefik.rule=Host(\`traefik.${SERVER_ID}.yourdomain.com\`)" # Replace with your desired Traefik dashboard domain
+      - "traefik.http.routers.traefik.rule=Host(\`traefik.${SERVER_ID}.yourdomain.com\`)"
       - "traefik.http.routers.traefik.entrypoints=websecure"
       - "traefik.http.routers.traefik.tls.certresolver=myresolver"
       - "traefik.http.routers.traefik.service=api@internal"
