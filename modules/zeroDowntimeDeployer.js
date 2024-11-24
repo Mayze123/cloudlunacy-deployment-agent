@@ -323,29 +323,35 @@ class ZeroDowntimeDeployer {
         }
     }
 
-    async performHealthCheck(container, domain) {
+    async performHealthCheck(container) {
         let healthy = false;
         let attempts = 0;
-
+    
         while (!healthy && attempts < this.healthCheckRetries) {
             try {
                 await new Promise(resolve => setTimeout(resolve, this.healthCheckInterval));
-
-                // Use external health check instead of docker exec
-                const healthUrl = `http://${domain}/health`;
-                const { stdout, stderr } = await executeCommand('curl', ['-f', healthUrl]);
-
-                if (stdout.includes('OK')) {
+    
+                // Check the container's health status via Docker inspect
+                const { stdout } = await executeCommand('docker', [
+                    'inspect',
+                    '--format', '{{.State.Health.Status}}',
+                    container.id
+                ]);
+    
+                const status = stdout.trim();
+                if (status === 'healthy') {
                     healthy = true;
                     logger.info(`Health check passed for container ${container.name}`);
                     break;
+                } else {
+                    logger.warn(`Health check status: ${status}`);
                 }
             } catch (error) {
                 attempts++;
                 logger.warn(`Health check attempt ${attempts} failed for container ${container.name}:`, error.message);
             }
         }
-
+    
         if (!healthy) {
             throw new Error('Container failed health checks');
         }
@@ -483,7 +489,7 @@ class ZeroDowntimeDeployer {
                     await executeCommand('docker', ['run', '-d', '--name', backupMetadata.containerName, backupMetadata.backupName]);
 
                     // Wait for the restored container to be healthy
-                    await this.performHealthCheck({ id: backupMetadata.containerId, name: backupMetadata.containerName }, domain);
+                    await this.performHealthCheck({ id: backupMetadata.containerId, name: backupMetadata.containerName });
                 } else {
                     logger.warn('No backup metadata found. Skipping restoration of old container.');
                 }
