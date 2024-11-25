@@ -304,18 +304,27 @@ create_combined_certificate() {
     log "Creating combined certificate file for MongoDB..."
 
     CERT_DIR="/etc/letsencrypt/live/$DOMAIN"
+    ARCHIVE_DIR="/etc/letsencrypt/archive/$DOMAIN"
     COMBINED_CERT="$CERT_DIR/combined.pem"
 
+    # Create full certificate chain including root certificate
+    log "Downloading root certificate..."
+    curl -s https://letsencrypt.org/certs/isrg-root-x1-cross-signed.pem -o "$ARCHIVE_DIR/root1.pem"
+    
+    # Create fullchain with root cert
+    cat "$CERT_DIR/fullchain.pem" "$ARCHIVE_DIR/root1.pem" > "$ARCHIVE_DIR/chain1.pem"
+    ln -sf "$ARCHIVE_DIR/chain1.pem" "$CERT_DIR/chain.pem"
+
+    # Create combined certificate (private key + fullchain)
     cat "$CERT_DIR/privkey.pem" "$CERT_DIR/fullchain.pem" > "$COMBINED_CERT"
 
-    chmod 600 "$COMBINED_CERT"
-    chown 999:999 "$COMBINED_CERT"
+    # Set proper permissions
+    chmod 600 "$COMBINED_CERT" "$CERT_DIR/chain.pem"
+    chown 999:999 "$COMBINED_CERT" "$CERT_DIR/chain.pem"
+    chmod 644 "$ARCHIVE_DIR/root1.pem"
 
-    # Set permissions and ownership for chain.pem
-    chmod 600 "$CERT_DIR/chain.pem"
-    chown 999:999 "$CERT_DIR/chain.pem"
-
-    log "Combined certificate file created at $COMBINED_CERT."
+    log "Combined certificate file created at $COMBINED_CERT"
+    log "Full certificate chain created at $CERT_DIR/chain.pem"
 }
 
 # Function to set up MongoDB with TLS using the obtained certificate
