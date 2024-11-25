@@ -418,13 +418,20 @@ create_mongo_management_user() {
     COMBINED_CERT="$CERT_DIR/combined.pem"
     CHAIN_CERT="$CERT_DIR/chain.pem"
 
+    # Create temporary directory with correct permissions
+    TEMP_CERT_DIR="/tmp/mongo-certs"
+    mkdir -p "$TEMP_CERT_DIR"
+    cp "$COMBINED_CERT" "$TEMP_CERT_DIR/combined.pem"
+    cp "$CHAIN_CERT" "$TEMP_CERT_DIR/chain.pem"
+    chmod 644 "$TEMP_CERT_DIR"/*
+    chown -R 999:999 "$TEMP_CERT_DIR"
+
     # Prepare the MongoDB command
     MONGO_COMMAND="db.getSiblingDB('admin').createUser({user: '$MONGO_MANAGER_USERNAME', pwd: '$MONGO_MANAGER_PASSWORD', roles: [{role: 'userAdminAnyDatabase', db: 'admin'}]});"
 
-    # Execute the command using the mongosh client in a separate container
+    # Execute the command using the mongosh client
     docker run --rm --network=internal \
-        -v "$COMBINED_CERT:/certs/combined.pem:ro" \
-        -v "$CHAIN_CERT:/certs/chain.pem:ro" \
+        -v "$TEMP_CERT_DIR:/certs:ro" \
         mongodb/mongodb-community-server:6.0-ubi8 \
         mongosh \
         --tls \
@@ -435,6 +442,9 @@ create_mongo_management_user() {
         --authenticationDatabase "admin" \
         --host "mongodb" \
         --eval "$MONGO_COMMAND"
+
+    # Clean up temporary directory
+    rm -rf "$TEMP_CERT_DIR"
 
     log "MongoDB management user created."
 }
