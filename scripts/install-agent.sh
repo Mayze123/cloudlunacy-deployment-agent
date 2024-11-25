@@ -417,16 +417,34 @@ create_mongo_management_user() {
     cp "/etc/letsencrypt/live/$DOMAIN/chain.pem" "$TEMP_CERT_DIR/chain.pem"
     chmod 644 "$TEMP_CERT_DIR"/*
     chown -R 999:999 "$TEMP_CERT_DIR"
-
+    
     MONGO_COMMAND="db.getSiblingDB('admin').createUser({user: '$MONGO_MANAGER_USERNAME', pwd: '$MONGO_MANAGER_PASSWORD', roles: [{role: 'userAdminAnyDatabase', db: 'admin'}]});"
-
+    
     # Wait for MongoDB to be ready
-    sleep 30
-
+    sleep 60
+    
+    # Get MongoDB container IP address on the 'internal' network
+    MONGO_IP=$(docker inspect -f '{{range $key, $value := .NetworkSettings.Networks}}{{if eq $key "internal"}}{{$value.IPAddress}}{{end}}{{end}}' mongodb)
+    
+    # Test connectivity
+    log "Testing connectivity to MongoDB at $MONGO_IP..."
+    docker run --rm --network=internal \
+        mongo:6.0 \
+        mongosh \
+        --tls \
+        --tlsAllowInvalidCertificates \
+        --host $MONGO_IP \
+        --eval "db.runCommand({ ping: 1 })"
+    
+    if [ $? -ne 0 ]; then
+        log_error "Cannot connect to MongoDB server. Exiting."
+        exit 1
+    fi
+    
+    # Create the management user
     docker run --rm --network=internal \
         -v "$TEMP_CERT_DIR:/certs:ro" \
-        --add-host=mongodb:$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' mongodb) \
-        mongodb/mongodb-community-server:6.0-ubi8 \
+        mongo:6.0 \
         mongosh \
         --tls \
         --tlsCertificateKeyFile /certs/combined.pem \
@@ -434,9 +452,9 @@ create_mongo_management_user() {
         -u "$MONGO_INITDB_ROOT_USERNAME" \
         -p "$MONGO_INITDB_ROOT_PASSWORD" \
         --authenticationDatabase "admin" \
-        --host mongodb \
+        --host $MONGO_IP \
         --eval "$MONGO_COMMAND"
-
+    
     rm -rf "$TEMP_CERT_DIR"
 }
 
