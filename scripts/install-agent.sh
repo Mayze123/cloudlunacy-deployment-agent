@@ -1,40 +1,47 @@
 #!/bin/bash
 # ------------------------------------------------------------------------------
-# Installation Script for CloudLunacy Deployment Agent with Traefik
-# Version: 2.1.0
+# Installation Script for CloudLunacy Deployment Agent with Traefik and MongoDB
+# Version: 2.5.0
 # Author: Mahamadou Taibou
-# Date: 2024-11-22
+# Date: 2024-11-24
 #
 # Description:
 # This script installs and configures the CloudLunacy Deployment Agent on a VPS.
 # It performs the following tasks:
 #   - Detects the operating system and version
 #   - Updates system packages
-#   - Installs necessary dependencies (Docker, Node.js, Git, jq)
+#   - Installs necessary dependencies (Docker, Node.js, Git, jq, Certbot)
 #   - Sets up Traefik as a reverse proxy
+#   - Sets up MongoDB with TLS using a publicly trusted certificate
 #   - Creates a dedicated user with correct permissions
 #   - Downloads the latest version of the Deployment Agent from GitHub
 #   - Installs Node.js dependencies
 #   - Configures environment variables
 #   - Sets up the Deployment Agent as a systemd service
-#   - Generates SSH keys for private repository access
+#   - Automates SSL certificate renewal
 #   - Provides post-installation verification and feedback
 #
 # Usage:
-#   sudo ./install-agent.sh <AGENT_TOKEN> <SERVER_ID> <EMAIL> [BACKEND_BASE_URL] [GITHUB_SSH_KEY]
+#   sudo ./install-agent.sh <AGENT_TOKEN> <SERVER_ID> <EMAIL> [BACKEND_BASE_URL]
 #
 # Arguments:
 #   AGENT_TOKEN      - Unique token for agent authentication
 #   SERVER_ID        - Unique identifier for the server
-#   EMAIL            - Email address for Traefik's Let's Encrypt
+#   EMAIL            - Email address for Let's Encrypt notifications
 #   BACKEND_BASE_URL - (Optional) Backend base URL; defaults to https://your-default-backend-url
-#   GITHUB_SSH_KEY   - (Optional) Path to existing SSH private key for accessing private repos
 # ------------------------------------------------------------------------------
 
 set -euo pipefail
 # Uncomment the following line to enable debugging
 # set -x
 IFS=$'\n\t'
+
+# ----------------------------
+# Configuration Variables
+# ----------------------------
+
+# Fixed domain for MongoDB
+DOMAIN="mongodb.cloudlunacy.uk"
 
 # ----------------------------
 # Function Definitions
@@ -44,9 +51,9 @@ IFS=$'\n\t'
 display_info() {
     echo "-------------------------------------------------"
     echo "CloudLunacy Deployment Agent Installation Script"
-    echo "Version: 2.1.0"
+    echo "Version: 2.5.0"
     echo "Author: Mahamadou Taibou"
-    echo "Date: 2024-11-22"
+    echo "Date: 2024-11-24"
     echo "-------------------------------------------------"
 }
 
@@ -67,7 +74,7 @@ log_error() {
 check_args() {
     if [ "$#" -lt 3 ] || [ "$#" -gt 5 ]; then
         log_error "Invalid number of arguments."
-        echo "Usage: $0 <AGENT_TOKEN> <SERVER_ID> <EMAIL> [BACKEND_BASE_URL] [GITHUB_SSH_KEY]"
+        echo "Usage: $0 <AGENT_TOKEN> <SERVER_ID> <EMAIL> [BACKEND_BASE_URL]"
         exit 1
     fi
 }
@@ -235,6 +242,251 @@ install_node() {
     log "Node.js installed successfully."
 }
 
+# Function to install Certbot
+install_certbot() {
+    log "Installing Certbot for SSL certificate management..."
+    case "$OS_TYPE" in
+        ubuntu | debian | raspbian)
+            apt-get update
+            apt-get install -y certbot
+            ;;
+        centos | fedora | rhel | ol | rocky | almalinux | amzn)
+            yum install -y certbot
+            ;;
+        *)
+            log_error "Unsupported OS for Certbot installation: $OS_TYPE $OS_VERSION"
+            exit 1
+            ;;
+    esac
+    log "Certbot installed."
+}
+
+# Function to obtain SSL/TLS certificate using Certbot
+obtain_ssl_certificate() {
+    log "Obtaining SSL/TLS certificate for domain $DOMAIN..."
+    
+    # Ensure port 80 is available
+    if lsof -i :80 | grep LISTEN; then
+        log "Port 80 is currently in use. Attempting to stop services using port 80..."
+        # Try to stop common services that might be using port 80
+        systemctl stop nginx || true
+        systemctl stop apache2 || true
+        systemctl stop httpd || true
+        systemctl stop traefik || true
+        # Check again if port 80 is free
+        if lsof -i :80 | grep LISTEN; then
+            log_error "Port 80 is still in use. Cannot proceed with certificate issuance."
+            exit 1
+        fi
+    fi
+
+    # Obtain the certificate using standalone mode
+    certbot certonly --standalone --non-interactive --agree-tos --email "$EMAIL" -d "$DOMAIN"
+
+    # Check if the certificate was successfully obtained
+    if [ ! -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]; then
+        log_error "Failed to obtain SSL/TLS certificate for $DOMAIN."
+        exit 1
+    fi
+
+    log "SSL/TLS certificate obtained for $DOMAIN."
+}
+
+# Function to create combined certificate file for MongoDB
+create_combined_certificate() {
+    log "Creating combined certificate file for MongoDB..."
+
+    CERT_DIR="/etc/letsencrypt/live/$DOMAIN"
+    COMBINED_CERT="$CERT_DIR/combined.pem"
+
+    cat "$CERT_DIR/privkey.pem" "$CERT_DIR/fullchain.pem" > "$COMBINED_CERT"
+
+    chmod 600 "$COMBINED_CERT"
+    chown root:root "$COMBINED_CERT"
+
+    log "Combined certificate file created at $COMBINED_CERT."
+}
+
+# Function to set up MongoDB with TLS using the obtained certificate
+setup_mongodb() {
+    log "Setting up MongoDB as a Docker container with TLS..."
+
+    MONGODB_DIR="$BASE_DIR/mongodb"
+    mkdir -p "$MONGODB_DIR"
+    chown "$USERNAME":"$USERNAME" "$MONGODB_DIR"
+
+    # Generate MongoDB root username and password
+    MONGO_INITDB_ROOT_USERNAME=$(openssl rand -hex 12)
+    MONGO_INITDB_ROOT_PASSWORD=$(openssl rand -hex 24)
+
+    # Generate MongoDB management user credentials
+    MONGO_MANAGER_USERNAME="manager"
+    MONGO_MANAGER_PASSWORD=$(openssl rand -hex 24)
+
+    # Save MongoDB credentials to environment file
+    MONGO_ENV_FILE="$MONGODB_DIR/.env"
+    cat <<EOF > "$MONGO_ENV_FILE"
+MONGO_INITDB_ROOT_USERNAME=$MONGO_INITDB_ROOT_USERNAME
+MONGO_INITDB_ROOT_PASSWORD=$MONGO_INITDB_ROOT_PASSWORD
+MONGO_MANAGER_USERNAME=$MONGO_MANAGER_USERNAME
+MONGO_MANAGER_PASSWORD=$MONGO_MANAGER_PASSWORD
+EOF
+    chown "$USERNAME":"$USERNAME" "$MONGO_ENV_FILE"
+    chmod 600 "$MONGO_ENV_FILE"
+
+    # Create MongoDB Docker Compose file
+    cat <<EOF > "$MONGODB_DIR/docker-compose.mongodb.yml"
+version: '3.8'
+
+services:
+  mongodb:
+    image: mongo:6.0
+    container_name: mongodb
+    restart: unless-stopped
+    volumes:
+      - mongo_data:/data/db
+      - /etc/letsencrypt/live/$DOMAIN/combined.pem:/etc/ssl/mongo/combined.pem:ro
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=\${MONGO_INITDB_ROOT_USERNAME}
+      - MONGO_INITDB_ROOT_PASSWORD=\${MONGO_INITDB_ROOT_PASSWORD}
+    command:
+      [
+        "--auth",
+        "--tlsMode=requireTLS",
+        "--tlsCertificateKeyFile=/etc/ssl/mongo/combined.pem",
+        "--bind_ip_all"
+      ]
+    ports:
+      - "27017:27017"
+    networks:
+      - internal
+
+volumes:
+  mongo_data:
+
+networks:
+  internal:
+    driver: bridge
+EOF
+
+    chown "$USERNAME":"$USERNAME" "$MONGODB_DIR/docker-compose.mongodb.yml"
+
+    # Create the internal Docker network if it doesn't exist
+    if ! docker network ls | grep -q "internal"; then
+        docker network create internal
+        log "Created internal Docker network."
+    else
+        log "Internal Docker network already exists."
+    fi
+
+    # Start MongoDB using Docker Compose
+    cd "$MONGODB_DIR"
+    sudo -u "$USERNAME" docker-compose -f docker-compose.mongodb.yml up -d
+
+    log "MongoDB set up and running."
+
+    # Wait for MongoDB to initialize
+    log "Waiting for MongoDB to initialize..."
+    sleep 15
+
+    # Create the management user
+    create_mongo_management_user
+}
+
+# Function to create MongoDB management user
+create_mongo_management_user() {
+    log "Creating MongoDB management user..."
+
+    # Load credentials
+    source "$MONGO_ENV_FILE"
+
+    # Prepare MongoDB command to create the management user
+    MONGO_COMMAND="db.getSiblingDB('admin').createUser({user: '$MONGO_MANAGER_USERNAME', pwd: '$MONGO_MANAGER_PASSWORD', roles: [{role: 'userAdminAnyDatabase', db: 'admin'}]});"
+
+    # Execute the command inside the MongoDB container
+    docker exec -i mongodb bash -c "echo \"$MONGO_COMMAND\" | mongo --tls --tlsCertificateKeyFile /etc/ssl/mongo/combined.pem -u \"$MONGO_INITDB_ROOT_USERNAME\" -p \"$MONGO_INITDB_ROOT_PASSWORD\" --authenticationDatabase \"admin\" --host \"127.0.0.1\""
+
+    log "MongoDB management user created."
+}
+
+# Function to adjust firewall settings
+adjust_firewall_settings() {
+    log "Adjusting firewall settings to allow external MongoDB connections..."
+
+    # Check if UFW is installed
+    if command -v ufw >/dev/null 2>&1; then
+        # Allow port 27017
+        ufw allow 27017/tcp
+        log "Allowed port 27017/tcp through UFW."
+    else
+        # Use iptables
+        iptables -A INPUT -p tcp --dport 27017 -j ACCEPT
+        log "Allowed port 27017/tcp through iptables."
+    fi
+
+    log "Firewall settings adjusted."
+}
+
+# Function to configure environment variables
+configure_env() {
+    log "Configuring environment variables..."
+    ENV_FILE="$BASE_DIR/.env"
+
+    # Read MongoDB credentials from MongoDB env file
+    MONGO_ENV_FILE="$BASE_DIR/mongodb/.env"
+    if [ -f "$MONGO_ENV_FILE" ]; then
+        source "$MONGO_ENV_FILE"
+    else
+        log_error "MongoDB environment file not found at $MONGO_ENV_FILE."
+        exit 1
+    fi
+
+    cat <<EOF > "$ENV_FILE"
+BACKEND_URL=$BACKEND_URL
+AGENT_API_TOKEN=$AGENT_TOKEN
+SERVER_ID=$SERVER_ID
+MONGO_MANAGER_USERNAME=$MONGO_MANAGER_USERNAME
+MONGO_MANAGER_PASSWORD=$MONGO_MANAGER_PASSWORD
+MONGO_HOST=$DOMAIN
+MONGO_PORT=27017
+EOF
+
+    chown "$USERNAME":"$USERNAME" "$ENV_FILE"
+    chmod 600 "$ENV_FILE"
+    log "Environment variables configured."
+}
+
+# Function to display MongoDB credentials
+display_mongodb_credentials() {
+    log "MongoDB Management User Credentials:"
+    log "----------------------------------------"
+    echo "Management Username: $MONGO_MANAGER_USERNAME"
+    echo "Management Password: $MONGO_MANAGER_PASSWORD"
+    echo "MongoDB Host: $DOMAIN"
+    echo "MongoDB Port: 27017"
+    log "----------------------------------------"
+    log "These credentials are stored securely in $MONGO_ENV_FILE"
+    log "Do not share them publicly."
+}
+
+# Function to automate SSL certificate renewal
+setup_certificate_renewal() {
+    log "Setting up SSL certificate renewal with Certbot..."
+
+    # Create renewal script
+    RENEWAL_SCRIPT="/usr/local/bin/renew_certificates.sh"
+    cat <<EOF > "$RENEWAL_SCRIPT"
+#!/bin/bash
+certbot renew --deploy-hook "docker-compose -f $BASE_DIR/mongodb/docker-compose.mongodb.yml restart mongodb"
+EOF
+    chmod +x "$RENEWAL_SCRIPT"
+
+    # Add cron job
+    (crontab -l ; echo "0 2 * * * $RENEWAL_SCRIPT >> /var/log/letsencrypt/renewal.log 2>&1") | crontab -
+
+    log "SSL certificate renewal setup complete."
+}
+
 # Function to create dedicated user and directories
 setup_user_directories() {
     log "Creating dedicated user and directories..."
@@ -294,57 +546,10 @@ install_agent_dependencies() {
         sudo -u "$USERNAME" HOME="$BASE_DIR" npm install --cache "$NPM_CACHE_DIR" --no-fund --no-audit
     else
         sudo -u "$USERNAME" HOME="$BASE_DIR" npm init -y
-        sudo -u "$USERNAME" HOME="$BASE_DIR" npm install axios dotenv winston joi shelljs ws handlebars js-yaml --cache "$NPM_CACHE_DIR" --no-fund --no-audit
+        sudo -u "$USERNAME" HOME="$BASE_DIR" npm install axios dotenv winston mongodb joi shelljs ws handlebars js-yaml --cache "$NPM_CACHE_DIR" --no-fund --no-audit
     fi
 
     log "Agent dependencies installed."
-}
-
-# Function to configure environment variables
-configure_env() {
-    log "Configuring environment variables..."
-    ENV_FILE="$BASE_DIR/.env"
-
-    cat <<EOF > "$ENV_FILE"
-BACKEND_URL=$BACKEND_URL
-AGENT_API_TOKEN=$AGENT_TOKEN
-SERVER_ID=$SERVER_ID
-EOF
-
-    chown "$USERNAME":"$USERNAME" "$ENV_FILE"
-    chmod 600 "$ENV_FILE"
-    log "Environment variables configured."
-}
-
-# Function to set up SSH for private repositories
-setup_ssh() {
-    log "Setting up SSH for accessing private repositories..."
-
-    SSH_DIR="$BASE_DIR/.ssh"
-    sudo -u "$USERNAME" mkdir -p "$SSH_DIR"
-    sudo -u "$USERNAME" chmod 700 "$SSH_DIR"
-
-    # Check if a custom SSH key was provided
-    if [ -n "${GITHUB_SSH_KEY:-}" ] && [ -f "$GITHUB_SSH_KEY" ]; then
-        log "Using provided SSH key."
-        sudo -u "$USERNAME" cp "$GITHUB_SSH_KEY" "$SSH_DIR/id_ed25519"
-    else
-        log "Generating new SSH key for agent..."
-        sudo -u "$USERNAME" ssh-keygen -t ed25519 -f "$SSH_DIR/id_ed25519" -N ""
-    fi
-
-    sudo -u "$USERNAME" chmod 600 "$SSH_DIR/id_ed25519"
-    sudo -u "$USERNAME" touch "$SSH_DIR/config"
-    sudo -u "$USERNAME" bash -c 'cat <<EOF > '"$SSH_DIR"'/config
-Host github.com
-    HostName github.com
-    User git
-    IdentityFile '"$SSH_DIR"'/id_ed25519
-    StrictHostKeyChecking no
-EOF'
-
-    sudo -u "$USERNAME" chmod 600 "$SSH_DIR/config"
-    log "SSH setup completed."
 }
 
 # Function to set up Docker permissions
@@ -531,7 +736,6 @@ main() {
     SERVER_ID="$2"
     EMAIL="$3"
     BACKEND_BASE_URL="${4:-https://your-default-backend-url}"
-    GITHUB_SSH_KEY="${5:-}"
 
     BACKEND_URL="${BACKEND_BASE_URL}"
 
@@ -540,19 +744,25 @@ main() {
 
     update_system
     install_dependencies
+    install_certbot             # Install Certbot
     install_docker
     install_node
     setup_user_directories
     setup_docker_permissions
-    setup_ssh "$GITHUB_SSH_KEY"
     download_agent
     install_agent_dependencies
-    configure_env
-    stop_conflicting_containers
-    setup_traefik
+    stop_conflicting_containers # Stop services on port 80 if necessary
+    obtain_ssl_certificate      # Obtain SSL/TLS certificate
+    create_combined_certificate # Create combined certificate for MongoDB
+    setup_mongodb               # Set up MongoDB with TLS
+    adjust_firewall_settings    # Adjust firewall settings
+    configure_env               # Configure environment variables
+    setup_traefik               # Set up Traefik (if needed)
     setup_service
+    setup_certificate_renewal   # Automate SSL certificate renewal
     verify_installation
     completion_message
+    display_mongodb_credentials   # Display MongoDB management user credentials after installation
 }
 
 main "$@"
