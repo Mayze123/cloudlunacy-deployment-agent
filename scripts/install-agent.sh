@@ -421,7 +421,7 @@ create_mongo_management_user() {
     MONGO_COMMAND="db.getSiblingDB('admin').createUser({user: '$MONGO_MANAGER_USERNAME', pwd: '$MONGO_MANAGER_PASSWORD', roles: [{role: 'userAdminAnyDatabase', db: 'admin'}]});"
     
     # Wait for MongoDB to be ready
-    sleep 90  # Increase sleep time if necessary
+    sleep 30  # Increase sleep time if necessary
     
     # Set MONGO_IP to the service name
     MONGO_IP="mongodb"

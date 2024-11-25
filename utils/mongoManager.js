@@ -1,7 +1,5 @@
 const { MongoClient } = require("mongodb");
 const logger = require("./utils/logger");
-const fs = require("fs");
-const path = require("path");
 
 class MongoManager {
   constructor() {
@@ -11,19 +9,15 @@ class MongoManager {
     const mongoHost = process.env.MONGO_HOST || "mongodb.cloudlunacy.uk";
     const mongoPort = process.env.MONGO_PORT || "27017";
 
-    // Construct MongoDB URI with SSL parameters
-    this.mongoUri = `mongodb://${this.managerUsername}:${this.managerPassword}@${mongoHost}:${mongoPort}/?authSource=admin`;
+    // Use the Docker service name initially for internal connections
+    this.mongoUri = `mongodb://${this.managerUsername}:${this.managerPassword}@mongodb:${mongoPort}/?authSource=admin`;
 
-    // Certificate paths
-    const certDir = "/etc/letsencrypt/live/mongodb.cloudlunacy.uk";
-
-    // Client options with proper SSL/TLS configuration
     this.clientOptions = {
       tls: true,
-      tlsCertificateKeyFile: path.join(certDir, "combined.pem"),
-      tlsCAFile: path.join(certDir, "chain.pem"),
-      tlsAllowInvalidHostnames: false,
-      tlsAllowInvalidCertificates: false,
+      tlsCertificateKeyFile:
+        "/etc/letsencrypt/live/mongodb.cloudlunacy.uk/combined.pem",
+      tlsCAFile: "/etc/letsencrypt/live/mongodb.cloudlunacy.uk/chain.pem",
+      tlsAllowInvalidHostnames: true,
       useUnifiedTopology: true,
       serverSelectionTimeoutMS: 5000,
       connectTimeoutMS: 10000,
@@ -33,45 +27,58 @@ class MongoManager {
   }
 
   async connect() {
-    try {
-      if (!this.client) {
-        this.client = new MongoClient(this.mongoUri, this.clientOptions);
-      }
-
-      if (!this.client.isConnected()) {
-        await this.client.connect();
-        logger.info("Successfully connected to MongoDB with TLS");
-      }
-      return this.client;
-    } catch (error) {
-      logger.error("MongoDB connection error:", error);
-      throw new Error(`Failed to connect to MongoDB: ${error.message}`);
+    if (!this.client) {
+      this.client = new MongoClient(this.mongoUri, this.clientOptions);
     }
+
+    if (!this.client.isConnected()) {
+      // Add retry logic for initial connection
+      let attempts = 0;
+      const maxAttempts = 5;
+      const retryDelay = 2000; // 2 seconds
+
+      while (attempts < maxAttempts) {
+        try {
+          await this.client.connect();
+          logger.info("Successfully connected to MongoDB");
+          break;
+        } catch (error) {
+          attempts++;
+          if (attempts === maxAttempts) {
+            logger.error(
+              "Failed to connect to MongoDB after multiple attempts:",
+              error
+            );
+            throw error;
+          }
+          logger.warn(
+            `Connection attempt ${attempts} failed, retrying in ${retryDelay}ms...`
+          );
+          await new Promise((resolve) => setTimeout(resolve, retryDelay));
+        }
+      }
+    }
+    return this.client;
   }
 
   async createDatabaseAndUser(dbName, username, password) {
-    let client = null;
     try {
-      client = await this.connect();
+      const client = await this.connect();
       const db = client.db(dbName);
 
-      // Create user with specific database access
+      // Create a new user with access to the specific database
       await db.addUser(username, password, {
         roles: [{ role: "readWrite", db: dbName }],
         mechanisms: ["SCRAM-SHA-256"],
       });
 
       logger.info(
-        `Database ${dbName} and user ${username} created successfully`
+        `Database ${dbName} and user ${username} created successfully.`
       );
       return { dbName, username, password };
     } catch (error) {
-      logger.error(`Error creating database and user for ${dbName}:`, error);
+      logger.error("Error creating database and user:", error);
       throw error;
-    } finally {
-      if (client) {
-        await this.close();
-      }
     }
   }
 
@@ -80,7 +87,7 @@ class MongoManager {
       if (this.client) {
         await this.client.close();
         this.client = null;
-        logger.info("MongoDB connection closed successfully");
+        logger.info("MongoDB connection closed");
       }
     } catch (error) {
       logger.error("Error closing MongoDB connection:", error);
@@ -92,8 +99,7 @@ class MongoManager {
   async verifyConnection() {
     try {
       const client = await this.connect();
-      const adminDb = client.db("admin");
-      const result = await adminDb.command({ ping: 1 });
+      const result = await client.db("admin").command({ ping: 1 });
       logger.info("MongoDB connection verified:", result);
       return result;
     } catch (error) {
