@@ -379,7 +379,7 @@ volumes:
 
 networks:
   internal:
-    driver: bridge
+    external: true
 EOF
 
     chown "$USERNAME":"$USERNAME" "$MONGODB_DIR/docker-compose.mongodb.yml"
@@ -421,23 +421,16 @@ create_mongo_management_user() {
     MONGO_COMMAND="db.getSiblingDB('admin').createUser({user: '$MONGO_MANAGER_USERNAME', pwd: '$MONGO_MANAGER_PASSWORD', roles: [{role: 'userAdminAnyDatabase', db: 'admin'}]});"
     
     # Wait for MongoDB to be ready
-    sleep 60
+    sleep 90  # Increase sleep time if necessary
     
     # Set MONGO_IP to the service name
     MONGO_IP="mongodb"
     
     # Test connectivity
     log "Testing connectivity to MongoDB at $MONGO_IP..."
-    docker run --rm --network=internal \
-        mongo:6.0 \
-        mongosh \
-        --tls \
-        --tlsAllowInvalidCertificates \
-        --host $MONGO_IP \
-        --eval "db.runCommand({ ping: 1 })"
-    
+    docker run --rm --network=internal alpine ping -c 3 $MONGO_IP
     if [ $? -ne 0 ]; then
-        log_error "Cannot connect to MongoDB server. Exiting."
+        log_error "Cannot resolve MongoDB hostname. Exiting."
         exit 1
     fi
     
