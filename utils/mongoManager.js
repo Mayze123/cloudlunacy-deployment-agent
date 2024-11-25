@@ -1,7 +1,9 @@
 const { MongoClient } = require("mongodb");
 const logger = require("./utils/logger");
 const fs = require("fs");
-const path = require("path");
+const { exec } = require("child_process");
+const util = require("util");
+const execPromise = util.promisify(exec);
 
 class MongoManager {
   constructor() {
@@ -13,7 +15,7 @@ class MongoManager {
     this.managerUsername = process.env.MONGO_MANAGER_USERNAME;
     this.managerPassword = process.env.MONGO_MANAGER_PASSWORD;
 
-    // Certificate paths - Update these lines
+    // Certificate paths
     this.certPaths = {
       combined: "/etc/ssl/mongo/combined.pem",
       chain: "/etc/ssl/mongo/chain.pem",
@@ -32,6 +34,23 @@ class MongoManager {
 
     this.client = null;
     this.isInitialized = false;
+  }
+
+  async getMongoContainerIP() {
+    try {
+      const { stdout } = await execPromise(
+        "docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' mongodb"
+      );
+      const ip = stdout.trim();
+      if (!ip) {
+        throw new Error("Could not retrieve MongoDB container IP");
+      }
+      logger.info(`Retrieved MongoDB container IP: ${ip}`);
+      return ip;
+    } catch (error) {
+      logger.error("Error getting MongoDB container IP:", error);
+      throw error;
+    }
   }
 
   async checkCertificates() {
@@ -66,7 +85,9 @@ class MongoManager {
       try {
         logger.info(`Connection attempt ${attempt}/${maxAttempts}`);
 
-        const uri = `mongodb://${this.rootUsername}:${this.rootPassword}@mongodb:27017/admin`;
+        const mongoIP = await this.getMongoContainerIP();
+        const uri = `mongodb://${this.rootUsername}:${this.rootPassword}@${mongoIP}:27017/admin`;
+
         const client = new MongoClient(uri, {
           ...this.commonOptions,
           serverSelectionTimeoutMS: 5000,
@@ -101,7 +122,9 @@ class MongoManager {
     try {
       await this.waitForMongoDB();
 
-      const uri = `mongodb://${this.rootUsername}:${this.rootPassword}@mongodb:27017/admin`;
+      const mongoIP = await this.getMongoContainerIP();
+      const uri = `mongodb://${this.rootUsername}:${this.rootPassword}@${mongoIP}:27017/admin`;
+
       client = new MongoClient(uri, this.commonOptions);
 
       await client.connect();
@@ -140,7 +163,8 @@ class MongoManager {
       }
 
       if (!this.client) {
-        const uri = `mongodb://${this.managerUsername}:${this.managerPassword}@mongodb:27017/?authSource=admin`;
+        const mongoIP = await this.getMongoContainerIP();
+        const uri = `mongodb://${this.managerUsername}:${this.managerPassword}@${mongoIP}:27017/?authSource=admin`;
         this.client = new MongoClient(uri, this.commonOptions);
       }
 
