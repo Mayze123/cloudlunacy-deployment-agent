@@ -331,18 +331,33 @@ setup_mongodb() {
     mkdir -p "$MONGODB_DIR"
     chown "$USERNAME":"$USERNAME" "$MONGODB_DIR"
 
-    # Generate MongoDB root username and password
+    # Generate MongoDB credentials first
+    log "Generating MongoDB credentials..."
     MONGO_INITDB_ROOT_USERNAME=$(openssl rand -hex 12)
     MONGO_INITDB_ROOT_PASSWORD=$(openssl rand -hex 24)
-
-    # Generate MongoDB management user credentials
     MONGO_MANAGER_USERNAME="manager"
     MONGO_MANAGER_PASSWORD=$(openssl rand -hex 24)
 
-    # Save MongoDB credentials to environment file
+    # Create and save environment file first
     MONGO_ENV_FILE="$MONGODB_DIR/.env"
+    cat <<EOF > "$MONGO_ENV_FILE"
+MONGO_INITDB_ROOT_USERNAME=$MONGO_INITDB_ROOT_USERNAME
+MONGO_INITDB_ROOT_PASSWORD=$MONGO_INITDB_ROOT_PASSWORD
+MONGO_MANAGER_USERNAME=$MONGO_MANAGER_USERNAME
+MONGO_MANAGER_PASSWORD=$MONGO_MANAGER_PASSWORD
+EOF
 
-cat <<EOF > "$MONGODB_DIR/docker-compose.mongodb.yml"
+    # Set proper permissions
+    chown "$USERNAME":"$USERNAME" "$MONGO_ENV_FILE"
+    chmod 600 "$MONGO_ENV_FILE"
+
+    log "Created MongoDB environment file at $MONGO_ENV_FILE"
+
+    # Source the environment file
+    source "$MONGO_ENV_FILE"
+
+    # Create MongoDB Docker Compose file
+    cat <<EOF > "$MONGODB_DIR/docker-compose.mongodb.yml"
 version: '3.8'
 
 services:
@@ -390,6 +405,11 @@ EOF
 
     chown "$USERNAME":"$USERNAME" "$MONGODB_DIR/docker-compose.mongodb.yml"
 
+    # Debug information
+    log "MongoDB environment variables:"
+    log "MONGO_INITDB_ROOT_USERNAME: $MONGO_INITDB_ROOT_USERNAME"
+    log "MONGO_MANAGER_USERNAME: $MONGO_MANAGER_USERNAME"
+
     # Create the internal Docker network if it doesn't exist
     if ! docker network ls | grep -q "internal"; then
         docker network create internal
@@ -398,9 +418,9 @@ EOF
         log "Internal Docker network already exists."
     fi
 
-    # Start MongoDB using Docker Compose
+    # Start MongoDB using Docker Compose with explicit environment file
     cd "$MONGODB_DIR"
-    sudo -u "$USERNAME" docker-compose -f docker-compose.mongodb.yml up -d
+    sudo -u "$USERNAME" docker-compose --env-file "$MONGO_ENV_FILE" -f docker-compose.mongodb.yml up -d
 
     log "MongoDB set up and running."
 
@@ -415,28 +435,34 @@ EOF
 # Function to create MongoDB management user
 create_mongo_management_user() {
     log "Creating MongoDB management user..."
+    
+    if [ ! -f "$MONGO_ENV_FILE" ]; then
+        log_error "MongoDB environment file not found at $MONGO_ENV_FILE"
+        exit 1
+    }
+
     source "$MONGO_ENV_FILE"
     
+    if [ -z "$MONGO_INITDB_ROOT_USERNAME" ] || [ -z "$MONGO_INITDB_ROOT_PASSWORD" ]; then
+        log_error "MongoDB root credentials not found in environment file"
+        exit 1
+    }
+
     TEMP_CERT_DIR="/tmp/mongo-certs"
     mkdir -p "$TEMP_CERT_DIR"
     cp "/etc/ssl/mongo/combined.pem" "$TEMP_CERT_DIR/combined.pem"
     cp "/etc/ssl/mongo/chain.pem" "$TEMP_CERT_DIR/chain.pem"
     chmod 644 "$TEMP_CERT_DIR"/*
     
-    MONGO_COMMAND="db.getSiblingDB('admin').createUser({user: '$MONGO_MANAGER_USERNAME', pwd: '$MONGO_MANAGER_PASSWORD', roles: [{role: 'userAdminAnyDatabase', db: 'admin'}, {role: 'readWriteAnyDatabase', db: 'admin'}]});"
+    # Get MongoDB container IP
+    MONGO_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' mongodb)
+    log "MongoDB container IP: $MONGO_IP"
     
-    # Wait for MongoDB to be ready
-    sleep 30
-    
-    # Set MONGO_IP to container IP directly
-    MONGO_IP=$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' mongodb)
-    
-    # Test connectivity using IP directly
-    log "Testing connectivity to MongoDB at $MONGO_IP..."
+    # Test connectivity
+    log "Testing connectivity to MongoDB..."
     docker run --rm --network=internal \
         -v "$TEMP_CERT_DIR:/certs:ro" \
         --add-host mongodb:$MONGO_IP \
-        --add-host mongodb.cloudlunacy.uk:$MONGO_IP \
         mongo:6.0 \
         mongosh \
         --tls \
@@ -450,16 +476,18 @@ create_mongo_management_user() {
         --eval "db.runCommand({ ping: 1 })"
     
     if [ $? -ne 0 ]; then
-        log_error "Cannot connect to MongoDB server. Exiting."
+        log_error "Cannot connect to MongoDB server. Showing logs:"
         docker logs mongodb
         exit 1
     fi
     
-    # Create the management user using IP
+    # Create management user
+    log "Creating management user..."
+    MONGO_COMMAND="db.getSiblingDB('admin').createUser({user: '$MONGO_MANAGER_USERNAME', pwd: '$MONGO_MANAGER_PASSWORD', roles: [{role: 'userAdminAnyDatabase', db: 'admin'}, {role: 'readWriteAnyDatabase', db: 'admin'}]});"
+    
     docker run --rm --network=internal \
         -v "$TEMP_CERT_DIR:/certs:ro" \
         --add-host mongodb:$MONGO_IP \
-        --add-host mongodb.cloudlunacy.uk:$MONGO_IP \
         mongo:6.0 \
         mongosh \
         --tls \
