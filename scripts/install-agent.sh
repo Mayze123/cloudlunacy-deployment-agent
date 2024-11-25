@@ -264,7 +264,7 @@ install_certbot() {
 # Function to install MongoDB Shell (mongosh) Docker image
 install_mongosh() {
     log "Pulling MongoDB Shell Docker image..."
-    docker pull mongosh/mongosh:latest
+    docker pull mongodb/mongodb-community-server:6.0-ubi8
     log "MongoDB Shell Docker image pulled."
 }
 
@@ -425,7 +425,8 @@ create_mongo_management_user() {
     docker run --rm --network=internal \
         -v "$COMBINED_CERT:/certs/combined.pem:ro" \
         -v "$CHAIN_CERT:/certs/chain.pem:ro" \
-        mongosh/mongosh:latest \
+        mongodb/mongodb-community-server:6.0-ubi8 \
+        mongosh \
         --tls \
         --tlsCertificateKeyFile /certs/combined.pem \
         --tlsCAFile /certs/chain.pem \
