@@ -400,7 +400,7 @@ EOF
 
     # Wait for MongoDB to initialize
     log "Waiting for MongoDB to initialize..."
-    sleep 20
+    sleep 30
 
     # Create the management user
     create_mongo_management_user
