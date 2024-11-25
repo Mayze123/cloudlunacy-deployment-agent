@@ -264,7 +264,7 @@ install_certbot() {
 # Function to install MongoDB Shell (mongosh) Docker image
 install_mongosh() {
     log "Pulling MongoDB Shell Docker image..."
-    docker pull mongodb/mongosh:latest
+    docker pull mongosh/mongosh:latest
     log "MongoDB Shell Docker image pulled."
 }
 
@@ -356,11 +356,11 @@ services:
     restart: unless-stopped
     volumes:
       - mongo_data:/data/db
-      - /etc/letsencrypt/live/$DOMAIN/combined.pem:/etc/ssl/mongo/combined.pem:ro
-      - /etc/letsencrypt/live/$DOMAIN/chain.pem:/etc/ssl/mongo/chain.pem:ro
+      - /etc/letsencrypt/live/mongodb.cloudlunacy.uk/combined.pem:/etc/ssl/mongo/combined.pem:ro
+      - /etc/letsencrypt/live/mongodb.cloudlunacy.uk/chain.pem:/etc/ssl/mongo/chain.pem:ro
     environment:
-      - MONGO_INITDB_ROOT_USERNAME=\${MONGO_INITDB_ROOT_USERNAME}
-      - MONGO_INITDB_ROOT_PASSWORD=\${MONGO_INITDB_ROOT_PASSWORD}
+      - MONGO_INITDB_ROOT_USERNAME=${MONGO_INITDB_ROOT_USERNAME}
+      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_INITDB_ROOT_PASSWORD}
     command:
       [
         "--auth",
@@ -425,7 +425,7 @@ create_mongo_management_user() {
     docker run --rm --network=internal \
         -v "$COMBINED_CERT:/certs/combined.pem:ro" \
         -v "$CHAIN_CERT:/certs/chain.pem:ro" \
-        mongodb/mongosh:latest \
+        mongosh/mongosh:latest \
         --tls \
         --tlsCertificateKeyFile /certs/combined.pem \
         --tlsCAFile /certs/chain.pem \
