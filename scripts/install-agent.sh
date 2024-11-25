@@ -439,7 +439,7 @@ create_mongo_management_user() {
     if [ $? -ne 0 ]; then
         log_error "Cannot connect to MongoDB server. Exiting."
         exit 1
-    }
+    fi
     
     # Create the management user
     docker run --rm --network=internal \
