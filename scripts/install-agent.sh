@@ -302,7 +302,11 @@ create_combined_certificate() {
     cat "$CERT_DIR/privkey.pem" "$CERT_DIR/fullchain.pem" > "$COMBINED_CERT"
 
     chmod 600 "$COMBINED_CERT"
-    chown root:root "$COMBINED_CERT"
+    chown 999:999 "$COMBINED_CERT"
+
+    # Set permissions and ownership for chain.pem
+    chmod 600 "$CERT_DIR/chain.pem"
+    chown 999:999 "$CERT_DIR/chain.pem"
 
     log "Combined certificate file created at $COMBINED_CERT."
 }
@@ -346,6 +350,7 @@ services:
     volumes:
       - mongo_data:/data/db
       - /etc/letsencrypt/live/$DOMAIN/combined.pem:/etc/ssl/mongo/combined.pem:ro
+      - /etc/letsencrypt/live/$DOMAIN/chain.pem:/etc/ssl/mongo/chain.pem:ro
     environment:
       - MONGO_INITDB_ROOT_USERNAME=\${MONGO_INITDB_ROOT_USERNAME}
       - MONGO_INITDB_ROOT_PASSWORD=\${MONGO_INITDB_ROOT_PASSWORD}
@@ -354,6 +359,7 @@ services:
         "--auth",
         "--tlsMode=requireTLS",
         "--tlsCertificateKeyFile=/etc/ssl/mongo/combined.pem",
+        "--tlsCAFile=/etc/ssl/mongo/chain.pem",
         "--bind_ip_all"
       ]
     ports:
@@ -387,7 +393,7 @@ EOF
 
     # Wait for MongoDB to initialize
     log "Waiting for MongoDB to initialize..."
-    sleep 15
+    sleep 20
 
     # Create the management user
     create_mongo_management_user
@@ -404,7 +410,7 @@ create_mongo_management_user() {
     MONGO_COMMAND="db.getSiblingDB('admin').createUser({user: '$MONGO_MANAGER_USERNAME', pwd: '$MONGO_MANAGER_PASSWORD', roles: [{role: 'userAdminAnyDatabase', db: 'admin'}]});"
 
     # Execute the command inside the MongoDB container
-    docker exec -i mongodb bash -c "echo \"$MONGO_COMMAND\" | mongo --tls --tlsCertificateKeyFile /etc/ssl/mongo/combined.pem -u \"$MONGO_INITDB_ROOT_USERNAME\" -p \"$MONGO_INITDB_ROOT_PASSWORD\" --authenticationDatabase \"admin\" --host \"127.0.0.1\""
+    docker exec -i mongodb bash -c "echo \"$MONGO_COMMAND\" | mongo --tls --tlsCertificateKeyFile /etc/ssl/mongo/combined.pem --tlsCAFile /etc/ssl/mongo/chain.pem -u \"$MONGO_INITDB_ROOT_USERNAME\" -p \"$MONGO_INITDB_ROOT_PASSWORD\" --authenticationDatabase \"admin\" --host \"127.0.0.1\""
 
     log "MongoDB management user created."
 }
@@ -482,7 +488,7 @@ EOF
     chmod +x "$RENEWAL_SCRIPT"
 
     # Add cron job
-    (crontab -l ; echo "0 2 * * * $RENEWAL_SCRIPT >> /var/log/letsencrypt/renewal.log 2>&1") | crontab -
+    (crontab -l 2>/dev/null; echo "0 2 * * * $RENEWAL_SCRIPT >> /var/log/letsencrypt/renewal.log 2>&1") | crontab -
 
     log "SSL certificate renewal setup complete."
 }
