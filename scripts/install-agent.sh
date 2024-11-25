@@ -303,28 +303,24 @@ obtain_ssl_certificate() {
 create_combined_certificate() {
     log "Creating combined certificate file for MongoDB..."
 
+    # Create MongoDB SSL directory
+    SSL_DIR="/etc/ssl/mongo"
+    mkdir -p "$SSL_DIR"
+
+    # Source certificate directory
     CERT_DIR="/etc/letsencrypt/live/$DOMAIN"
-    ARCHIVE_DIR="/etc/letsencrypt/archive/$DOMAIN"
-    COMBINED_CERT="$CERT_DIR/combined.pem"
-
-    # Create full certificate chain including root certificate
-    log "Downloading root certificate..."
-    curl -s https://letsencrypt.org/certs/isrg-root-x1-cross-signed.pem -o "$ARCHIVE_DIR/root1.pem"
     
-    # Create fullchain with root cert
-    cat "$CERT_DIR/fullchain.pem" "$ARCHIVE_DIR/root1.pem" > "$ARCHIVE_DIR/chain1.pem"
-    ln -sf "$ARCHIVE_DIR/chain1.pem" "$CERT_DIR/chain.pem"
-
     # Create combined certificate (private key + fullchain)
-    cat "$CERT_DIR/privkey.pem" "$CERT_DIR/fullchain.pem" > "$COMBINED_CERT"
+    cat "$CERT_DIR/privkey.pem" "$CERT_DIR/fullchain.pem" > "$SSL_DIR/combined.pem"
+    
+    # Copy chain certificate
+    cp "$CERT_DIR/chain.pem" "$SSL_DIR/chain.pem"
 
     # Set proper permissions
-    chmod 600 "$COMBINED_CERT" "$CERT_DIR/chain.pem"
-    chown 999:999 "$COMBINED_CERT" "$CERT_DIR/chain.pem"
-    chmod 644 "$ARCHIVE_DIR/root1.pem"
+    chown -R 999:999 "$SSL_DIR"
+    chmod 600 "$SSL_DIR"/*.pem
 
-    log "Combined certificate file created at $COMBINED_CERT"
-    log "Full certificate chain created at $CERT_DIR/chain.pem"
+    log "Certificate files created in $SSL_DIR"
 }
 
 # Function to set up MongoDB with TLS using the obtained certificate
@@ -365,19 +361,20 @@ services:
     restart: unless-stopped
     volumes:
       - mongo_data:/data/db
-      - /etc/letsencrypt/live/mongodb.cloudlunacy.uk/combined.pem:/etc/ssl/mongo/combined.pem:ro
-      - /etc/letsencrypt/live/mongodb.cloudlunacy.uk/chain.pem:/etc/ssl/mongo/chain.pem:ro
+      - /etc/ssl/mongo:/etc/ssl/mongo:ro
     environment:
-      - MONGO_INITDB_ROOT_USERNAME=${MONGO_INITDB_ROOT_USERNAME}
-      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_INITDB_ROOT_PASSWORD}
+      - MONGO_INITDB_ROOT_USERNAME=\${MONGO_INITDB_ROOT_USERNAME}
+      - MONGO_INITDB_ROOT_PASSWORD=\${MONGO_INITDB_ROOT_PASSWORD}
     command:
-      [
-        "--auth",
-        "--tlsMode=requireTLS",
-        "--tlsCertificateKeyFile=/etc/ssl/mongo/combined.pem",
-        "--tlsCAFile=/etc/ssl/mongo/chain.pem",
-        "--bind_ip_all"
-      ]
+      - "--auth"
+      - "--tlsMode=requireTLS"
+      - "--tlsCertificateKeyFile=/etc/ssl/mongo/combined.pem"
+      - "--tlsCAFile=/etc/ssl/mongo/chain.pem"
+      - "--bind_ip_all"
+      - "--logpath=/dev/stdout"
+      - "--logappend"
+      - "--setParameter"
+      - "tlsLogLevel=5"
     ports:
       - "27017:27017"
     networks:
@@ -422,15 +419,14 @@ create_mongo_management_user() {
     
     TEMP_CERT_DIR="/tmp/mongo-certs"
     mkdir -p "$TEMP_CERT_DIR"
-    cp "/etc/letsencrypt/live/$DOMAIN/combined.pem" "$TEMP_CERT_DIR/combined.pem"
-    cp "/etc/letsencrypt/live/$DOMAIN/chain.pem" "$TEMP_CERT_DIR/chain.pem"
+    cp "/etc/ssl/mongo/combined.pem" "$TEMP_CERT_DIR/combined.pem"
+    cp "/etc/ssl/mongo/chain.pem" "$TEMP_CERT_DIR/chain.pem"
     chmod 644 "$TEMP_CERT_DIR"/*
-    chown -R 999:999 "$TEMP_CERT_DIR"
     
-    MONGO_COMMAND="db.getSiblingDB('admin').createUser({user: '$MONGO_MANAGER_USERNAME', pwd: '$MONGO_MANAGER_PASSWORD', roles: [{role: 'userAdminAnyDatabase', db: 'admin'}]});"
+    MONGO_COMMAND="db.getSiblingDB('admin').createUser({user: '$MONGO_MANAGER_USERNAME', pwd: '$MONGO_MANAGER_PASSWORD', roles: [{role: 'userAdminAnyDatabase', db: 'admin'}, {role: 'readWriteAnyDatabase', db: 'admin'}]});"
     
     # Wait for MongoDB to be ready
-    sleep 30  # Increase sleep time if necessary
+    sleep 30
     
     # Set MONGO_IP to the service name
     MONGO_IP="mongodb"
@@ -438,12 +434,17 @@ create_mongo_management_user() {
     # Test connectivity
     log "Testing connectivity to MongoDB at $MONGO_IP..."
     docker run --rm --network=internal \
+        -v "$TEMP_CERT_DIR:/certs:ro" \
         mongo:6.0 \
         mongosh \
         --tls \
-        --tlsAllowInvalidCertificates \
+        --tlsCertificateKeyFile /certs/combined.pem \
+        --tlsCAFile /certs/chain.pem \
         --tlsAllowInvalidHostnames \
         --host $MONGO_IP \
+        -u "$MONGO_INITDB_ROOT_USERNAME" \
+        -p "$MONGO_INITDB_ROOT_PASSWORD" \
+        --authenticationDatabase admin \
         --eval "db.runCommand({ ping: 1 })"
     
     if [ $? -ne 0 ]; then
@@ -462,7 +463,7 @@ create_mongo_management_user() {
         --tlsAllowInvalidHostnames \
         -u "$MONGO_INITDB_ROOT_USERNAME" \
         -p "$MONGO_INITDB_ROOT_PASSWORD" \
-        --authenticationDatabase "admin" \
+        --authenticationDatabase admin \
         --host $MONGO_IP \
         --eval "$MONGO_COMMAND"
     

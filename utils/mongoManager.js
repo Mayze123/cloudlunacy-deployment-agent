@@ -13,7 +13,7 @@ class MongoManager {
     this.managerUsername = process.env.MONGO_MANAGER_USERNAME;
     this.managerPassword = process.env.MONGO_MANAGER_PASSWORD;
 
-    // Certificate paths
+    // Certificate paths - Update these lines
     this.certPaths = {
       combined: "/etc/ssl/mongo/combined.pem",
       chain: "/etc/ssl/mongo/chain.pem",
@@ -28,8 +28,6 @@ class MongoManager {
       useUnifiedTopology: true,
       serverSelectionTimeoutMS: 30000,
       connectTimeoutMS: 30000,
-      heartbeatFrequencyMS: 2000,
-      retryWrites: false,
     };
 
     this.client = null;
