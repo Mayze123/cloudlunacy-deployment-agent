@@ -411,20 +411,21 @@ create_mongo_management_user() {
     log "Creating MongoDB management user..."
     source "$MONGO_ENV_FILE"
     
-    CERT_DIR="/etc/letsencrypt/live/$DOMAIN"
-    MONGO_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' mongodb)
-    
     TEMP_CERT_DIR="/tmp/mongo-certs"
     mkdir -p "$TEMP_CERT_DIR"
-    cp "$CERT_DIR/combined.pem" "$TEMP_CERT_DIR/combined.pem"
-    cp "$CERT_DIR/chain.pem" "$TEMP_CERT_DIR/chain.pem"
+    cp "/etc/letsencrypt/live/$DOMAIN/combined.pem" "$TEMP_CERT_DIR/combined.pem"
+    cp "/etc/letsencrypt/live/$DOMAIN/chain.pem" "$TEMP_CERT_DIR/chain.pem"
     chmod 644 "$TEMP_CERT_DIR"/*
     chown -R 999:999 "$TEMP_CERT_DIR"
 
     MONGO_COMMAND="db.getSiblingDB('admin').createUser({user: '$MONGO_MANAGER_USERNAME', pwd: '$MONGO_MANAGER_PASSWORD', roles: [{role: 'userAdminAnyDatabase', db: 'admin'}]});"
 
+    # Wait for MongoDB to be ready
+    sleep 30
+
     docker run --rm --network=internal \
         -v "$TEMP_CERT_DIR:/certs:ro" \
+        --add-host=mongodb:$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' mongodb) \
         mongodb/mongodb-community-server:6.0-ubi8 \
         mongosh \
         --tls \
@@ -433,7 +434,7 @@ create_mongo_management_user() {
         -u "$MONGO_INITDB_ROOT_USERNAME" \
         -p "$MONGO_INITDB_ROOT_PASSWORD" \
         --authenticationDatabase "admin" \
-        --host "$MONGO_IP" \
+        --host mongodb \
         --eval "$MONGO_COMMAND"
 
     rm -rf "$TEMP_CERT_DIR"
