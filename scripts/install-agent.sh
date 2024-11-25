@@ -423,8 +423,8 @@ create_mongo_management_user() {
     # Wait for MongoDB to be ready
     sleep 60
     
-    # Get MongoDB container IP address on the 'internal' network
-    MONGO_IP=$(docker inspect -f '{{range $key, $value := .NetworkSettings.Networks}}{{if eq $key "internal"}}{{$value.IPAddress}}{{end}}{{end}}' mongodb)
+    # Set MONGO_IP to the service name
+    MONGO_IP="mongodb"
     
     # Test connectivity
     log "Testing connectivity to MongoDB at $MONGO_IP..."
@@ -439,7 +439,7 @@ create_mongo_management_user() {
     if [ $? -ne 0 ]; then
         log_error "Cannot connect to MongoDB server. Exiting."
         exit 1
-    fi
+    }
     
     # Create the management user
     docker run --rm --network=internal \
