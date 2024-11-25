@@ -334,9 +334,14 @@ function sendMetrics(metrics) {
 /**
  * Initialize agent operations
  */
+// At the start of your init() function in agent.js
 async function init() {
   try {
-    // Check permissions first
+    // Initialize MongoDB first
+    const mongoManager = require("./utils/mongoManager");
+    await mongoManager.initializeManagerUser();
+
+    // Then check permissions
     const permissionsOk = await ensureDeploymentPermissions();
     if (!permissionsOk) {
       logger.error(
