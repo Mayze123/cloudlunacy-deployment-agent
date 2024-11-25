@@ -261,6 +261,13 @@ install_certbot() {
     log "Certbot installed."
 }
 
+# Function to install MongoDB Shell (mongosh) Docker image
+install_mongosh() {
+    log "Pulling MongoDB Shell Docker image..."
+    docker pull mongosh/mongosh:latest
+    log "MongoDB Shell Docker image pulled."
+}
+
 # Function to obtain SSL/TLS certificate using Certbot
 obtain_ssl_certificate() {
     log "Obtaining SSL/TLS certificate for domain $DOMAIN..."
@@ -406,11 +413,30 @@ create_mongo_management_user() {
     # Load credentials
     source "$MONGO_ENV_FILE"
 
-    # Prepare MongoDB command to create the management user
+    # Paths to certificate files
+    CERT_DIR="/etc/letsencrypt/live/$DOMAIN"
+    COMBINED_CERT="$CERT_DIR/combined.pem"
+    CHAIN_CERT="$CERT_DIR/chain.pem"
+
+    # Prepare the MongoDB command
     MONGO_COMMAND="db.getSiblingDB('admin').createUser({user: '$MONGO_MANAGER_USERNAME', pwd: '$MONGO_MANAGER_PASSWORD', roles: [{role: 'userAdminAnyDatabase', db: 'admin'}]});"
 
-    # Execute the command inside the MongoDB container
-    docker exec -i mongodb bash -c "echo \"$MONGO_COMMAND\" | mongo --tls --tlsCertificateKeyFile /etc/ssl/mongo/combined.pem --tlsCAFile /etc/ssl/mongo/chain.pem -u \"$MONGO_INITDB_ROOT_USERNAME\" -p \"$MONGO_INITDB_ROOT_PASSWORD\" --authenticationDatabase \"admin\" --host \"127.0.0.1\""
+    # Pull the MongoDB Shell Docker image
+    docker pull mongodb/mongosh:latest
+
+    # Execute the command using the mongosh client in a separate container
+    docker run --rm --network=internal \
+        -v "$COMBINED_CERT:/certs/combined.pem:ro" \
+        -v "$CHAIN_CERT:/certs/chain.pem:ro" \
+        mongodb/mongosh:latest \
+        --tls \
+        --tlsCertificateKeyFile /certs/combined.pem \
+        --tlsCAFile /certs/chain.pem \
+        -u "$MONGO_INITDB_ROOT_USERNAME" \
+        -p "$MONGO_INITDB_ROOT_PASSWORD" \
+        --authenticationDatabase "admin" \
+        --host "mongodb" \
+        --eval "$MONGO_COMMAND"
 
     log "MongoDB management user created."
 }
@@ -751,6 +777,7 @@ main() {
     update_system
     install_dependencies
     install_certbot             # Install Certbot
+    install_mongosh             # Pull MongoDB Shell Docker image
     install_docker
     install_node
     setup_user_directories
