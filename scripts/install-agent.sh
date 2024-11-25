@@ -264,7 +264,7 @@ install_certbot() {
 # Function to install MongoDB Shell (mongosh) Docker image
 install_mongosh() {
     log "Pulling MongoDB Shell Docker image..."
-    docker pull mongosh/mongosh:latest
+    docker pull mongodb/mongosh:latest
     log "MongoDB Shell Docker image pulled."
 }
 
@@ -420,9 +420,6 @@ create_mongo_management_user() {
 
     # Prepare the MongoDB command
     MONGO_COMMAND="db.getSiblingDB('admin').createUser({user: '$MONGO_MANAGER_USERNAME', pwd: '$MONGO_MANAGER_PASSWORD', roles: [{role: 'userAdminAnyDatabase', db: 'admin'}]});"
-
-    # Pull the MongoDB Shell Docker image
-    docker pull mongodb/mongosh:latest
 
     # Execute the command using the mongosh client in a separate container
     docker run --rm --network=internal \
