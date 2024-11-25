@@ -428,9 +428,17 @@ create_mongo_management_user() {
     
     # Test connectivity
     log "Testing connectivity to MongoDB at $MONGO_IP..."
-    docker run --rm --network=internal alpine ping -c 3 $MONGO_IP
+    docker run --rm --network=internal \
+        mongo:6.0 \
+        mongosh \
+        --tls \
+        --tlsAllowInvalidCertificates \
+        --tlsAllowInvalidHostnames \
+        --host $MONGO_IP \
+        --eval "db.runCommand({ ping: 1 })"
+    
     if [ $? -ne 0 ]; then
-        log_error "Cannot resolve MongoDB hostname. Exiting."
+        log_error "Cannot connect to MongoDB server. Exiting."
         exit 1
     fi
     
@@ -442,6 +450,7 @@ create_mongo_management_user() {
         --tls \
         --tlsCertificateKeyFile /certs/combined.pem \
         --tlsCAFile /certs/chain.pem \
+        --tlsAllowInvalidHostnames \
         -u "$MONGO_INITDB_ROOT_USERNAME" \
         -p "$MONGO_INITDB_ROOT_PASSWORD" \
         --authenticationDatabase "admin" \
