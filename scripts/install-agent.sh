@@ -409,18 +409,15 @@ EOF
 # Function to create MongoDB management user
 create_mongo_management_user() {
     log "Creating MongoDB management user..."
-
-    # Load credentials
     source "$MONGO_ENV_FILE"
-
-    # Get MongoDB container IP
+    
+    CERT_DIR="/etc/letsencrypt/live/$DOMAIN"
     MONGO_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' mongodb)
-
-    # Create temp cert directory
+    
     TEMP_CERT_DIR="/tmp/mongo-certs"
     mkdir -p "$TEMP_CERT_DIR"
-    cp "$COMBINED_CERT" "$TEMP_CERT_DIR/combined.pem"
-    cp "$CHAIN_CERT" "$TEMP_CERT_DIR/chain.pem"
+    cp "$CERT_DIR/combined.pem" "$TEMP_CERT_DIR/combined.pem"
+    cp "$CERT_DIR/chain.pem" "$TEMP_CERT_DIR/chain.pem"
     chmod 644 "$TEMP_CERT_DIR"/*
     chown -R 999:999 "$TEMP_CERT_DIR"
 
@@ -440,7 +437,6 @@ create_mongo_management_user() {
         --eval "$MONGO_COMMAND"
 
     rm -rf "$TEMP_CERT_DIR"
-    log "MongoDB management user created."
 }
 
 # Function to adjust firewall settings
