@@ -439,14 +439,14 @@ create_mongo_management_user() {
     if [ ! -f "$MONGO_ENV_FILE" ]; then
         log_error "MongoDB environment file not found at $MONGO_ENV_FILE"
         exit 1
-    }
+    fi
 
     source "$MONGO_ENV_FILE"
     
     if [ -z "$MONGO_INITDB_ROOT_USERNAME" ] || [ -z "$MONGO_INITDB_ROOT_PASSWORD" ]; then
         log_error "MongoDB root credentials not found in environment file"
         exit 1
-    }
+    fi
 
     TEMP_CERT_DIR="/tmp/mongo-certs"
     mkdir -p "$TEMP_CERT_DIR"
