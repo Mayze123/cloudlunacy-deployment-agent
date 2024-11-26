@@ -404,7 +404,8 @@ EOF
     if [ -z "$MONGO_IP" ]; then
         log_error "Failed to get MongoDB container IP"
         exit 1
-    }
+    fi
+
     log "MongoDB container IP: $MONGO_IP"
 
     # Create management user
