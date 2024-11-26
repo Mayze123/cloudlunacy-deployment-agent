@@ -454,15 +454,10 @@ create_mongo_management_user() {
     cp "/etc/ssl/mongo/chain.pem" "$TEMP_CERT_DIR/chain.pem"
     chmod 644 "$TEMP_CERT_DIR"/*
     
-    # Get MongoDB container IP
-    MONGO_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' mongodb)
-    log "MongoDB container IP: $MONGO_IP"
-    
     # Test connectivity
     log "Testing connectivity to MongoDB..."
     docker run --rm --network=internal \
         -v "$TEMP_CERT_DIR:/certs:ro" \
-        --add-host mongodb:$MONGO_IP \
         mongo:6.0 \
         mongosh \
         --tls \
@@ -487,7 +482,6 @@ create_mongo_management_user() {
     
     docker run --rm --network=internal \
         -v "$TEMP_CERT_DIR:/certs:ro" \
-        --add-host mongodb:$MONGO_IP \
         mongo:6.0 \
         mongosh \
         --tls \
