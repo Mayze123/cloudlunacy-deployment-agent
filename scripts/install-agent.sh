@@ -356,7 +356,7 @@ EOF
     # Source the environment file
     source "$MONGO_ENV_FILE"
 
-    # Create MongoDB Docker Compose file
+    # Create MongoDB Docker Compose file with updated networking configuration
     cat <<EOF > "$MONGODB_DIR/docker-compose.mongodb.yml"
 version: '3.8'
 
@@ -379,33 +379,33 @@ services:
       - "--bind_ip_all"
       - "--logpath=/dev/stdout"
       - "--logappend"
-      - "--setParameter"
-      - "tlsLogLevel=5"
     ports:
       - "27017:27017"
     networks:
-      internal:
-        aliases:
-          - mongodb.cloudlunacy.uk
-          - mongodb
+      - internal
+    extra_hosts:
+      - "mongodb.cloudlunacy.uk:127.0.0.1"
+      - "mongodb:127.0.0.1"
     dns:
       - 8.8.8.8
       - 8.8.4.4
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
 
 volumes:
   mongo_data:
 
 networks:
   internal:
-    external: true
+    name: internal
+    driver: bridge
 EOF
 
     chown "$USERNAME":"$USERNAME" "$MONGODB_DIR/docker-compose.mongodb.yml"
-
-    # Debug information
-    log "MongoDB environment variables:"
-    log "MONGO_INITDB_ROOT_USERNAME: $MONGO_INITDB_ROOT_USERNAME"
-    log "MONGO_MANAGER_USERNAME: $MONGO_MANAGER_USERNAME"
 
     # Create the internal Docker network if it doesn't exist
     if ! docker network ls | grep -q "internal"; then
@@ -421,15 +421,32 @@ EOF
 
     log "MongoDB set up and running."
 
-    # Wait for MongoDB to initialize
-    log "Waiting for MongoDB to initialize..."
-    sleep 30
-
-    # Create the management user
-    create_mongo_management_user
+    # Wait for MongoDB to be healthy
+    wait_for_mongodb_health
 }
 
-# Function to create MongoDB management user
+# Add new function to check MongoDB container health
+wait_for_mongodb_health() {
+    log "Waiting for MongoDB container to be healthy..."
+    local max_attempts=30
+    local attempt=1
+    
+    while [ $attempt -le $max_attempts ]; do
+        if docker ps --filter "name=mongodb" --filter "health=healthy" | grep -q mongodb; then
+            log "MongoDB container is healthy"
+            return 0
+        fi
+        log "Attempt $attempt/$max_attempts: Waiting for MongoDB to be healthy..."
+        sleep 10
+        attempt=$((attempt + 1))
+    done
+    
+    log_error "MongoDB failed to become healthy after $max_attempts attempts"
+    docker logs mongodb
+    return 1
+}
+
+# Update create_mongo_management_user function
 create_mongo_management_user() {
     log "Creating MongoDB management user..."
     
@@ -445,13 +462,17 @@ create_mongo_management_user() {
         exit 1
     fi
 
+    # Wait for MongoDB to be healthy first
+    wait_for_mongodb_health
+
+    # Create temporary directory for certificates
     TEMP_CERT_DIR="/tmp/mongo-certs"
     mkdir -p "$TEMP_CERT_DIR"
     cp "/etc/ssl/mongo/combined.pem" "$TEMP_CERT_DIR/combined.pem"
     cp "/etc/ssl/mongo/chain.pem" "$TEMP_CERT_DIR/chain.pem"
     chmod 644 "$TEMP_CERT_DIR"/*
     
-    # Test connectivity
+    # Test connectivity using localhost instead of container name
     log "Testing connectivity to MongoDB..."
     docker run --rm --network=internal \
         -v "$TEMP_CERT_DIR:/certs:ro" \
@@ -461,7 +482,7 @@ create_mongo_management_user() {
         --tlsCertificateKeyFile /certs/combined.pem \
         --tlsCAFile /certs/chain.pem \
         --tlsAllowInvalidHostnames \
-        --host mongodb \
+        --host 127.0.0.1 \
         -u "$MONGO_INITDB_ROOT_USERNAME" \
         -p "$MONGO_INITDB_ROOT_PASSWORD" \
         --authenticationDatabase admin \
@@ -473,7 +494,7 @@ create_mongo_management_user() {
         exit 1
     fi
     
-    # Create management user
+    # Create management user using localhost
     log "Creating management user..."
     MONGO_COMMAND="db.getSiblingDB('admin').createUser({user: '$MONGO_MANAGER_USERNAME', pwd: '$MONGO_MANAGER_PASSWORD', roles: [{role: 'userAdminAnyDatabase', db: 'admin'}, {role: 'readWriteAnyDatabase', db: 'admin'}]});"
     
@@ -485,7 +506,7 @@ create_mongo_management_user() {
         --tlsCertificateKeyFile /certs/combined.pem \
         --tlsCAFile /certs/chain.pem \
         --tlsAllowInvalidHostnames \
-        --host mongodb \
+        --host 127.0.0.1 \
         -u "$MONGO_INITDB_ROOT_USERNAME" \
         -p "$MONGO_INITDB_ROOT_PASSWORD" \
         --authenticationDatabase admin \
