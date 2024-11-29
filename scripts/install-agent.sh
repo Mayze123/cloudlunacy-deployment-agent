@@ -391,9 +391,6 @@ services:
     dns:
       - 8.8.8.8
       - 8.8.4.4
-    extra_hosts:
-      - "mongodb:127.0.0.1"
-      - "mongodb.cloudlunacy.uk:127.0.0.1"
 
 volumes:
   mongo_data:
