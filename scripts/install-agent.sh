@@ -430,7 +430,7 @@ EOF
 
 wait_for_mongodb_health() {
     log "Waiting for MongoDB container to be healthy..."
-    local max_attempts=30
+    local max_attempts=5
     local attempt=1
     
     while [ $attempt -le $max_attempts ]; do
