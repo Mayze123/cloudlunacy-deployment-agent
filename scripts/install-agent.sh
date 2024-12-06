@@ -1,7 +1,7 @@
 #!/bin/bash
 # ------------------------------------------------------------------------------
 # Installation Script for CloudLunacy Deployment Agent with Traefik and MongoDB
-# Version: 2.5.2
+# Version: 2.5.2 (Modified for two-phase MongoDB setup)
 # Author: Mahamadou Taibou
 # Date: 2024-11-24
 #
@@ -12,7 +12,9 @@
 #   - Updates system packages
 #   - Installs necessary dependencies (Docker, Node.js, Git, jq, Certbot)
 #   - Sets up Traefik as a reverse proxy
-#   - Sets up MongoDB with TLS using a publicly trusted certificate
+#   - Sets up MongoDB in two phases:
+#       Phase 1: No auth/TLS -> root user is created by official entrypoint
+#       Phase 2: Enable auth & TLS -> health check passes with credentials
 #   - Creates a dedicated user with correct permissions
 #   - Downloads the latest version of the Deployment Agent from GitHub
 #   - Installs Node.js dependencies
@@ -39,15 +41,16 @@ IFS=$'\n\t'
 # ----------------------------
 # Configuration Variables
 # ----------------------------
-
-# Fixed domain for MongoDB
 DOMAIN="mongodb.cloudlunacy.uk"
+USERNAME="cloudlunacy"
+BASE_DIR="/opt/cloudlunacy"
+MONGODB_DIR="$BASE_DIR/mongodb"
+MONGO_ENV_FILE="$MONGODB_DIR/.env"
 
 # ----------------------------
 # Function Definitions
 # ----------------------------
 
-# Function to display script information
 display_info() {
     echo "-------------------------------------------------"
     echo "CloudLunacy Deployment Agent Installation Script"
@@ -57,7 +60,6 @@ display_info() {
     echo "-------------------------------------------------"
 }
 
-# Function to log messages
 log() {
     echo -e "\033[1;32m[INFO]\033[0m $1"
 }
@@ -70,7 +72,6 @@ log_error() {
     echo -e "\033[1;31m[ERROR]\033[0m $1"
 }
 
-# Function to check for required arguments
 check_args() {
     if [ "$#" -lt 3 ] || [ "$#" -gt 5 ]; then
         log_error "Invalid number of arguments."
@@ -79,7 +80,6 @@ check_args() {
     fi
 }
 
-# Function to check for root privileges
 check_root() {
     if [ "$(id -u)" -ne 0 ]; then
         log_error "This script must be run as root. Please run it with sudo."
@@ -87,13 +87,11 @@ check_root() {
     fi
 }
 
-# Function to detect OS and version
 detect_os() {
     OS_TYPE=$(grep -w "ID" /etc/os-release | cut -d "=" -f 2 | tr -d '"')
     OS_VERSION=$(grep -w "VERSION_ID" /etc/os-release | cut -d "=" -f 2 | tr -d '"')
 }
 
-# Function to update system packages
 update_system() {
     log "Updating system packages..."
     case "$OS_TYPE" in
@@ -115,7 +113,6 @@ update_system() {
     log "System packages updated."
 }
 
-# Function to install dependencies
 install_dependencies() {
     log "Installing dependencies (curl, wget, git, jq, lsof)..."
     case "$OS_TYPE" in
@@ -150,7 +147,6 @@ stop_conflicting_containers() {
     fi
 }
 
-# Function to install Docker
 install_docker() {
     log "Checking Docker installation..."
     if command -v docker >/dev/null 2>&1; then
@@ -200,7 +196,6 @@ install_docker() {
     else
         log "Installing Docker Compose..."
         DOCKER_COMPOSE_VERSION="2.24.1"
-
         curl -L "https://github.com/docker/compose/releases/download/v${DOCKER_COMPOSE_VERSION}/docker-compose-$(uname -s)-$(uname -m)" \
         -o /usr/local/bin/docker-compose
         chmod +x /usr/local/bin/docker-compose
@@ -209,7 +204,6 @@ install_docker() {
     fi
 }
 
-# Function to install Node.js
 install_node() {
     log "Checking Node.js installation..."
     if command -v node >/dev/null 2>&1; then
@@ -237,7 +231,6 @@ install_node() {
     log "Node.js installed successfully."
 }
 
-# Function to install Certbot
 install_certbot() {
     log "Installing Certbot for SSL certificate management..."
     case "$OS_TYPE" in
@@ -256,14 +249,12 @@ install_certbot() {
     log "Certbot installed."
 }
 
-# Function to install MongoDB Shell (mongosh) Docker image
 install_mongosh() {
     log "Pulling MongoDB Shell Docker image..."
     docker pull mongodb/mongodb-community-server:6.0-ubi8
     log "MongoDB Shell Docker image pulled."
 }
 
-# Function to obtain SSL/TLS certificate using Certbot
 obtain_ssl_certificate() {
     log "Obtaining SSL/TLS certificate for domain $DOMAIN..."
     
@@ -292,10 +283,8 @@ obtain_ssl_certificate() {
     log "SSL/TLS certificate obtained for $DOMAIN."
 }
 
-# Function to create combined certificate file for MongoDB
 create_combined_certificate() {
     log "Creating combined certificate file for MongoDB..."
-
     SSL_DIR="/etc/ssl/mongo"
     mkdir -p "$SSL_DIR"
     CERT_DIR="/etc/letsencrypt/live/$DOMAIN"
@@ -305,126 +294,7 @@ create_combined_certificate() {
 
     chown -R 999:999 "$SSL_DIR"
     chmod 600 "$SSL_DIR"/*.pem
-
     log "Certificate files created in $SSL_DIR"
-}
-
-# Function to set up MongoDB with TLS using the obtained certificate
-setup_mongodb() {
-    log "Setting up MongoDB as a Docker container with TLS..."
-
-    MONGODB_DIR="$BASE_DIR/mongodb"
-    mkdir -p "$MONGODB_DIR"
-    chown "$USERNAME":"$USERNAME" "$MONGODB_DIR"
-
-    # Generate MongoDB credentials
-    log "Generating MongoDB credentials..."
-    MONGO_INITDB_ROOT_USERNAME=$(openssl rand -hex 12)
-    MONGO_INITDB_ROOT_PASSWORD=$(openssl rand -hex 24)
-    MONGO_MANAGER_USERNAME="manager"
-    MONGO_MANAGER_PASSWORD=$(openssl rand -hex 24)
-
-    MONGO_ENV_FILE="$MONGODB_DIR/.env"
-    cat <<EOF > "$MONGO_ENV_FILE"
-MONGO_INITDB_ROOT_USERNAME=$MONGO_INITDB_ROOT_USERNAME
-MONGO_INITDB_ROOT_PASSWORD=$MONGO_INITDB_ROOT_PASSWORD
-MONGO_MANAGER_USERNAME=$MONGO_MANAGER_USERNAME
-MONGO_MANAGER_PASSWORD=$MONGO_MANAGER_PASSWORD
-EOF
-
-    chown "$USERNAME":"$USERNAME" "$MONGO_ENV_FILE"
-    chmod 600 "$MONGO_ENV_FILE"
-
-    source "$MONGO_ENV_FILE"
-
-    # Write docker-compose.yml
-    cat <<EOF > "$MONGODB_DIR/docker-compose.mongodb.yml"
-version: '3.8'
-
-services:
-  mongodb:
-    image: mongo:6.0
-    container_name: mongodb
-    restart: unless-stopped
-    volumes:
-      - mongo_data:/data/db
-      - /etc/ssl/mongo:/etc/ssl/mongo:ro
-    environment:
-      - MONGO_INITDB_ROOT_USERNAME=${MONGO_INITDB_ROOT_USERNAME}
-      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_INITDB_ROOT_PASSWORD}
-    command:
-      - "--auth"
-      - "--tlsMode=requireTLS"
-      - "--tlsCertificateKeyFile=/etc/ssl/mongo/combined.pem"
-      - "--tlsCAFile=/etc/ssl/mongo/chain.pem"
-      - "--bind_ip_all"
-      - "--logpath=/dev/stdout"
-      - "--logappend"
-    ports:
-      - "27017:27017"
-    networks:
-      - internal
-    extra_hosts:
-      - "mongodb.cloudlunacy.uk:127.0.0.1"
-      - "mongodb:127.0.0.1"
-    dns:
-      - 8.8.8.8
-      - 8.8.4.4
-    healthcheck:
-      test: 
-        - "CMD"
-        - "mongo"
-        - "--host"
-        - "localhost"
-        - "--tls"
-        - "--sslCAFile=/etc/ssl/mongo/chain.pem"
-        - "--sslPEMKeyFile=/etc/ssl/mongo/combined.pem"
-        - "-u"
-        - "${MONGO_INITDB_ROOT_USERNAME}"
-        - "-p"
-        - "${MONGO_INITDB_ROOT_PASSWORD}"
-        - "--authenticationDatabase=admin"
-        - "--eval"
-        - "db.adminCommand('ping')"
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 120s
-
-volumes:
-  mongo_data:
-
-networks:
-  internal:
-    external: true
-EOF
-
-    chown "$USERNAME":"$USERNAME" "$MONGODB_DIR/docker-compose.mongodb.yml"
-
-    # Before removing/recreating the network, ensure no containers are using it.
-    # If a previous run left containers running, we should stop them first.
-    if [ -f "$MONGODB_DIR/docker-compose.mongodb.yml" ]; then
-        cd "$MONGODB_DIR"
-        # Stop and remove containers from previous runs
-        sudo -u "$USERNAME" docker-compose -f docker-compose.mongodb.yml down || true
-    fi
-
-    # Now safe to remove and recreate the network
-    if docker network ls | grep -q "internal"; then
-        log "Removing existing 'internal' network to avoid conflicts..."
-        docker network rm internal || true
-    fi
-
-    log "Creating a fresh 'internal' Docker network..."
-    docker network create internal
-    log "Created internal Docker network."
-
-    # Now start up the containers fresh
-    cd "$MONGODB_DIR"
-    sudo -u "$USERNAME" docker-compose --env-file "$MONGO_ENV_FILE" -f docker-compose.mongodb.yml up -d
-
-    log "MongoDB set up and running."
-    wait_for_mongodb_health
 }
 
 wait_for_mongodb_health() {
@@ -447,6 +317,149 @@ wait_for_mongodb_health() {
     return 1
 }
 
+setup_mongodb() {
+    log "Setting up MongoDB as a Docker container with TLS (two-phase)..."
+
+    mkdir -p "$MONGODB_DIR"
+    chown "$USERNAME":"$USERNAME" "$MONGODB_DIR"
+
+    # Generate MongoDB credentials
+    log "Generating MongoDB credentials..."
+    MONGO_INITDB_ROOT_USERNAME=$(openssl rand -hex 12)
+    MONGO_INITDB_ROOT_PASSWORD=$(openssl rand -hex 24)
+    MONGO_MANAGER_USERNAME="manager"
+    MONGO_MANAGER_PASSWORD=$(openssl rand -hex 24)
+
+    cat <<EOF > "$MONGO_ENV_FILE"
+MONGO_INITDB_ROOT_USERNAME=$MONGO_INITDB_ROOT_USERNAME
+MONGO_INITDB_ROOT_PASSWORD=$MONGO_INITDB_ROOT_PASSWORD
+MONGO_MANAGER_USERNAME=$MONGO_MANAGER_USERNAME
+MONGO_MANAGER_PASSWORD=$MONGO_MANAGER_PASSWORD
+EOF
+    chown "$USERNAME":"$USERNAME" "$MONGO_ENV_FILE"
+    chmod 600 "$MONGO_ENV_FILE"
+    source "$MONGO_ENV_FILE"
+
+    # Phase 1: No Auth/No TLS to allow root user creation
+    cat <<EOF > "$MONGODB_DIR/docker-compose.mongodb.yml"
+version: '3.8'
+
+services:
+  mongodb:
+    image: mongo:6.0
+    container_name: mongodb
+    restart: unless-stopped
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=$MONGO_INITDB_ROOT_USERNAME
+      - MONGO_INITDB_ROOT_PASSWORD=$MONGO_INITDB_ROOT_PASSWORD
+    volumes:
+      - mongo_data:/data/db
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "mongo", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  mongo_data:
+
+networks:
+  internal:
+    external: true
+EOF
+
+    chown "$USERNAME":"$USERNAME" "$MONGODB_DIR/docker-compose.mongodb.yml"
+
+    # Ensure we have a clean 'internal' network
+    cd "$MONGODB_DIR"
+    sudo -u "$USERNAME" docker-compose -f docker-compose.mongodb.yml down || true
+    if docker network ls | grep -q "internal"; then
+        docker network rm internal || true
+    fi
+    docker network create internal
+
+    # Start without auth and TLS
+    sudo -u "$USERNAME" docker-compose --env-file "$MONGO_ENV_FILE" -f docker-compose.mongodb.yml up -d
+    # Wait for container to be healthy (root user created by official entrypoint)
+    wait_for_mongodb_health
+
+    # Stop the container
+    sudo -u "$USERNAME" docker-compose -f docker-compose.mongodb.yml down
+
+    # Phase 2: Enable Auth & TLS
+    cat <<EOF > "$MONGODB_DIR/docker-compose.mongodb.yml"
+version: '3.8'
+
+services:
+  mongodb:
+    image: mongo:6.0
+    container_name: mongodb
+    restart: unless-stopped
+    volumes:
+      - mongo_data:/data/db
+      - /etc/ssl/mongo:/etc/ssl/mongo:ro
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=$MONGO_INITDB_ROOT_USERNAME
+      - MONGO_INITDB_ROOT_PASSWORD=$MONGO_INITDB_ROOT_PASSWORD
+    command:
+      - "--auth"
+      - "--tlsMode=requireTLS"
+      - "--tlsCertificateKeyFile=/etc/ssl/mongo/combined.pem"
+      - "--tlsCAFile=/etc/ssl/mongo/chain.pem"
+      - "--bind_ip_all"
+      - "--logpath=/dev/stdout"
+      - "--logappend"
+    ports:
+      - "27017:27017"
+    networks:
+      - internal
+    extra_hosts:
+      - "mongodb.cloudlunacy.uk:127.0.0.1"
+      - "mongodb:127.0.0.1"
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+    healthcheck:
+      test:
+        - "CMD"
+        - "mongo"
+        - "--host"
+        - "localhost"
+        - "--tls"
+        - "--sslCAFile=/etc/ssl/mongo/chain.pem"
+        - "--sslPEMKeyFile=/etc/ssl/mongo/combined.pem"
+        - "-u"
+        - "$MONGO_INITDB_ROOT_USERNAME"
+        - "-p"
+        - "$MONGO_INITDB_ROOT_PASSWORD"
+        - "--authenticationDatabase=admin"
+        - "--eval"
+        - "db.adminCommand('ping')"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 120s
+
+volumes:
+  mongo_data:
+
+networks:
+  internal:
+    external: true
+EOF
+
+    chown "$USERNAME":"$USERNAME" "$MONGODB_DIR/docker-compose.mongodb.yml"
+
+    # Restart with auth and TLS
+    sudo -u "$USERNAME" docker-compose --env-file "$MONGO_ENV_FILE" -f docker-compose.mongodb.yml up -d
+    # Wait for container to be healthy with auth & TLS now
+    wait_for_mongodb_health
+    log "MongoDB set up and running with Auth & TLS."
+}
+
 create_mongo_management_user() {
     log "Creating MongoDB management user..."
     if [ ! -f "$MONGO_ENV_FILE" ]; then
@@ -460,6 +473,7 @@ create_mongo_management_user() {
         exit 1
     fi
 
+    # Ensure MongoDB is healthy after auth & TLS
     wait_for_mongodb_health
 
     TEMP_CERT_DIR="/tmp/mongo-certs"
@@ -468,41 +482,31 @@ create_mongo_management_user() {
     cp "/etc/ssl/mongo/chain.pem" "$TEMP_CERT_DIR/chain.pem"
     chmod 644 "$TEMP_CERT_DIR"/*
 
-    # Test connectivity
-    log "Testing connectivity to MongoDB..."
+    log "Testing connectivity to MongoDB with auth & TLS..."
     docker run --rm --network=internal \
         -v "$TEMP_CERT_DIR:/certs:ro" \
         mongo:6.0 \
-        mongosh \
+        mongo \
+        --host localhost \
         --tls \
-        --tlsCertificateKeyFile /certs/combined.pem \
-        --tlsCAFile /certs/chain.pem \
-        --tlsAllowInvalidHostnames \
-        --host 127.0.0.1 \
+        --sslCAFile /certs/chain.pem \
+        --sslPEMKeyFile /certs/combined.pem \
         -u "$MONGO_INITDB_ROOT_USERNAME" \
         -p "$MONGO_INITDB_ROOT_PASSWORD" \
         --authenticationDatabase admin \
         --eval "db.runCommand({ ping: 1 })"
 
-    if [ $? -ne 0 ]; then
-        log_error "Cannot connect to MongoDB server. Showing logs:"
-        docker logs mongodb
-        exit 1
-    fi
-
-    # Create management user
     log "Creating management user..."
     MONGO_COMMAND="db.getSiblingDB('admin').createUser({user: '$MONGO_MANAGER_USERNAME', pwd: '$MONGO_MANAGER_PASSWORD', roles: [{role: 'userAdminAnyDatabase', db: 'admin'}, {role: 'readWriteAnyDatabase', db: 'admin'}]});"
     
     docker run --rm --network=internal \
         -v "$TEMP_CERT_DIR:/certs:ro" \
         mongo:6.0 \
-        mongosh \
+        mongo \
+        --host localhost \
         --tls \
-        --tlsCertificateKeyFile /certs/combined.pem \
-        --tlsCAFile /certs/chain.pem \
-        --tlsAllowInvalidHostnames \
-        --host 127.0.0.1 \
+        --sslCAFile /certs/chain.pem \
+        --sslPEMKeyFile /certs/combined.pem \
         -u "$MONGO_INITDB_ROOT_USERNAME" \
         -p "$MONGO_INITDB_ROOT_PASSWORD" \
         --authenticationDatabase admin \
@@ -526,8 +530,6 @@ adjust_firewall_settings() {
 configure_env() {
     log "Configuring environment variables..."
     ENV_FILE="$BASE_DIR/.env"
-
-    MONGO_ENV_FILE="$BASE_DIR/mongodb/.env"
     if [ -f "$MONGO_ENV_FILE" ]; then
         source "$MONGO_ENV_FILE"
     else
@@ -576,9 +578,6 @@ EOF
 
 setup_user_directories() {
     log "Creating dedicated user and directories..."
-    USERNAME="cloudlunacy"
-    BASE_DIR="/opt/cloudlunacy"
-
     if id "$USERNAME" &>/dev/null; then
         log "User '$USERNAME' already exists."
         usermod -d "$BASE_DIR" "$USERNAME"
@@ -683,6 +682,7 @@ EOF
 setup_service() {
     log "Setting up CloudLunacy Deployment Agent as a systemd service..."
     SERVICE_FILE="/etc/systemd/system/cloudlunacy.service"
+
     cat <<EOF > "$SERVICE_FILE"
 [Unit]
 Description=CloudLunacy Deployment Agent
@@ -788,6 +788,7 @@ main() {
     obtain_ssl_certificate
     create_combined_certificate
     setup_mongodb
+    create_mongo_management_user
     adjust_firewall_settings
     configure_env
     setup_traefik
