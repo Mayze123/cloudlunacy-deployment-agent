@@ -1,7 +1,7 @@
 #!/bin/bash
 # ------------------------------------------------------------------------------
 # Installation Script for CloudLunacy Deployment Agent with Traefik and MongoDB
-# Version: 2.5.0
+# Version: 2.5.1
 # Author: Mahamadou Taibou
 # Date: 2024-11-24
 #
@@ -51,7 +51,7 @@ DOMAIN="mongodb.cloudlunacy.uk"
 display_info() {
     echo "-------------------------------------------------"
     echo "CloudLunacy Deployment Agent Installation Script"
-    echo "Version: 2.5.0"
+    echo "Version: 2.5.1"
     echo "Author: Mahamadou Taibou"
     echo "Date: 2024-11-24"
     echo "-------------------------------------------------"
@@ -288,12 +288,16 @@ obtain_ssl_certificate() {
     fi
 
     # Obtain the certificate using standalone mode
-    certbot certonly --standalone --non-interactive --agree-tos --email "$EMAIL" -d "$DOMAIN"
+    certbot certonly --standalone --non-interactive --agree-tos --email "$EMAIL" -d "$DOMAIN" || true
 
-    # Check if the certificate was successfully obtained
+    # Check if the certificate was successfully obtained or already exists
     if [ ! -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]; then
-        log_error "Failed to obtain SSL/TLS certificate for $DOMAIN."
-        exit 1
+        # If not obtained, try renew (in case it's already installed)
+        certbot renew --dry-run || true
+        if [ ! -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]; then
+            log_error "Failed to obtain SSL/TLS certificate for $DOMAIN."
+            exit 1
+        fi
     fi
 
     log "SSL/TLS certificate obtained for $DOMAIN."
@@ -323,7 +327,7 @@ create_combined_certificate() {
     log "Certificate files created in $SSL_DIR"
 }
 
-# Function to set up MongoDB with TLS using the obtained certificate
+# Updated function to set up MongoDB with TLS using the obtained certificate
 setup_mongodb() {
     log "Setting up MongoDB as a Docker container with TLS..."
 
@@ -401,13 +405,18 @@ volumes:
 
 networks:
   internal:
-    name: internal
-    driver: bridge
+    external: true
 EOF
 
     chown "$USERNAME":"$USERNAME" "$MONGODB_DIR/docker-compose.mongodb.yml"
 
-    # Create the internal Docker network if it doesn't exist
+    # Remove any existing internal network to avoid conflicts
+    if docker network ls | grep -q "internal"; then
+        log "Removing existing 'internal' network to avoid conflicts..."
+        docker network rm internal || true
+    fi
+
+    # Create the internal Docker network
     if ! docker network ls | grep -q "internal"; then
         docker network create internal
         log "Created internal Docker network."
@@ -425,7 +434,7 @@ EOF
     wait_for_mongodb_health
 }
 
-# Add new function to check MongoDB container health
+# Function to wait for MongoDB health
 wait_for_mongodb_health() {
     log "Waiting for MongoDB container to be healthy..."
     local max_attempts=30
@@ -446,7 +455,6 @@ wait_for_mongodb_health() {
     return 1
 }
 
-# Update create_mongo_management_user function
 create_mongo_management_user() {
     log "Creating MongoDB management user..."
     
@@ -472,7 +480,7 @@ create_mongo_management_user() {
     cp "/etc/ssl/mongo/chain.pem" "$TEMP_CERT_DIR/chain.pem"
     chmod 644 "$TEMP_CERT_DIR"/*
     
-    # Test connectivity using localhost instead of container name
+    # Test connectivity to MongoDB
     log "Testing connectivity to MongoDB..."
     docker run --rm --network=internal \
         -v "$TEMP_CERT_DIR:/certs:ro" \
@@ -494,7 +502,7 @@ create_mongo_management_user() {
         exit 1
     fi
     
-    # Create management user using localhost
+    # Create management user
     log "Creating management user..."
     MONGO_COMMAND="db.getSiblingDB('admin').createUser({user: '$MONGO_MANAGER_USERNAME', pwd: '$MONGO_MANAGER_PASSWORD', roles: [{role: 'userAdminAnyDatabase', db: 'admin'}, {role: 'readWriteAnyDatabase', db: 'admin'}]});"
     
@@ -521,11 +529,9 @@ adjust_firewall_settings() {
 
     # Check if UFW is installed
     if command -v ufw >/dev/null 2>&1; then
-        # Allow port 27017
         ufw allow 27017/tcp
         log "Allowed port 27017/tcp through UFW."
     else
-        # Use iptables
         iptables -A INPUT -p tcp --dport 27017 -j ACCEPT
         log "Allowed port 27017/tcp through iptables."
     fi
@@ -625,7 +631,6 @@ download_agent() {
     if [ -d "$BASE_DIR" ]; then
         rm -rf "$BASE_DIR"
     fi
-    # Recreate the base directory and set ownership
     mkdir -p "$BASE_DIR"
     chown -R "$USERNAME":"$USERNAME" "$BASE_DIR"
 
@@ -639,15 +644,12 @@ install_agent_dependencies() {
     log "Installing agent dependencies..."
     cd "$BASE_DIR"
 
-    # Remove existing node_modules and package-lock.json
     rm -rf node_modules package-lock.json
 
-    # Set NPM cache directory within base directory
     NPM_CACHE_DIR="$BASE_DIR/.npm-cache"
     mkdir -p "$NPM_CACHE_DIR"
     chown -R "$USERNAME":"$USERNAME" "$NPM_CACHE_DIR"
 
-    # Run npm install as the cloudlunacy user
     if [ -f "package.json" ]; then
         sudo -u "$USERNAME" HOME="$BASE_DIR" npm install --cache "$NPM_CACHE_DIR" --no-fund --no-audit
     else
@@ -662,10 +664,7 @@ install_agent_dependencies() {
 setup_docker_permissions() {
     log "Setting up Docker permissions..."
 
-    # Add cloudlunacy user to docker group
     usermod -aG docker "$USERNAME"
-
-    # Set permissions
     chown -R "$USERNAME":docker "$BASE_DIR"
     chmod -R 775 "$BASE_DIR/deployments"
     chmod 666 /var/run/docker.sock
@@ -681,7 +680,6 @@ setup_traefik() {
     mkdir -p "$TRAEFIK_DIR"
     chown "$USERNAME":"$USERNAME" "$TRAEFIK_DIR"
 
-# Create Traefik Docker Compose file
 cat <<EOF > "$TRAEFIK_DIR/docker-compose.traefik.yml"
 version: '3.8'
 
@@ -690,15 +688,13 @@ services:
     image: traefik:v2.9
     container_name: traefik
     command:
-      - "--api.insecure=true" # Enable Traefik dashboard (insecure access)
+      - "--api.insecure=true"
       - "--providers.docker=true"
       - "--providers.docker.exposedbydefault=false"
       - "--entrypoints.web.address=:80"
     ports:
-      - "80:80"      # HTTP
-      # Remove port 443 mapping
-      # - "443:443"    # HTTPS
-      - "8080:8080"  # Traefik Dashboard (if needed)
+      - "80:80"
+      - "8080:8080"
     volumes:
       - "/var/run/docker.sock:/var/run/docker.sock:ro"
     networks:
@@ -711,7 +707,6 @@ EOF
 
     chown "$USERNAME":"$USERNAME" "$TRAEFIK_DIR/docker-compose.traefik.yml"
 
-    # Create the Docker network if it doesn't exist
     if ! docker network ls | grep -q "traefik-network"; then
         docker network create traefik-network
         log "Created traefik-network."
@@ -719,7 +714,6 @@ EOF
         log "traefik-network already exists."
     fi
 
-    # Start Traefik using Docker Compose
     cd "$TRAEFIK_DIR"
     sudo -u "$USERNAME" docker-compose -f docker-compose.traefik.yml up -d
 
@@ -809,27 +803,6 @@ cleanup_on_error() {
     exit 1
 }
 
-# Function to display SSH key instructions
-display_ssh_instructions() {
-    SSH_DIR="$BASE_DIR/.ssh"
-    PUBLIC_KEY_FILE="$SSH_DIR/id_ed25519.pub"
-    log "SSH Key Setup Instructions:"
-    log "----------------------------------------"
-    log "1. Add the following SSH public key to your Git repository's deploy keys:"
-    echo "----------------------------------------"
-    if [ -f "$PUBLIC_KEY_FILE" ]; then
-        cat "$PUBLIC_KEY_FILE"
-    else
-        log_error "Public SSH key not found at $PUBLIC_KEY_FILE."
-    fi
-    echo "----------------------------------------"
-    log "2. Ensure that the deploy key has read access to the repository."
-}
-
-# ----------------------------
-# Main Execution Flow
-# ----------------------------
-
 # Trap errors and perform cleanup
 trap cleanup_on_error ERR
 
@@ -864,12 +837,12 @@ main() {
     setup_mongodb               # Set up MongoDB with TLS
     adjust_firewall_settings    # Adjust firewall settings
     configure_env               # Configure environment variables
-    setup_traefik               # Set up Traefik (if needed)
+    setup_traefik               # Set up Traefik
     setup_service
     setup_certificate_renewal   # Automate SSL certificate renewal
     verify_installation
     completion_message
-    display_mongodb_credentials   # Display MongoDB management user credentials after installation
+    display_mongodb_credentials # Display MongoDB management user credentials
 }
 
 main "$@"
