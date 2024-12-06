@@ -337,7 +337,7 @@ EOF
 
     source "$MONGO_ENV_FILE"
 
-    # Docker Compose file for MongoDB
+    # Write docker-compose.yml
     cat <<EOF > "$MONGODB_DIR/docker-compose.mongodb.yml"
 version: '3.8'
 
@@ -350,8 +350,8 @@ services:
       - mongo_data:/data/db
       - /etc/ssl/mongo:/etc/ssl/mongo:ro
     environment:
-      - MONGO_INITDB_ROOT_USERNAME=${MONGO_INITDB_ROOT_USERNAME}
-      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_INITDB_ROOT_PASSWORD}
+      - MONGO_INITDB_ROOT_USERNAME=\${MONGO_INITDB_ROOT_USERNAME}
+      - MONGO_INITDB_ROOT_PASSWORD=\${MONGO_INITDB_ROOT_PASSWORD}
     command:
       - "--auth"
       - "--tlsMode=requireTLS"
@@ -380,9 +380,9 @@ services:
           "--tlsCAFile=/etc/ssl/mongo/chain.pem",
           "--tlsAllowInvalidHostnames",
           "-u",
-          "${MONGO_INITDB_ROOT_USERNAME}",
+          "\${MONGO_INITDB_ROOT_USERNAME}",
           "-p",
-          "${MONGO_INITDB_ROOT_PASSWORD}",
+          "\${MONGO_INITDB_ROOT_PASSWORD}",
           "--authenticationDatabase=admin",
           "--eval",
           "db.adminCommand('ping')"
@@ -402,7 +402,15 @@ EOF
 
     chown "$USERNAME":"$USERNAME" "$MONGODB_DIR/docker-compose.mongodb.yml"
 
-    # Remove if exists and create fresh internal network
+    # Before removing/recreating the network, ensure no containers are using it.
+    # If a previous run left containers running, we should stop them first.
+    if [ -f "$MONGODB_DIR/docker-compose.mongodb.yml" ]; then
+        cd "$MONGODB_DIR"
+        # Stop and remove containers from previous runs
+        sudo -u "$USERNAME" docker-compose -f docker-compose.mongodb.yml down || true
+    fi
+
+    # Now safe to remove and recreate the network
     if docker network ls | grep -q "internal"; then
         log "Removing existing 'internal' network to avoid conflicts..."
         docker network rm internal || true
@@ -412,6 +420,7 @@ EOF
     docker network create internal
     log "Created internal Docker network."
 
+    # Now start up the containers fresh
     cd "$MONGODB_DIR"
     sudo -u "$USERNAME" docker-compose --env-file "$MONGO_ENV_FILE" -f docker-compose.mongodb.yml up -d
 
