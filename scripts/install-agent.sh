@@ -1,7 +1,7 @@
 #!/bin/bash
 # ------------------------------------------------------------------------------
 # Installation Script for CloudLunacy Deployment Agent with Traefik and MongoDB
-# Version: 2.5.1
+# Version: 2.5.2
 # Author: Mahamadou Taibou
 # Date: 2024-11-24
 #
@@ -51,7 +51,7 @@ DOMAIN="mongodb.cloudlunacy.uk"
 display_info() {
     echo "-------------------------------------------------"
     echo "CloudLunacy Deployment Agent Installation Script"
-    echo "Version: 2.5.1"
+    echo "Version: 2.5.2"
     echo "Author: Mahamadou Taibou"
     echo "Date: 2024-11-24"
     echo "-------------------------------------------------"
@@ -199,15 +199,12 @@ install_docker() {
         log "Docker Compose is already installed."
     else
         log "Installing Docker Compose..."
-        DOCKER_COMPOSE_VERSION="2.24.1"  # Update this version as needed
+        DOCKER_COMPOSE_VERSION="2.24.1"
 
-        # Download and install docker-compose binary
-        curl -L "https://github.com/docker/compose/releases/download/v${DOCKER_COMPOSE_VERSION}/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+        curl -L "https://github.com/docker/compose/releases/download/v${DOCKER_COMPOSE_VERSION}/docker-compose-$(uname -s)-$(uname -m)" \
+        -o /usr/local/bin/docker-compose
         chmod +x /usr/local/bin/docker-compose
-
-        # Create symlink
         ln -sf /usr/local/bin/docker-compose /usr/bin/docker-compose
-
         log "Docker Compose installed successfully."
     fi
 }
@@ -221,9 +218,7 @@ install_node() {
     fi
 
     log "Node.js not found. Installing Node.js..."
-
     NODE_VERSION="18.x"
-
     case "$OS_TYPE" in
         ubuntu | debian | raspbian)
             curl -fsSL https://deb.nodesource.com/setup_$NODE_VERSION | bash -
@@ -272,27 +267,21 @@ install_mongosh() {
 obtain_ssl_certificate() {
     log "Obtaining SSL/TLS certificate for domain $DOMAIN..."
     
-    # Ensure port 80 is available
+    # Ensure port 80 is free
     if lsof -i :80 | grep LISTEN; then
         log "Port 80 is currently in use. Attempting to stop services using port 80..."
-        # Try to stop common services that might be using port 80
         systemctl stop nginx || true
         systemctl stop apache2 || true
         systemctl stop httpd || true
         systemctl stop traefik || true
-        # Check again if port 80 is free
         if lsof -i :80 | grep LISTEN; then
-            log_error "Port 80 is still in use. Cannot proceed with certificate issuance."
+            log_error "Port 80 is still in use. Cannot proceed."
             exit 1
         fi
     fi
 
-    # Obtain the certificate using standalone mode
     certbot certonly --standalone --non-interactive --agree-tos --email "$EMAIL" -d "$DOMAIN" || true
-
-    # Check if the certificate was successfully obtained or already exists
     if [ ! -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]; then
-        # If not obtained, try renew (in case it's already installed)
         certbot renew --dry-run || true
         if [ ! -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]; then
             log_error "Failed to obtain SSL/TLS certificate for $DOMAIN."
@@ -307,27 +296,20 @@ obtain_ssl_certificate() {
 create_combined_certificate() {
     log "Creating combined certificate file for MongoDB..."
 
-    # Create MongoDB SSL directory
     SSL_DIR="/etc/ssl/mongo"
     mkdir -p "$SSL_DIR"
-
-    # Source certificate directory
     CERT_DIR="/etc/letsencrypt/live/$DOMAIN"
     
-    # Create combined certificate (private key + fullchain)
     cat "$CERT_DIR/privkey.pem" "$CERT_DIR/fullchain.pem" > "$SSL_DIR/combined.pem"
-    
-    # Copy chain certificate
     cp "$CERT_DIR/chain.pem" "$SSL_DIR/chain.pem"
 
-    # Set proper permissions
     chown -R 999:999 "$SSL_DIR"
     chmod 600 "$SSL_DIR"/*.pem
 
     log "Certificate files created in $SSL_DIR"
 }
 
-# Updated function to set up MongoDB with TLS using the obtained certificate
+# Function to set up MongoDB with TLS using the obtained certificate
 setup_mongodb() {
     log "Setting up MongoDB as a Docker container with TLS..."
 
@@ -335,14 +317,13 @@ setup_mongodb() {
     mkdir -p "$MONGODB_DIR"
     chown "$USERNAME":"$USERNAME" "$MONGODB_DIR"
 
-    # Generate MongoDB credentials first
+    # Generate MongoDB credentials
     log "Generating MongoDB credentials..."
     MONGO_INITDB_ROOT_USERNAME=$(openssl rand -hex 12)
     MONGO_INITDB_ROOT_PASSWORD=$(openssl rand -hex 24)
     MONGO_MANAGER_USERNAME="manager"
     MONGO_MANAGER_PASSWORD=$(openssl rand -hex 24)
 
-    # Create and save environment file first
     MONGO_ENV_FILE="$MONGODB_DIR/.env"
     cat <<EOF > "$MONGO_ENV_FILE"
 MONGO_INITDB_ROOT_USERNAME=$MONGO_INITDB_ROOT_USERNAME
@@ -351,16 +332,12 @@ MONGO_MANAGER_USERNAME=$MONGO_MANAGER_USERNAME
 MONGO_MANAGER_PASSWORD=$MONGO_MANAGER_PASSWORD
 EOF
 
-    # Set proper permissions
     chown "$USERNAME":"$USERNAME" "$MONGO_ENV_FILE"
     chmod 600 "$MONGO_ENV_FILE"
 
-    log "Created MongoDB environment file at $MONGO_ENV_FILE"
-
-    # Source the environment file
     source "$MONGO_ENV_FILE"
 
-    # Create MongoDB Docker Compose file with updated networking configuration
+    # Docker Compose file for MongoDB
     cat <<EOF > "$MONGODB_DIR/docker-compose.mongodb.yml"
 version: '3.8'
 
@@ -410,31 +387,23 @@ EOF
 
     chown "$USERNAME":"$USERNAME" "$MONGODB_DIR/docker-compose.mongodb.yml"
 
-    # Remove any existing internal network to avoid conflicts
+    # Remove if exists and create fresh internal network
     if docker network ls | grep -q "internal"; then
         log "Removing existing 'internal' network to avoid conflicts..."
         docker network rm internal || true
     fi
 
-    # Create the internal Docker network
-    if ! docker network ls | grep -q "internal"; then
-        docker network create internal
-        log "Created internal Docker network."
-    else
-        log "Internal Docker network already exists."
-    fi
+    log "Creating a fresh 'internal' Docker network..."
+    docker network create internal
+    log "Created internal Docker network."
 
-    # Start MongoDB using Docker Compose with explicit environment file
     cd "$MONGODB_DIR"
     sudo -u "$USERNAME" docker-compose --env-file "$MONGO_ENV_FILE" -f docker-compose.mongodb.yml up -d
 
     log "MongoDB set up and running."
-
-    # Wait for MongoDB to be healthy
     wait_for_mongodb_health
 }
 
-# Function to wait for MongoDB health
 wait_for_mongodb_health() {
     log "Waiting for MongoDB container to be healthy..."
     local max_attempts=30
@@ -457,30 +426,26 @@ wait_for_mongodb_health() {
 
 create_mongo_management_user() {
     log "Creating MongoDB management user..."
-    
     if [ ! -f "$MONGO_ENV_FILE" ]; then
         log_error "MongoDB environment file not found at $MONGO_ENV_FILE"
         exit 1
     fi
 
     source "$MONGO_ENV_FILE"
-    
     if [ -z "$MONGO_INITDB_ROOT_USERNAME" ] || [ -z "$MONGO_INITDB_ROOT_PASSWORD" ]; then
         log_error "MongoDB root credentials not found in environment file"
         exit 1
     fi
 
-    # Wait for MongoDB to be healthy first
     wait_for_mongodb_health
 
-    # Create temporary directory for certificates
     TEMP_CERT_DIR="/tmp/mongo-certs"
     mkdir -p "$TEMP_CERT_DIR"
     cp "/etc/ssl/mongo/combined.pem" "$TEMP_CERT_DIR/combined.pem"
     cp "/etc/ssl/mongo/chain.pem" "$TEMP_CERT_DIR/chain.pem"
     chmod 644 "$TEMP_CERT_DIR"/*
-    
-    # Test connectivity to MongoDB
+
+    # Test connectivity
     log "Testing connectivity to MongoDB..."
     docker run --rm --network=internal \
         -v "$TEMP_CERT_DIR:/certs:ro" \
@@ -495,13 +460,13 @@ create_mongo_management_user() {
         -p "$MONGO_INITDB_ROOT_PASSWORD" \
         --authenticationDatabase admin \
         --eval "db.runCommand({ ping: 1 })"
-    
+
     if [ $? -ne 0 ]; then
         log_error "Cannot connect to MongoDB server. Showing logs:"
         docker logs mongodb
         exit 1
     fi
-    
+
     # Create management user
     log "Creating management user..."
     MONGO_COMMAND="db.getSiblingDB('admin').createUser({user: '$MONGO_MANAGER_USERNAME', pwd: '$MONGO_MANAGER_PASSWORD', roles: [{role: 'userAdminAnyDatabase', db: 'admin'}, {role: 'readWriteAnyDatabase', db: 'admin'}]});"
@@ -523,11 +488,8 @@ create_mongo_management_user() {
     rm -rf "$TEMP_CERT_DIR"
 }
 
-# Function to adjust firewall settings
 adjust_firewall_settings() {
     log "Adjusting firewall settings to allow external MongoDB connections..."
-
-    # Check if UFW is installed
     if command -v ufw >/dev/null 2>&1; then
         ufw allow 27017/tcp
         log "Allowed port 27017/tcp through UFW."
@@ -535,16 +497,13 @@ adjust_firewall_settings() {
         iptables -A INPUT -p tcp --dport 27017 -j ACCEPT
         log "Allowed port 27017/tcp through iptables."
     fi
-
     log "Firewall settings adjusted."
 }
 
-# Function to configure environment variables
 configure_env() {
     log "Configuring environment variables..."
     ENV_FILE="$BASE_DIR/.env"
 
-    # Read MongoDB credentials from MongoDB env file
     MONGO_ENV_FILE="$BASE_DIR/mongodb/.env"
     if [ -f "$MONGO_ENV_FILE" ]; then
         source "$MONGO_ENV_FILE"
@@ -568,7 +527,6 @@ EOF
     log "Environment variables configured."
 }
 
-# Function to display MongoDB credentials
 display_mongodb_credentials() {
     log "MongoDB Management User Credentials:"
     log "----------------------------------------"
@@ -581,25 +539,18 @@ display_mongodb_credentials() {
     log "Do not share them publicly."
 }
 
-# Function to automate SSL certificate renewal
 setup_certificate_renewal() {
     log "Setting up SSL certificate renewal with Certbot..."
-
-    # Create renewal script
     RENEWAL_SCRIPT="/usr/local/bin/renew_certificates.sh"
     cat <<EOF > "$RENEWAL_SCRIPT"
 #!/bin/bash
 certbot renew --deploy-hook "docker-compose -f $BASE_DIR/mongodb/docker-compose.mongodb.yml restart mongodb"
 EOF
     chmod +x "$RENEWAL_SCRIPT"
-
-    # Add cron job
     (crontab -l 2>/dev/null; echo "0 2 * * * $RENEWAL_SCRIPT >> /var/log/letsencrypt/renewal.log 2>&1") | crontab -
-
     log "SSL certificate renewal setup complete."
 }
 
-# Function to create dedicated user and directories
 setup_user_directories() {
     log "Creating dedicated user and directories..."
     USERNAME="cloudlunacy"
@@ -613,19 +564,16 @@ setup_user_directories() {
         log "User '$USERNAME' created."
     fi
 
-    # Ensure base directory exists and has correct permissions
     mkdir -p "$BASE_DIR"
     chown -R "$USERNAME":"$USERNAME" "$BASE_DIR"
     chmod -R 750 "$BASE_DIR"
 
-    # Create subdirectories
     mkdir -p "$BASE_DIR"/{logs,ssh,config,bin,deployments,traefik}
     chown -R "$USERNAME":"$USERNAME" "$BASE_DIR"/{logs,ssh,config,bin,deployments,traefik}
 
     log "Directories created at $BASE_DIR."
 }
 
-# Function to download and verify the latest agent
 download_agent() {
     log "Cloning the CloudLunacy Deployment Agent repository..."
     if [ -d "$BASE_DIR" ]; then
@@ -639,43 +587,33 @@ download_agent() {
     log "Agent cloned to $BASE_DIR."
 }
 
-# Function to install agent dependencies
 install_agent_dependencies() {
     log "Installing agent dependencies..."
     cd "$BASE_DIR"
-
     rm -rf node_modules package-lock.json
-
     NPM_CACHE_DIR="$BASE_DIR/.npm-cache"
     mkdir -p "$NPM_CACHE_DIR"
     chown -R "$USERNAME":"$USERNAME" "$NPM_CACHE_DIR"
-
     if [ -f "package.json" ]; then
         sudo -u "$USERNAME" HOME="$BASE_DIR" npm install --cache "$NPM_CACHE_DIR" --no-fund --no-audit
     else
         sudo -u "$USERNAME" HOME="$BASE_DIR" npm init -y
         sudo -u "$USERNAME" HOME="$BASE_DIR" npm install axios dotenv winston mongodb joi shelljs ws handlebars js-yaml --cache "$NPM_CACHE_DIR" --no-fund --no-audit
     fi
-
     log "Agent dependencies installed."
 }
 
-# Function to set up Docker permissions
 setup_docker_permissions() {
     log "Setting up Docker permissions..."
-
     usermod -aG docker "$USERNAME"
     chown -R "$USERNAME":docker "$BASE_DIR"
     chmod -R 775 "$BASE_DIR/deployments"
     chmod 666 /var/run/docker.sock
-
     log "Docker permissions configured successfully."
 }
 
-# Function to set up Traefik
 setup_traefik() {
     log "Setting up Traefik as a reverse proxy..."
-
     TRAEFIK_DIR="$BASE_DIR/traefik"
     mkdir -p "$TRAEFIK_DIR"
     chown "$USERNAME":"$USERNAME" "$TRAEFIK_DIR"
@@ -716,15 +654,12 @@ EOF
 
     cd "$TRAEFIK_DIR"
     sudo -u "$USERNAME" docker-compose -f docker-compose.traefik.yml up -d
-
     log "Traefik set up and running."
 }
 
-# Function to set up systemd service
 setup_service() {
     log "Setting up CloudLunacy Deployment Agent as a systemd service..."
     SERVICE_FILE="/etc/systemd/system/cloudlunacy.service"
-
     cat <<EOF > "$SERVICE_FILE"
 [Unit]
 Description=CloudLunacy Deployment Agent
@@ -753,7 +688,6 @@ EOF
     log "CloudLunacy service set up and started."
 }
 
-# Function to verify installation
 verify_installation() {
     log "Verifying CloudLunacy Deployment Agent installation..."
     if systemctl is-active --quiet cloudlunacy; then
@@ -767,12 +701,11 @@ verify_installation() {
     if docker ps | grep -q "traefik"; then
         log "Traefik is running successfully."
     else
-        log_error "Traefik failed to start. Check the Docker logs for details."
+        log_error "Traefik failed to start. Check Docker logs for details."
         exit 1
     fi
 }
 
-# Function to display completion message
 completion_message() {
     echo -e "\033[0;35m
    ____                            _         _       _   _                 _
@@ -784,7 +717,7 @@ completion_message() {
 \033[0m"
     echo -e "\nYour CloudLunacy Deployment Agent is ready to use."
 
-    PUBLIC_IP=$(curl -s https://api.ipify.org)
+    PUBLIC_IP=$(curl -s https://api.ipify.org || true)
     if [ -z "$PUBLIC_IP" ]; then
         PUBLIC_IP="your_server_ip"
         echo -e "Could not retrieve public IP address. Please replace 'your_server_ip' with your actual IP."
@@ -796,14 +729,12 @@ completion_message() {
     echo -e "cp $BASE_DIR/.env $BASE_DIR/.env.backup"
 }
 
-# Function to handle cleanup on error
 cleanup_on_error() {
     log_error "Installation encountered an error. Cleaning up..."
     rm -rf "$BASE_DIR"
     exit 1
 }
 
-# Trap errors and perform cleanup
 trap cleanup_on_error ERR
 
 main() {
@@ -815,7 +746,6 @@ main() {
     SERVER_ID="$2"
     EMAIL="$3"
     BACKEND_BASE_URL="${4:-https://your-default-backend-url}"
-
     BACKEND_URL="${BACKEND_BASE_URL}"
 
     detect_os
@@ -823,26 +753,26 @@ main() {
 
     update_system
     install_dependencies
-    install_certbot             # Install Certbot
-    install_mongosh             # Pull MongoDB Shell Docker image
+    install_certbot
+    install_mongosh
     install_docker
     install_node
     setup_user_directories
     setup_docker_permissions
     download_agent
     install_agent_dependencies
-    stop_conflicting_containers # Stop services on port 80 if necessary
-    obtain_ssl_certificate      # Obtain SSL/TLS certificate
-    create_combined_certificate # Create combined certificate for MongoDB
-    setup_mongodb               # Set up MongoDB with TLS
-    adjust_firewall_settings    # Adjust firewall settings
-    configure_env               # Configure environment variables
-    setup_traefik               # Set up Traefik
+    stop_conflicting_containers
+    obtain_ssl_certificate
+    create_combined_certificate
+    setup_mongodb
+    adjust_firewall_settings
+    configure_env
+    setup_traefik
     setup_service
-    setup_certificate_renewal   # Automate SSL certificate renewal
+    setup_certificate_renewal
     verify_installation
     completion_message
-    display_mongodb_credentials # Display MongoDB management user credentials
+    display_mongodb_credentials
 }
 
 main "$@"
