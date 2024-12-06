@@ -371,23 +371,23 @@ services:
       - 8.8.8.8
       - 8.8.4.4
     healthcheck:
-      test: [
+    test: [
         "CMD",
-        "mongosh",
+        "mongo",
         "--host", "localhost",
         "--tls",
-        "--tlsCertificateKeyFile=/etc/ssl/mongo/combined.pem",
-        "--tlsCAFile=/etc/ssl/mongo/chain.pem",
+        "--sslCAFile=/etc/ssl/mongo/chain.pem",
+        "--sslPEMKeyFile=/etc/ssl/mongo/combined.pem",
         "-u", "${MONGO_INITDB_ROOT_USERNAME}",
         "-p", "${MONGO_INITDB_ROOT_PASSWORD}",
         "--authenticationDatabase=admin",
         "--eval",
         "db.adminCommand('ping')"
-      ]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 60s
+    ]
+    interval: 10s
+    timeout: 5s
+    retries: 5
+    start_period: 120s
 
 volumes:
   mongo_data:
