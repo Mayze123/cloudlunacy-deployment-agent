@@ -350,8 +350,8 @@ services:
       - mongo_data:/data/db
       - /etc/ssl/mongo:/etc/ssl/mongo:ro
     environment:
-      - MONGO_INITDB_ROOT_USERNAME=\${MONGO_INITDB_ROOT_USERNAME}
-      - MONGO_INITDB_ROOT_PASSWORD=\${MONGO_INITDB_ROOT_PASSWORD}
+      - MONGO_INITDB_ROOT_USERNAME=${MONGO_INITDB_ROOT_USERNAME}
+      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_INITDB_ROOT_PASSWORD}
     command:
       - "--auth"
       - "--tlsMode=requireTLS"
@@ -371,26 +371,23 @@ services:
       - 8.8.8.8
       - 8.8.4.4
     healthcheck:
-      test:
-        [
-          "CMD",
-          "mongosh",
-          "--tls",
-          "--tlsCertificateKeyFile=/etc/ssl/mongo/combined.pem",
-          "--tlsCAFile=/etc/ssl/mongo/chain.pem",
-          "--tlsAllowInvalidHostnames",
-          "-u",
-          "\${MONGO_INITDB_ROOT_USERNAME}",
-          "-p",
-          "\${MONGO_INITDB_ROOT_PASSWORD}",
-          "--authenticationDatabase=admin",
-          "--eval",
-          "db.adminCommand('ping')"
-        ]
+      test: [
+        "CMD",
+        "mongosh",
+        "--host", "localhost",
+        "--tls",
+        "--tlsCertificateKeyFile=/etc/ssl/mongo/combined.pem",
+        "--tlsCAFile=/etc/ssl/mongo/chain.pem",
+        "-u", "${MONGO_INITDB_ROOT_USERNAME}",
+        "-p", "${MONGO_INITDB_ROOT_PASSWORD}",
+        "--authenticationDatabase=admin",
+        "--eval",
+        "db.adminCommand('ping')"
+      ]
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 40s
+      start_period: 60s
 
 volumes:
   mongo_data:
