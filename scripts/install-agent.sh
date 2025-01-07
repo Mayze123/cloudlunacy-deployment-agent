@@ -349,19 +349,62 @@ services:
     image: mongo:6.0
     container_name: mongodb
     restart: unless-stopped
+
+    # Root credentials again
     environment:
-      - MONGO_INITDB_ROOT_USERNAME=$MONGO_INITDB_ROOT_USERNAME
-      - MONGO_INITDB_ROOT_PASSWORD=$MONGO_INITDB_ROOT_PASSWORD
+      - MONGO_INITDB_ROOT_USERNAME=${MONGO_INITDB_ROOT_USERNAME}
+      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_INITDB_ROOT_PASSWORD}
+
     volumes:
       - mongo_data:/data/db
+      - /etc/ssl/mongo:/etc/ssl/mongo:ro
+
+    # Now we enable Auth + TLS
+    command:
+      - "--auth"
+      - "--tlsMode=requireTLS"
+      - "--tlsCertificateKeyFile=/etc/ssl/mongo/combined.pem"
+      - "--tlsCAFile=/etc/ssl/mongo/chain.pem"
+      - "--bind_ip_all"
+      - "--logpath=/dev/stdout"
+      - "--logappend"
+
+    ports:
+      - "27017:27017"
+
     networks:
       - internal
+    extra_hosts:
+      - "mongodb.cloudlunacy.uk:127.0.0.1"
+      - "mongodb:127.0.0.1"
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+
+    # ─────────────────────────────
+    # Health check reintroduced,
+    # with a larger start_period
+    # ─────────────────────────────
     healthcheck:
-      test: ["CMD", "mongo", "--eval", "db.adminCommand('ping')"]
+      test:
+        - "CMD"
+        - "mongo"
+        - "--host"
+        - "localhost"
+        - "--tls"
+        - "--sslCAFile=/etc/ssl/mongo/chain.pem"
+        - "--sslPEMKeyFile=/etc/ssl/mongo/combined.pem"
+        - "-u"
+        - "${MONGO_INITDB_ROOT_USERNAME}"
+        - "-p"
+        - "${MONGO_INITDB_ROOT_PASSWORD}"
+        - "--authenticationDatabase=admin"
+        - "--eval"
+        - "db.adminCommand('ping')"
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 30s
+      start_period: 120s
 
 volumes:
   mongo_data:
