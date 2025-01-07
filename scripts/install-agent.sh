@@ -318,73 +318,86 @@ wait_for_mongodb_health() {
 }
 
 setup_mongodb() {
-    log "Setting up MongoDB as a Docker container with TLS (two-phase)..."
+  log "Setting up MongoDB (two-phase)..."
+  
+  mkdir -p "$MONGODB_DIR"
+  chown "$USERNAME":"$USERNAME" "$MONGODB_DIR"
 
-    mkdir -p "$MONGODB_DIR"
-    chown "$USERNAME":"$USERNAME" "$MONGODB_DIR"
+  # 1) Generate random credentials and store them
+  export MONGO_INITDB_ROOT_USERNAME=$(openssl rand -hex 12)
+  export MONGO_INITDB_ROOT_PASSWORD=$(openssl rand -hex 24)
+  export MONGO_MANAGER_USERNAME="manager"
+  export MONGO_MANAGER_PASSWORD=$(openssl rand -hex 24)
 
-    # Generate MongoDB credentials
-    log "Generating MongoDB credentials..."
-    MONGO_INITDB_ROOT_USERNAME=$(openssl rand -hex 12)
-    MONGO_INITDB_ROOT_PASSWORD=$(openssl rand -hex 24)
-    MONGO_MANAGER_USERNAME="manager"
-    MONGO_MANAGER_PASSWORD=$(openssl rand -hex 24)
-
-    cat <<EOF > "$MONGO_ENV_FILE"
+  cat <<EOF > "$MONGO_ENV_FILE"
 MONGO_INITDB_ROOT_USERNAME=$MONGO_INITDB_ROOT_USERNAME
 MONGO_INITDB_ROOT_PASSWORD=$MONGO_INITDB_ROOT_PASSWORD
 MONGO_MANAGER_USERNAME=$MONGO_MANAGER_USERNAME
 MONGO_MANAGER_PASSWORD=$MONGO_MANAGER_PASSWORD
 EOF
-    chown "$USERNAME":"$USERNAME" "$MONGO_ENV_FILE"
-    chmod 600 "$MONGO_ENV_FILE"
-    source "$MONGO_ENV_FILE"
+  chown "$USERNAME":"$USERNAME" "$MONGO_ENV_FILE"
+  chmod 600 "$MONGO_ENV_FILE"
 
-    # Phase 1: No Auth/No TLS to allow root user creation
-    cat <<EOF > "$MONGODB_DIR/docker-compose.mongodb.yml"
+  # 2) Phase 1 Compose
+  cat <<EOF > "$MONGODB_DIR/docker-compose.mongodb.phase1.yml"
 version: '3.8'
-
 services:
   mongodb:
     image: mongo:6.0
     container_name: mongodb
     restart: unless-stopped
-
-    # Root credentials again
     environment:
       - MONGO_INITDB_ROOT_USERNAME=${MONGO_INITDB_ROOT_USERNAME}
       - MONGO_INITDB_ROOT_PASSWORD=${MONGO_INITDB_ROOT_PASSWORD}
+    volumes:
+      - mongo_data:/data/db
+    networks:
+      - internal
+volumes:
+  mongo_data:
+networks:
+  internal:
+    external: true
+EOF
 
+  # Phase 1 start
+  cd "$MONGODB_DIR"
+  sudo -u "$USERNAME" docker-compose -f docker-compose.mongodb.phase1.yml down || true
+  docker network rm internal || true
+  docker network create internal
+
+  sudo -u "$USERNAME" docker-compose -f docker-compose.mongodb.phase1.yml up -d
+
+  log "Waiting 30 seconds for Phase 1 to initialize root user..."
+  sleep 30
+
+  # Teardown Phase 1
+  sudo -u "$USERNAME" docker-compose -f docker-compose.mongodb.phase1.yml down
+
+  # 3) Phase 2 Compose
+  cat <<EOF > "$MONGODB_DIR/docker-compose.mongodb.phase2.yml"
+version: '3.8'
+services:
+  mongodb:
+    image: mongo:6.0
+    container_name: mongodb
+    restart: unless-stopped
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=${MONGO_INITDB_ROOT_USERNAME}
+      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_INITDB_ROOT_PASSWORD}
     volumes:
       - mongo_data:/data/db
       - /etc/ssl/mongo:/etc/ssl/mongo:ro
-
-    # Now we enable Auth + TLS
     command:
       - "--auth"
       - "--tlsMode=requireTLS"
       - "--tlsCertificateKeyFile=/etc/ssl/mongo/combined.pem"
       - "--tlsCAFile=/etc/ssl/mongo/chain.pem"
       - "--bind_ip_all"
-      - "--logpath=/dev/stdout"
-      - "--logappend"
-
     ports:
       - "27017:27017"
-
     networks:
       - internal
-    extra_hosts:
-      - "mongodb.cloudlunacy.uk:127.0.0.1"
-      - "mongodb:127.0.0.1"
-    dns:
-      - 8.8.8.8
-      - 8.8.4.4
-
-    # ─────────────────────────────
-    # Health check reintroduced,
-    # with a larger start_period
-    # ─────────────────────────────
     healthcheck:
       test:
         - "CMD"
@@ -405,102 +418,20 @@ services:
       timeout: 5s
       retries: 5
       start_period: 120s
-
 volumes:
   mongo_data:
-
 networks:
   internal:
     external: true
 EOF
 
-    chown "$USERNAME":"$USERNAME" "$MONGODB_DIR/docker-compose.mongodb.yml"
+  # Phase 2 start
+  sudo -u "$USERNAME" docker-compose -f docker-compose.mongodb.phase2.yml up -d
 
-    # Ensure we have a clean 'internal' network
-    cd "$MONGODB_DIR"
-    sudo -u "$USERNAME" docker-compose -f docker-compose.mongodb.yml down || true
-    if docker network ls | grep -q "internal"; then
-        docker network rm internal || true
-    fi
-    docker network create internal
+  # Wait for healthy
+  wait_for_mongodb_health
 
-    # Start without auth and TLS
-    sudo -u "$USERNAME" docker-compose --env-file "$MONGO_ENV_FILE" -f docker-compose.mongodb.yml up -d
-    # Wait for container to be healthy (root user created by official entrypoint)
-    wait_for_mongodb_health
-
-    # Stop the container
-    sudo -u "$USERNAME" docker-compose -f docker-compose.mongodb.yml down
-
-    # Phase 2: Enable Auth & TLS
-    cat <<EOF > "$MONGODB_DIR/docker-compose.mongodb.yml"
-version: '3.8'
-
-services:
-  mongodb:
-    image: mongo:6.0
-    container_name: mongodb
-    restart: unless-stopped
-    volumes:
-      - mongo_data:/data/db
-      - /etc/ssl/mongo:/etc/ssl/mongo:ro
-    environment:
-      - MONGO_INITDB_ROOT_USERNAME=$MONGO_INITDB_ROOT_USERNAME
-      - MONGO_INITDB_ROOT_PASSWORD=$MONGO_INITDB_ROOT_PASSWORD
-    command:
-      - "--auth"
-      - "--tlsMode=requireTLS"
-      - "--tlsCertificateKeyFile=/etc/ssl/mongo/combined.pem"
-      - "--tlsCAFile=/etc/ssl/mongo/chain.pem"
-      - "--bind_ip_all"
-      - "--logpath=/dev/stdout"
-      - "--logappend"
-    ports:
-      - "27017:27017"
-    networks:
-      - internal
-    extra_hosts:
-      - "mongodb.cloudlunacy.uk:127.0.0.1"
-      - "mongodb:127.0.0.1"
-    dns:
-      - 8.8.8.8
-      - 8.8.4.4
-    healthcheck:
-      test:
-        - "CMD"
-        - "mongo"
-        - "--host"
-        - "localhost"
-        - "--tls"
-        - "--sslCAFile=/etc/ssl/mongo/chain.pem"
-        - "--sslPEMKeyFile=/etc/ssl/mongo/combined.pem"
-        - "-u"
-        - "$MONGO_INITDB_ROOT_USERNAME"
-        - "-p"
-        - "$MONGO_INITDB_ROOT_PASSWORD"
-        - "--authenticationDatabase=admin"
-        - "--eval"
-        - "db.adminCommand('ping')"
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 120s
-
-volumes:
-  mongo_data:
-
-networks:
-  internal:
-    external: true
-EOF
-
-    chown "$USERNAME":"$USERNAME" "$MONGODB_DIR/docker-compose.mongodb.yml"
-
-    # Restart with auth and TLS
-    sudo -u "$USERNAME" docker-compose --env-file "$MONGO_ENV_FILE" -f docker-compose.mongodb.yml up -d
-    # Wait for container to be healthy with auth & TLS now
-    wait_for_mongodb_health
-    log "MongoDB set up and running with Auth & TLS."
+  log "MongoDB is now running with auth + TLS."
 }
 
 create_mongo_management_user() {
