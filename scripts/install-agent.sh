@@ -357,16 +357,15 @@ create_healthcheck_script() {
 
 # Function to attempt MongoDB connection
 try_connect() {
+    # Wait for port to be available
+    timeout 5 bash -c 'until echo > /dev/tcp/localhost/27017; do sleep 1; done' 2>/dev/null
+    
     mongosh \
+        "mongodb://\${MONGO_INITDB_ROOT_USERNAME}:\${MONGO_INITDB_ROOT_PASSWORD}@localhost:27017/admin" \
         --tls \
-        --tlsAllowInvalidCertificates \
-        --tlsAllowInvalidHostnames \
-        --host localhost \
-        --port 27017 \
-        --username "\${MONGO_INITDB_ROOT_USERNAME}" \
-        --password "\${MONGO_INITDB_ROOT_PASSWORD}" \
-        --authenticationDatabase admin \
-        --eval 'db.runCommand({ping: 1}).ok || db.runCommand({hello: 1}).ok' \
+        --tlsCAFile=/etc/ssl/mongo/chain.pem \
+        --tlsCertificateKeyFile=/etc/ssl/mongo/combined.pem \
+        --eval 'db.adminCommand({ping:1}).ok' \
         --quiet
 }
 
@@ -380,6 +379,18 @@ for i in {1..3}; do
     sleep \$((i * 2))
 done
 
+# If we got here, health check failed
+if [ -n "\${MONGODB_DEBUG}" ]; then
+    echo "Health check failed. Debug information:"
+    echo "MongoDB processes:"
+    ps aux | grep mongo
+    echo "Port 27017 status:"
+    netstat -an | grep 27017
+    echo "TLS Certificate verification:"
+    openssl verify -CAfile /etc/ssl/mongo/chain.pem /etc/ssl/mongo/combined.pem
+    echo "MongoDB logs:"
+    tail -n 50 /var/log/mongodb/mongod.log
+fi
 exit 1
 
 # Add debugging capabilities if DEBUG environment variable is set
@@ -459,8 +470,16 @@ EOF
     
     sudo -u "$USERNAME" docker-compose -f docker-compose.mongodb.phase1.yml up -d
     
-    log "Waiting 30 seconds for Phase 1 to initialize root user..."
-    sleep 30
+    log "Waiting for Phase 1 initialization..."
+    # Wait up to 60 seconds for initialization
+    for i in {1..12}; do
+        if docker exec mongodb mongosh --quiet --eval "db.adminCommand({ping:1})" &>/dev/null; then
+            log "Phase 1 initialization complete"
+            break
+        fi
+        log "Waiting for MongoDB initialization (attempt $i/12)..."
+        sleep 5
+    done
     
     # Teardown Phase 1
     sudo -u "$USERNAME" docker-compose -f docker-compose.mongodb.phase1.yml down
@@ -490,6 +509,10 @@ services:
       - "ocspEnabled=true"
       - "--setParameter"
       - "tlsOCSPStaplingTimeoutSecs=10"
+      - "--setParameter"
+      - "allowSystemCollectionEncryption=true"
+      - "--setParameter"
+      - "maxTransactionLockRequestTimeoutMillis=5000"
     ports:
       - "27017:27017"
     networks:
