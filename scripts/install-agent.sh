@@ -322,11 +322,28 @@ enhanced_ssl_setup() {
     mkdir -p /etc/ssl/mongo/ocsp
     chmod 700 /etc/ssl/mongo/ocsp
     
-    # Add intermediate certificates to chain
-    curl -sL "https://letsencrypt.org/certs/lets-encrypt-r3.pem" >> /etc/ssl/mongo/chain.pem
+    # Download the complete certificate chain
+    curl -sL "https://letsencrypt.org/certs/isrgrootx1.pem" > /etc/ssl/mongo/root.pem
+    curl -sL "https://letsencrypt.org/certs/lets-encrypt-r3.pem" > /etc/ssl/mongo/intermediate.pem
     
-    # Verify certificate chain
-    openssl verify -CAfile /etc/ssl/mongo/chain.pem /etc/ssl/mongo/combined.pem
+    # Create a complete chain file
+    cat /etc/ssl/mongo/intermediate.pem /etc/ssl/mongo/root.pem > /etc/ssl/mongo/complete-chain.pem
+    
+    # Combine certificates in the correct order
+    cat /etc/letsencrypt/live/$DOMAIN/fullchain.pem /etc/letsencrypt/live/$DOMAIN/privkey.pem > /etc/ssl/mongo/combined.pem
+    cp /etc/ssl/mongo/complete-chain.pem /etc/ssl/mongo/chain.pem
+    
+    # Verify certificate chain with the complete trust chain
+    if ! openssl verify -CAfile /etc/ssl/mongo/complete-chain.pem /etc/ssl/mongo/combined.pem; then
+        log_error "Certificate verification failed. This might affect MongoDB's operation."
+        log_warn "Continuing with setup, but please verify your certificates..."
+    else
+        log "Certificate verification successful."
+    fi
+    
+    # Set proper permissions
+    chmod 600 /etc/ssl/mongo/*.pem
+    chown -R 999:999 /etc/ssl/mongo
     
     log "Enhanced SSL configuration completed."
 }
