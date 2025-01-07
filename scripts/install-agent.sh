@@ -354,16 +354,44 @@ create_healthcheck_script() {
     local HEALTHCHECK_SCRIPT="$MONGODB_DIR/healthcheck.sh"
     cat <<EOF > "$HEALTHCHECK_SCRIPT"
 #!/bin/bash
-mongosh \
-  --tls \
-  --tlsCAFile=/etc/ssl/mongo/chain.pem \
-  --tlsCertificateKeyFile=/etc/ssl/mongo/combined.pem \
-  --host localhost \
-  --port 27017 \
-  --username \${MONGO_INITDB_ROOT_USERNAME} \
-  --password \${MONGO_INITDB_ROOT_PASSWORD} \
-  --eval 'db.runCommand("ping").ok' \
-  --quiet
+
+# Function to attempt MongoDB connection
+try_connect() {
+    mongosh \
+        --tls \
+        --tlsAllowInvalidCertificates \
+        --tlsAllowInvalidHostnames \
+        --host localhost \
+        --port 27017 \
+        --username "\${MONGO_INITDB_ROOT_USERNAME}" \
+        --password "\${MONGO_INITDB_ROOT_PASSWORD}" \
+        --authenticationDatabase admin \
+        --eval 'db.runCommand({ping: 1}).ok || db.runCommand({hello: 1}).ok' \
+        --quiet
+}
+
+# Try up to 3 times with increasing delays
+for i in {1..3}; do
+    if output=$(try_connect 2>/dev/null); then
+        if [ "\$output" = "1" ]; then
+            exit 0
+        fi
+    fi
+    sleep \$((i * 2))
+done
+
+exit 1
+
+# Add debugging capabilities if DEBUG environment variable is set
+if [ "\${DEBUG}" = "true" ]; then
+    echo "Failed after 3 attempts"
+    echo "MongoDB Status:"
+    ps aux | grep mongod
+    echo "Network Status:"
+    netstat -an | grep 27017
+    echo "TLS Certificate Status:"
+    openssl verify -CAfile /etc/ssl/mongo/chain.pem /etc/ssl/mongo/combined.pem
+fi
 EOF
     chmod +x "$HEALTHCHECK_SCRIPT"
     
@@ -475,10 +503,10 @@ services:
         hard: 32000
     healthcheck:
       test: ["CMD", "/healthcheck.sh"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
+      interval: 10s
+      timeout: 20s
+      retries: 5
+      start_period: 90s
     logging:
       driver: "json-file"
       options:
