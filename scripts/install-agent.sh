@@ -297,49 +297,95 @@ create_combined_certificate() {
     log "Certificate files created in $SSL_DIR"
 }
 
-wait_for_mongodb_health() {
-    log "Waiting for MongoDB container to be healthy..."
-    local max_attempts=5
-    local attempt=1
+prepare_system_limits() {
+    log "Configuring system limits for MongoDB..."
     
-    while [ $attempt -le $max_attempts ]; do
-        if docker ps --filter "name=mongodb" --filter "health=healthy" | grep -q mongodb; then
-            log "MongoDB container is healthy"
-            return 0
-        fi
-        log "Attempt $attempt/$max_attempts: Waiting for MongoDB to be healthy..."
-        sleep 10
-        attempt=$((attempt + 1))
-    done
+    # Update vm.max_map_count
+    echo "vm.max_map_count=1677720" >> /etc/sysctl.conf
+    sysctl -w vm.max_map_count=1677720
     
-    log_error "MongoDB failed to become healthy after $max_attempts attempts"
-    docker logs mongodb
-    return 1
+    # Update ulimits for MongoDB user
+    cat <<EOF > /etc/security/limits.d/mongodb.conf
+mongodb soft nofile 64000
+mongodb hard nofile 64000
+mongodb soft nproc 32000
+mongodb hard nproc 32000
+EOF
+    
+    log "System limits configured."
+}
+
+enhanced_ssl_setup() {
+    log "Setting up enhanced SSL configuration..."
+    
+    # Create directory for OCSP stapling cache
+    mkdir -p /etc/ssl/mongo/ocsp
+    chmod 700 /etc/ssl/mongo/ocsp
+    
+    # Add intermediate certificates to chain
+    curl -sL "https://letsencrypt.org/certs/lets-encrypt-r3.pem" >> /etc/ssl/mongo/chain.pem
+    
+    # Verify certificate chain
+    openssl verify -CAfile /etc/ssl/mongo/chain.pem /etc/ssl/mongo/combined.pem
+    
+    log "Enhanced SSL configuration completed."
+}
+
+create_healthcheck_script() {
+    log "Creating MongoDB healthcheck script..."
+    
+    local HEALTHCHECK_SCRIPT="$MONGODB_DIR/healthcheck.sh"
+    cat <<EOF > "$HEALTHCHECK_SCRIPT"
+#!/bin/bash
+mongosh \
+  --tls \
+  --tlsCAFile=/etc/ssl/mongo/chain.pem \
+  --tlsCertificateKeyFile=/etc/ssl/mongo/combined.pem \
+  --host localhost \
+  --port 27017 \
+  --username \${MONGO_INITDB_ROOT_USERNAME} \
+  --password \${MONGO_INITDB_ROOT_PASSWORD} \
+  --eval 'db.runCommand("ping").ok' \
+  --quiet
+EOF
+    chmod +x "$HEALTHCHECK_SCRIPT"
+    
+    log "Healthcheck script created at $HEALTHCHECK_SCRIPT"
 }
 
 setup_mongodb() {
-  log "Setting up MongoDB (two-phase)..."
-  
-  mkdir -p "$MONGODB_DIR"
-  chown "$USERNAME":"$USERNAME" "$MONGODB_DIR"
-
-  # 1) Generate random credentials and store them
-  export MONGO_INITDB_ROOT_USERNAME=$(openssl rand -hex 12)
-  export MONGO_INITDB_ROOT_PASSWORD=$(openssl rand -hex 24)
-  export MONGO_MANAGER_USERNAME="manager"
-  export MONGO_MANAGER_PASSWORD=$(openssl rand -hex 24)
-
-  cat <<EOF > "$MONGO_ENV_FILE"
+    log "Setting up MongoDB (improved two-phase)..."
+    
+    # Call the preparation functions
+    prepare_system_limits
+    
+    mkdir -p "$MONGODB_DIR"
+    chown "$USERNAME":"$USERNAME" "$MONGODB_DIR"
+    
+    # Generate credentials
+    export MONGO_INITDB_ROOT_USERNAME=$(openssl rand -hex 12)
+    export MONGO_INITDB_ROOT_PASSWORD=$(openssl rand -hex 24)
+    export MONGO_MANAGER_USERNAME="manager"
+    export MONGO_MANAGER_PASSWORD=$(openssl rand -hex 24)
+    
+    # Store credentials
+    cat <<EOF > "$MONGO_ENV_FILE"
 MONGO_INITDB_ROOT_USERNAME=$MONGO_INITDB_ROOT_USERNAME
 MONGO_INITDB_ROOT_PASSWORD=$MONGO_INITDB_ROOT_PASSWORD
 MONGO_MANAGER_USERNAME=$MONGO_MANAGER_USERNAME
 MONGO_MANAGER_PASSWORD=$MONGO_MANAGER_PASSWORD
 EOF
-  chown "$USERNAME":"$USERNAME" "$MONGO_ENV_FILE"
-  chmod 600 "$MONGO_ENV_FILE"
-
-  # 2) Phase 1 Compose
-  cat <<EOF > "$MONGODB_DIR/docker-compose.mongodb.phase1.yml"
+    chown "$USERNAME":"$USERNAME" "$MONGO_ENV_FILE"
+    chmod 600 "$MONGO_ENV_FILE"
+    
+    # Enhanced SSL setup
+    enhanced_ssl_setup
+    
+    # Create healthcheck script
+    create_healthcheck_script
+    
+    # Phase 1: Initial setup without auth/TLS
+    cat <<EOF > "$MONGODB_DIR/docker-compose.mongodb.phase1.yml"
 version: '3.8'
 services:
   mongodb:
@@ -360,22 +406,22 @@ networks:
     external: true
 EOF
 
-  # Phase 1 start
-  cd "$MONGODB_DIR"
-  sudo -u "$USERNAME" docker-compose -f docker-compose.mongodb.phase1.yml down || true
-  docker network rm internal || true
-  docker network create internal
-
-  sudo -u "$USERNAME" docker-compose -f docker-compose.mongodb.phase1.yml up -d
-
-  log "Waiting 30 seconds for Phase 1 to initialize root user..."
-  sleep 30
-
-  # Teardown Phase 1
-  sudo -u "$USERNAME" docker-compose -f docker-compose.mongodb.phase1.yml down
-
-  # 3) Phase 2 Compose
-  cat <<EOF > "$MONGODB_DIR/docker-compose.mongodb.phase2.yml"
+    # Start Phase 1
+    cd "$MONGODB_DIR"
+    sudo -u "$USERNAME" docker-compose -f docker-compose.mongodb.phase1.yml down || true
+    docker network rm internal || true
+    docker network create internal
+    
+    sudo -u "$USERNAME" docker-compose -f docker-compose.mongodb.phase1.yml up -d
+    
+    log "Waiting 30 seconds for Phase 1 to initialize root user..."
+    sleep 30
+    
+    # Teardown Phase 1
+    sudo -u "$USERNAME" docker-compose -f docker-compose.mongodb.phase1.yml down
+    
+    # Phase 2: Full setup with auth, TLS, and healthcheck
+    cat <<EOF > "$MONGODB_DIR/docker-compose.mongodb.phase2.yml"
 version: '3.8'
 services:
   mongodb:
@@ -388,36 +434,39 @@ services:
     volumes:
       - mongo_data:/data/db
       - /etc/ssl/mongo:/etc/ssl/mongo:ro
+      - ${MONGODB_DIR}/healthcheck.sh:/healthcheck.sh:ro
     command:
       - "--auth"
       - "--tlsMode=requireTLS"
       - "--tlsCertificateKeyFile=/etc/ssl/mongo/combined.pem"
       - "--tlsCAFile=/etc/ssl/mongo/chain.pem"
       - "--bind_ip_all"
+      - "--setParameter"
+      - "ocspEnabled=true"
+      - "--setParameter"
+      - "tlsOCSPStaplingTimeoutSecs=10"
     ports:
       - "27017:27017"
     networks:
       - internal
+    ulimits:
+      nofile:
+        soft: 64000
+        hard: 64000
+      nproc:
+        soft: 32000
+        hard: 32000
     healthcheck:
-      test:
-        - "CMD"
-        - "mongo"
-        - "--host"
-        - "localhost"
-        - "--tls"
-        - "--sslCAFile=/etc/ssl/mongo/chain.pem"
-        - "--sslPEMKeyFile=/etc/ssl/mongo/combined.pem"
-        - "-u"
-        - "${MONGO_INITDB_ROOT_USERNAME}"
-        - "-p"
-        - "${MONGO_INITDB_ROOT_PASSWORD}"
-        - "--authenticationDatabase=admin"
-        - "--eval"
-        - "db.adminCommand('ping')"
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 120s
+      test: ["CMD", "/healthcheck.sh"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "3"
 volumes:
   mongo_data:
 networks:
@@ -425,13 +474,34 @@ networks:
     external: true
 EOF
 
-  # Phase 2 start
-  sudo -u "$USERNAME" docker-compose -f docker-compose.mongodb.phase2.yml up -d
+    # Start Phase 2
+    sudo -u "$USERNAME" docker-compose -f "$MONGODB_DIR/docker-compose.mongodb.phase2.yml" up -d
+    
+    # Wait for health with improved timing
+    wait_for_mongodb_health
+}
 
-  # Wait for healthy
-  wait_for_mongodb_health
-
-  log "MongoDB is now running with auth + TLS."
+# Improved health check wait function
+wait_for_mongodb_health() {
+    log "Waiting for MongoDB container to be healthy..."
+    local max_attempts=10
+    local attempt=1
+    local wait_time=30
+    
+    while [ $attempt -le $max_attempts ]; do
+        if docker ps --filter "name=mongodb" --filter "health=healthy" | grep -q mongodb; then
+            log "MongoDB container is healthy"
+            return 0
+        fi
+        log "Attempt $attempt/$max_attempts: Waiting for MongoDB to be healthy... (${wait_time}s)"
+        docker logs mongodb --tail 50
+        sleep $wait_time
+        attempt=$((attempt + 1))
+    done
+    
+    log_error "MongoDB failed to become healthy after $max_attempts attempts"
+    docker logs mongodb
+    return 1
 }
 
 create_mongo_management_user() {
