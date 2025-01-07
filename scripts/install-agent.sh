@@ -299,7 +299,7 @@ create_combined_certificate() {
 
 wait_for_mongodb_health() {
     log "Waiting for MongoDB container to be healthy..."
-    local max_attempts=2
+    local max_attempts=10
     local attempt=1
     
     while [ $attempt -le $max_attempts ]; do
@@ -312,7 +312,7 @@ wait_for_mongodb_health() {
         local status=$(docker ps --filter "name=mongodb" --format "{{.Status}}")
         log "Attempt $attempt/$max_attempts: Current status: $status"
         
-        # If container is unhealthy, get the last health check log
+        # If container is unhealthy, get the last health check output
         if echo "$status" | grep -q "unhealthy"; then
             log "Last health check output:"
             docker inspect --format "{{json .State.Health.Log}}" mongodb | jq -r '.[-1].Output'
@@ -382,7 +382,7 @@ networks:
     external: true
 EOF
 
-# Phase 2: With Auth & TLS
+    # Phase 2: With Auth & TLS
     cat <<EOF > "$MONGODB_DIR/docker-compose.phase2.yml"
 version: '3.8'
 
