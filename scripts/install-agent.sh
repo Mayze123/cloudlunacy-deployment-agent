@@ -516,11 +516,11 @@ create_mongo_management_user() {
     docker run --rm --network=internal \
         -v "$TEMP_CERT_DIR:/certs:ro" \
         mongo:6.0 \
-        mongo \
-        --host localhost \
+        mongosh \
+        --host mongodb.cloudlunacy.uk:27017 \
         --tls \
-        --sslCAFile /certs/chain.pem \
-        --sslPEMKeyFile /certs/combined.pem \
+        --tlsCAFile /certs/chain.pem \
+        --tlsCertificateKeyFile /certs/combined.pem \
         -u "$MONGO_INITDB_ROOT_USERNAME" \
         -p "$MONGO_INITDB_ROOT_PASSWORD" \
         --authenticationDatabase admin \
@@ -532,11 +532,11 @@ create_mongo_management_user() {
     docker run --rm --network=internal \
         -v "$TEMP_CERT_DIR:/certs:ro" \
         mongo:6.0 \
-        mongo \
-        --host localhost \
+        mongosh \
+        --host mongodb.cloudlunacy.uk:27017 \
         --tls \
-        --sslCAFile /certs/chain.pem \
-        --sslPEMKeyFile /certs/combined.pem \
+        --tlsCAFile /certs/chain.pem \
+        --tlsCertificateKeyFile /certs/combined.pem \
         -u "$MONGO_INITDB_ROOT_USERNAME" \
         -p "$MONGO_INITDB_ROOT_PASSWORD" \
         --authenticationDatabase admin \
