@@ -299,20 +299,31 @@ create_combined_certificate() {
 
 wait_for_mongodb_health() {
     log "Waiting for MongoDB container to be healthy..."
-    local max_attempts=10  # Increased from 5
+    local max_attempts=10
     local attempt=1
     
     while [ $attempt -le $max_attempts ]; do
-        if docker ps --filter "name=mongodb" --filter "health=healthy" | grep -q mongodb; then
+        if docker ps --filter "name=mongodb" --format "{{.Status}}" | grep -q "healthy"; then
             log "MongoDB container is healthy"
             return 0
         fi
-        log "Attempt $attempt/$max_attempts: Waiting for MongoDB to be healthy..."
-        sleep 30  # Increased from 10
+        
+        # Get current health check status
+        local status=$(docker ps --filter "name=mongodb" --format "{{.Status}}")
+        log "Attempt $attempt/$max_attempts: Current status: $status"
+        
+        # If container is unhealthy, get the last health check log
+        if echo "$status" | grep -q "unhealthy"; then
+            log "Last health check output:"
+            docker inspect --format "{{json .State.Health.Log}}" mongodb | jq -r '.[-1].Output'
+        fi
+        
+        sleep 30
         attempt=$((attempt + 1))
     done
     
     log_error "MongoDB failed to become healthy after $max_attempts attempts"
+    log_error "Container logs:"
     docker logs mongodb
     return 1
 }
@@ -371,7 +382,7 @@ networks:
     external: true
 EOF
 
-    # Phase 2: With Auth & TLS
+# Phase 2: With Auth & TLS
     cat <<EOF > "$MONGODB_DIR/docker-compose.phase2.yml"
 version: '3.8'
 
@@ -408,21 +419,16 @@ services:
       - 8.8.8.8
       - 8.8.4.4
     healthcheck:
-      test:
-        - "CMD"
-        - "mongosh"
-        - "--host"
-        - "mongodb.cloudlunacy.uk"
-        - "--tls"
-        - "--tlsCAFile=/etc/ssl/mongo/chain.pem"
-        - "--tlsCertificateKeyFile=/etc/ssl/mongo/combined.pem"
-        - "-u"
-        - "$MONGO_INITDB_ROOT_USERNAME"
-        - "-p"
-        - "$MONGO_INITDB_ROOT_PASSWORD"
-        - "--authenticationDatabase=admin"
-        - "--eval"
-        - "db.adminCommand('ping')"
+      test: >- 
+        mongosh 
+        --host mongodb.cloudlunacy.uk:27017
+        --tls
+        --tlsCAFile /etc/ssl/mongo/chain.pem
+        --tlsCertificateKeyFile /etc/ssl/mongo/combined.pem
+        --authenticationDatabase admin
+        -u "\$MONGO_INITDB_ROOT_USERNAME"
+        -p "\$MONGO_INITDB_ROOT_PASSWORD"
+        --eval "db.adminCommand('ping')"
       interval: 30s
       timeout: 10s
       retries: 3
