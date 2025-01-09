@@ -328,10 +328,74 @@ wait_for_mongodb_health() {
     return 1
 }
 
+generate_mongo_credentials() {
+    log "Generating MongoDB credentials..."
+
+    # Create random credentials
+    MONGO_INITDB_ROOT_USERNAME=$(openssl rand -hex 12)
+    MONGO_INITDB_ROOT_PASSWORD=$(openssl rand -hex 24)
+    MONGO_MANAGER_USERNAME="manager"
+    MONGO_MANAGER_PASSWORD=$(openssl rand -hex 24)
+
+    # Write them to the Mongo .env file
+    cat <<EOF > "$MONGO_ENV_FILE"
+MONGO_INITDB_ROOT_USERNAME=$MONGO_INITDB_ROOT_USERNAME
+MONGO_INITDB_ROOT_PASSWORD=$MONGO_INITDB_ROOT_PASSWORD
+MONGO_MANAGER_USERNAME=$MONGO_MANAGER_USERNAME
+MONGO_MANAGER_PASSWORD=$MONGO_MANAGER_PASSWORD
+EOF
+
+    chown "$USERNAME":"$USERNAME" "$MONGO_ENV_FILE"
+    chmod 600 "$MONGO_ENV_FILE"
+
+    # Source them right away so subsequent commands can use them
+    set +u  # temporarily disable 'unbound variable' strictness
+    source "$MONGO_ENV_FILE"
+    set -u
+}
+
 setup_mongodb() {
     log "Setting up MongoDB with auth and TLS..."
-    docker network create internal || true
 
+    # ----------------------------
+    # Generate and store credentials
+    # ----------------------------
+    mkdir -p "$MONGODB_DIR"
+    chown "$USERNAME":"$USERNAME" "$MONGODB_DIR"
+
+    log "Generating MongoDB credentials..."
+    MONGO_INITDB_ROOT_USERNAME=$(openssl rand -hex 12)
+    MONGO_INITDB_ROOT_PASSWORD=$(openssl rand -hex 24)
+    MONGO_MANAGER_USERNAME="manager"
+    MONGO_MANAGER_PASSWORD=$(openssl rand -hex 24)
+
+    cat <<EOF > "$MONGO_ENV_FILE"
+MONGO_INITDB_ROOT_USERNAME=$MONGO_INITDB_ROOT_USERNAME
+MONGO_INITDB_ROOT_PASSWORD=$MONGO_INITDB_ROOT_PASSWORD
+MONGO_MANAGER_USERNAME=$MONGO_MANAGER_USERNAME
+MONGO_MANAGER_PASSWORD=$MONGO_MANAGER_PASSWORD
+EOF
+
+    chown "$USERNAME":"$USERNAME" "$MONGO_ENV_FILE"
+    chmod 600 "$MONGO_ENV_FILE"
+
+    # Source the newly created .env file so variables are available in the script
+    source "$MONGO_ENV_FILE"
+
+    # ----------------------------
+    # Safely create the Docker network
+    # ----------------------------
+    log "Ensuring 'internal' Docker network is available..."
+    # Remove the network if it exists (to avoid the 'already exists' error)
+    if docker network ls | grep -q "internal"; then
+        docker network rm internal || true
+    fi
+    docker network create internal
+
+    # ----------------------------
+    # Single-phase Docker Compose example (Auth + TLS)
+    # ----------------------------
+    log "Creating docker-compose.mongodb.yml..."
     cat <<EOF > "$MONGODB_DIR/docker-compose.mongodb.yml"
 version: '3.8'
 
@@ -341,8 +405,8 @@ services:
     container_name: mongodb
     restart: unless-stopped
     environment:
-      - MONGO_INITDB_ROOT_USERNAME=${MONGO_INITDB_ROOT_USERNAME}
-      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_INITDB_ROOT_PASSWORD}
+      - MONGO_INITDB_ROOT_USERNAME=\${MONGO_INITDB_ROOT_USERNAME}
+      - MONGO_INITDB_ROOT_PASSWORD=\${MONGO_INITDB_ROOT_PASSWORD}
     command:
       - "--auth"
       - "--tlsMode=requireTLS"
@@ -356,13 +420,14 @@ services:
       - internal
     healthcheck:
       test: >
-        mongosh --tls \
-        --tlsCAFile /etc/ssl/mongo/chain.pem \
-        --tlsCertificateKeyFile /etc/ssl/mongo/combined.pem \
+        mongosh --tls
+        --tlsCAFile /etc/ssl/mongo/chain.pem
+        --tlsCertificateKeyFile /etc/ssl/mongo/combined.pem
         --eval "db.adminCommand('ping')"
       interval: 30s
       timeout: 10s
       retries: 3
+      start_period: 60s
 
 volumes:
   mongo_data:
@@ -372,7 +437,19 @@ networks:
     external: true
 EOF
 
-    docker-compose -f "$MONGODB_DIR/docker-compose.mongodb.yml" up -d
+    chown "$USERNAME":"$USERNAME" "$MONGODB_DIR/docker-compose.mongodb.yml"
+    # Start MongoDB container
+    log "Starting MongoDB container with Auth + TLS..."
+    cd "$MONGODB_DIR"
+    sudo -u "$USERNAME" docker-compose --env-file "$MONGO_ENV_FILE" -f docker-compose.mongodb.yml up -d
+
+    # Wait for MongoDB to become healthy (reuse your existing wait_for_mongodb_health function)
+    if ! wait_for_mongodb_health; then
+        log_error "MongoDB failed to become healthy"
+        docker logs mongodb
+        return 1
+    fi
+
     log "MongoDB setup completed successfully."
 }
 
