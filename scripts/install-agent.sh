@@ -329,30 +329,10 @@ wait_for_mongodb_health() {
 }
 
 setup_mongodb() {
-    log "Setting up MongoDB as a Docker container with TLS (two-phase)..."
+    log "Setting up MongoDB with auth and TLS..."
+    docker network create internal || true
 
-    mkdir -p "$MONGODB_DIR"
-    chown "$USERNAME":"$USERNAME" "$MONGODB_DIR"
-
-    # Generate MongoDB credentials
-    log "Generating MongoDB credentials..."
-    MONGO_INITDB_ROOT_USERNAME=$(openssl rand -hex 12)
-    MONGO_INITDB_ROOT_PASSWORD=$(openssl rand -hex 24)
-    MONGO_MANAGER_USERNAME="manager"
-    MONGO_MANAGER_PASSWORD=$(openssl rand -hex 24)
-
-    cat <<EOF > "$MONGO_ENV_FILE"
-MONGO_INITDB_ROOT_USERNAME=$MONGO_INITDB_ROOT_USERNAME
-MONGO_INITDB_ROOT_PASSWORD=$MONGO_INITDB_ROOT_PASSWORD
-MONGO_MANAGER_USERNAME=$MONGO_MANAGER_USERNAME
-MONGO_MANAGER_PASSWORD=$MONGO_MANAGER_PASSWORD
-EOF
-    chown "$USERNAME":"$USERNAME" "$MONGO_ENV_FILE"
-    chmod 600 "$MONGO_ENV_FILE"
-    source "$MONGO_ENV_FILE"
-
-    # Phase 1: No Auth/No TLS to allow root user creation
-    cat <<EOF > "$MONGODB_DIR/docker-compose.phase1.yml"
+    cat <<EOF > "$MONGODB_DIR/docker-compose.mongodb.yml"
 version: '3.8'
 
 services:
@@ -360,70 +340,29 @@ services:
     image: mongo:6.0
     container_name: mongodb
     restart: unless-stopped
-    environment:
-      - MONGO_INITDB_ROOT_USERNAME=$MONGO_INITDB_ROOT_USERNAME
-      - MONGO_INITDB_ROOT_PASSWORD=$MONGO_INITDB_ROOT_PASSWORD
-    volumes:
-      - mongo_data:/data/db
-    networks:
-      - internal
-    healthcheck:
-      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
-
-volumes:
-  mongo_data:
-
-networks:
-  internal:
-    external: true
-EOF
-
-    # Phase 2: With Auth & TLS
-    cat <<EOF > "$MONGODB_DIR/docker-compose.phase2.yml"
-version: '3.8'
-
-services:
-  mongodb:
-    image: mongo:6.0
-    container_name: mongodb
-    restart: unless-stopped
-    volumes:
-      - mongo_data:/data/db
-      - /etc/ssl/mongo:/etc/ssl/mongo:ro
     environment:
       - MONGO_INITDB_ROOT_USERNAME=${MONGO_INITDB_ROOT_USERNAME}
       - MONGO_INITDB_ROOT_PASSWORD=${MONGO_INITDB_ROOT_PASSWORD}
     command:
+      - "--auth"
       - "--tlsMode=requireTLS"
       - "--tlsCertificateKeyFile=/etc/ssl/mongo/combined.pem"
       - "--tlsCAFile=/etc/ssl/mongo/chain.pem"
       - "--bind_ip_all"
-      - "--logpath=/dev/stdout"
-      - "--logappend"
-      - "--setParameter"
-      - "allowDiskUseByDefault=true"
-      - "--wiredTigerCacheSizeGB=1"
-      - "--tlsAllowInvalidHostnames"
-      - "--tlsAllowInvalidCertificates"
-    ports:
-      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+      - /etc/ssl/mongo:/etc/ssl/mongo:ro
     networks:
       - internal
     healthcheck:
-      test: >- 
-        mongosh 
-        --tls
-        --tlsCAFile /etc/ssl/mongo/chain.pem
-        --tlsCertificateKeyFile /etc/ssl/mongo/combined.pem
+      test: >
+        mongosh --tls \
+        --tlsCAFile /etc/ssl/mongo/chain.pem \
+        --tlsCertificateKeyFile /etc/ssl/mongo/combined.pem \
         --eval "db.adminCommand('ping')"
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 120s
 
 volumes:
   mongo_data:
@@ -433,48 +372,8 @@ networks:
     external: true
 EOF
 
-    chown "$USERNAME":"$USERNAME" "$MONGODB_DIR/docker-compose.phase1.yml"
-    chown "$USERNAME":"$USERNAME" "$MONGODB_DIR/docker-compose.phase2.yml"
-
-    # Ensure we have a clean 'internal' network
-    cd "$MONGODB_DIR"
-    sudo -u "$USERNAME" docker-compose -f docker-compose.phase1.yml down || true
-    if docker network ls | grep -q "internal"; then
-        docker network rm internal || true
-    fi
-    docker network create internal
-
-    # Start Phase 1: without auth and TLS
-    log "Starting Phase 1: Initial MongoDB setup without auth and TLS..."
-    sudo -u "$USERNAME" docker-compose --env-file "$MONGO_ENV_FILE" -f docker-compose.phase1.yml up -d
-    
-    # Wait for Phase 1 container to be healthy
-    if ! wait_for_mongodb_health; then
-        log_error "Phase 1 MongoDB setup failed"
-        docker logs mongodb
-        return 1
-    fi
-    log "Phase 1 completed successfully"
-    
-    # Stop Phase 1
-    sudo -u "$USERNAME" docker-compose -f docker-compose.phase1.yml down
-    sleep 10  # Add a short delay to ensure clean shutdown
-
-    # Start Phase 2: with auth and TLS
-    log "Starting Phase 2: MongoDB with auth and TLS..."
-    sudo -u "$USERNAME" docker-compose --env-file "$MONGO_ENV_FILE" -f docker-compose.phase2.yml up -d
-    
-    # Wait for Phase 2 container to be healthy
-    if ! wait_for_mongodb_health; then
-        log_error "Phase 2 MongoDB setup failed"
-        docker logs mongodb
-        return 1
-    fi
-    
+    docker-compose -f "$MONGODB_DIR/docker-compose.mongodb.yml" up -d
     log "MongoDB setup completed successfully."
-
-    # Create symlink for the active configuration
-    ln -sf "$MONGODB_DIR/docker-compose.phase2.yml" "$MONGODB_DIR/docker-compose.mongodb.yml"
 }
 
 create_mongo_management_user() {
@@ -533,13 +432,14 @@ create_mongo_management_user() {
 }
 
 adjust_firewall_settings() {
-    log "Adjusting firewall settings to allow external MongoDB connections..."
+    log "Adjusting firewall settings..."
+    TRUSTED_IP="128.140.53.203" 
     if command -v ufw >/dev/null 2>&1; then
-        ufw allow 27017/tcp
-        log "Allowed port 27017/tcp through UFW."
+        ufw allow from $TRUSTED_IP to any port 27017 proto tcp
+        log "Allowed port 27017 for trusted IP $TRUSTED_IP."
     else
-        iptables -A INPUT -p tcp --dport 27017 -j ACCEPT
-        log "Allowed port 27017/tcp through iptables."
+        iptables -A INPUT -p tcp -s $TRUSTED_IP --dport 27017 -j ACCEPT
+        log "Allowed port 27017 for trusted IP $TRUSTED_IP via iptables."
     fi
     log "Firewall settings adjusted."
 }
@@ -586,7 +486,10 @@ setup_certificate_renewal() {
     RENEWAL_SCRIPT="/usr/local/bin/renew_certificates.sh"
     cat <<EOF > "$RENEWAL_SCRIPT"
 #!/bin/bash
-certbot renew --deploy-hook "docker-compose -f $BASE_DIR/mongodb/docker-compose.mongodb.yml restart mongodb"
+certbot renew --deploy-hook "cat /etc/letsencrypt/live/$DOMAIN/privkey.pem /etc/letsencrypt/live/$DOMAIN/fullchain.pem > /etc/ssl/mongo/combined.pem"
+chown 999:999 /etc/ssl/mongo/combined.pem
+chmod 600 /etc/ssl/mongo/combined.pem
+docker-compose -f $MONGODB_DIR/docker-compose.mongodb.yml restart mongodb
 EOF
     chmod +x "$RENEWAL_SCRIPT"
     (crontab -l 2>/dev/null; echo "0 2 * * * $RENEWAL_SCRIPT >> /var/log/letsencrypt/renewal.log 2>&1") | crontab -
