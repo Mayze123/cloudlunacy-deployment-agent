@@ -395,10 +395,9 @@ services:
       - mongo_data:/data/db
       - /etc/ssl/mongo:/etc/ssl/mongo:ro
     environment:
-      - MONGO_INITDB_ROOT_USERNAME=$MONGO_INITDB_ROOT_USERNAME
-      - MONGO_INITDB_ROOT_PASSWORD=$MONGO_INITDB_ROOT_PASSWORD
+      - MONGO_INITDB_ROOT_USERNAME=${MONGO_INITDB_ROOT_USERNAME}
+      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_INITDB_ROOT_PASSWORD}
     command:
-      - "--auth"
       - "--tlsMode=requireTLS"
       - "--tlsCertificateKeyFile=/etc/ssl/mongo/combined.pem"
       - "--tlsCAFile=/etc/ssl/mongo/chain.pem"
@@ -408,32 +407,23 @@ services:
       - "--setParameter"
       - "allowDiskUseByDefault=true"
       - "--wiredTigerCacheSizeGB=1"
+      - "--tlsAllowInvalidHostnames"
+      - "--tlsAllowInvalidCertificates"
     ports:
       - "27017:27017"
     networks:
       - internal
-    dns:
-      - 8.8.8.8
-      - 8.8.4.4
     healthcheck:
       test: >- 
         mongosh 
-        --host mongodb.cloudlunacy.uk:27017
         --tls
         --tlsCAFile /etc/ssl/mongo/chain.pem
         --tlsCertificateKeyFile /etc/ssl/mongo/combined.pem
-        --authenticationDatabase admin
-        -u "\$MONGO_INITDB_ROOT_USERNAME"
-        -p "\$MONGO_INITDB_ROOT_PASSWORD"
         --eval "db.adminCommand('ping')"
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 120s
-    ulimits:
-      nofile:
-        soft: 64000
-        hard: 64000
 
 volumes:
   mongo_data:
