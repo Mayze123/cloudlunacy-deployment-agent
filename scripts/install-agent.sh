@@ -468,24 +468,27 @@ EOF
 
 create_mongo_management_user() {
     log "Creating MongoDB management user..."
+
+    # Ensure the environment file exists
     if [ ! -f "$MONGO_ENV_FILE" ]; then
         log_error "MongoDB environment file not found at $MONGO_ENV_FILE"
         exit 1
     fi
 
+    # Source environment variables (so $MONGO_INITDB_ROOT_USERNAME, etc. exist)
     source "$MONGO_ENV_FILE"
     if [ -z "$MONGO_INITDB_ROOT_USERNAME" ] || [ -z "$MONGO_INITDB_ROOT_PASSWORD" ]; then
         log_error "MongoDB root credentials not found in environment file"
         exit 1
     fi
 
-    # Ensure MongoDB is healthy after auth & TLS
+    # Wait until MongoDB is healthy
     wait_for_mongodb_health
 
     TEMP_CERT_DIR="/tmp/mongo-certs"
     mkdir -p "$TEMP_CERT_DIR"
     cp "/etc/ssl/mongo/combined.pem" "$TEMP_CERT_DIR/combined.pem"
-    cp "/etc/ssl/mongo/chain.pem" "$TEMP_CERT_DIR/chain.pem"
+    cp "/etc/ssl/mongo/chain.pem"    "$TEMP_CERT_DIR/chain.pem"
     chmod 644 "$TEMP_CERT_DIR"/*
 
     log "Testing connectivity to MongoDB with auth & TLS..."
@@ -493,7 +496,7 @@ create_mongo_management_user() {
         -v "$TEMP_CERT_DIR:/certs:ro" \
         mongo:6.0 \
         mongosh \
-        --host mongodb:27017 \            # <-- Use the container name instead of domain
+        --host mongodb:27017 \           # <-- No trailing space here
         --tls \
         --tlsCAFile /certs/chain.pem \
         --tlsCertificateKeyFile /certs/combined.pem \
@@ -503,13 +506,20 @@ create_mongo_management_user() {
         --eval "db.runCommand({ ping: 1 })"
 
     log "Creating management user..."
-    MONGO_COMMAND="db.getSiblingDB('admin').createUser({user: '$MONGO_MANAGER_USERNAME', pwd: '$MONGO_MANAGER_PASSWORD', roles: [{role: 'userAdminAnyDatabase', db: 'admin'}, {role: 'readWriteAnyDatabase', db: 'admin'}]});"
+    MONGO_COMMAND="db.getSiblingDB('admin').createUser({
+        user: '$MONGO_MANAGER_USERNAME',
+        pwd: '$MONGO_MANAGER_PASSWORD',
+        roles: [
+          {role: 'userAdminAnyDatabase', db: 'admin'},
+          {role: 'readWriteAnyDatabase', db: 'admin'}
+        ]
+    });"
 
     docker run --rm --network=internal \
         -v "$TEMP_CERT_DIR:/certs:ro" \
         mongo:6.0 \
         mongosh \
-        --host mongodb:27017 \            # <-- same fix here
+        --host mongodb:27017 \          # <-- Again, same host, no trailing space
         --tls \
         --tlsCAFile /certs/chain.pem \
         --tlsCertificateKeyFile /certs/combined.pem \
