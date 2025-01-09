@@ -365,19 +365,13 @@ services:
       - MONGO_INITDB_ROOT_PASSWORD=$MONGO_INITDB_ROOT_PASSWORD
     volumes:
       - mongo_data:/data/db
-    command:
-      - "--bind_ip_all"
-      - "--port"
-      - "27017"
-      - "--logpath=/dev/stdout"
-      - "--logappend"
     networks:
       - internal
     healthcheck:
-      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')", "--username", "\$MONGO_INITDB_ROOT_USERNAME", "--password", "\$MONGO_INITDB_ROOT_PASSWORD", "--authenticationDatabase", "admin"]
-      interval: 10s
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 30s
       timeout: 10s
-      retries: 5
+      retries: 3
       start_period: 60s
 
 volumes:
@@ -401,22 +395,20 @@ services:
       - mongo_data:/data/db
       - /etc/ssl/mongo:/etc/ssl/mongo:ro
     environment:
-      - MONGO_INITDB_ROOT_USERNAME=$MONGO_INITDB_ROOT_USERNAME
-      - MONGO_INITDB_ROOT_PASSWORD=$MONGO_INITDB_ROOT_PASSWORD
+      - MONGO_INITDB_ROOT_USERNAME=${MONGO_INITDB_ROOT_USERNAME}
+      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_INITDB_ROOT_PASSWORD}
     command:
-      - "--auth"
       - "--tlsMode=requireTLS"
       - "--tlsCertificateKeyFile=/etc/ssl/mongo/combined.pem"
       - "--tlsCAFile=/etc/ssl/mongo/chain.pem"
       - "--bind_ip_all"
-      - "--port"
-      - "27017"
       - "--logpath=/dev/stdout"
       - "--logappend"
       - "--setParameter"
       - "allowDiskUseByDefault=true"
       - "--wiredTigerCacheSizeGB=1"
       - "--tlsAllowInvalidHostnames"
+      - "--tlsAllowInvalidCertificates"
     ports:
       - "27017:27017"
     networks:
@@ -424,18 +416,13 @@ services:
     healthcheck:
       test: >- 
         mongosh 
-        --host mongodb.cloudlunacy.uk
         --tls
-        --tlsAllowInvalidHostnames
         --tlsCAFile /etc/ssl/mongo/chain.pem
         --tlsCertificateKeyFile /etc/ssl/mongo/combined.pem
-        --authenticationDatabase admin
-        -u "\$MONGO_INITDB_ROOT_USERNAME"
-        -p "\$MONGO_INITDB_ROOT_PASSWORD"
         --eval "db.adminCommand('ping')"
       interval: 30s
       timeout: 10s
-      retries: 5
+      retries: 3
       start_period: 120s
 
 volumes:
@@ -458,25 +445,16 @@ EOF
     docker network create internal
 
     # Start Phase 1: without auth and TLS
-    log "Starting Phase 1: Initial MongoDB setup without auth..."
+    log "Starting Phase 1: Initial MongoDB setup without auth and TLS..."
     sudo -u "$USERNAME" docker-compose --env-file "$MONGO_ENV_FILE" -f docker-compose.phase1.yml up -d
     
-    # Wait for Phase 1 container to be healthy and verify root user
-    log "Waiting for Phase 1 MongoDB to initialize and create root user..."
-    COUNTER=0
-    MAX_ATTEMPTS=30
-    while [ $COUNTER -lt $MAX_ATTEMPTS ]; do
-        if docker exec mongodb mongosh --quiet --eval "db.auth('$MONGO_INITDB_ROOT_USERNAME', '$MONGO_INITDB_ROOT_PASSWORD'); db.adminCommand('ping')" admin; then
-            log "Root user created and verified successfully"
-            break
-        fi
-        COUNTER=$((COUNTER+1))
-        if [ $COUNTER -eq $MAX_ATTEMPTS ]; then
-            log_error "Failed to verify root user creation"
-            exit 1
-        fi
-        sleep 10
-    done
+    # Wait for Phase 1 container to be healthy
+    if ! wait_for_mongodb_health; then
+        log_error "Phase 1 MongoDB setup failed"
+        docker logs mongodb
+        return 1
+    fi
+    log "Phase 1 completed successfully"
     
     # Stop Phase 1
     sudo -u "$USERNAME" docker-compose -f docker-compose.phase1.yml down
