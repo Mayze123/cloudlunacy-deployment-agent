@@ -383,17 +383,29 @@ EOF
     source "$MONGO_ENV_FILE"
 
     # ----------------------------
-    # Safely create the Docker network
+    # Safely re-create the Docker network
     # ----------------------------
     log "Ensuring 'internal' Docker network is available..."
-    # Remove the network if it exists (to avoid the 'already exists' error)
     if docker network ls | grep -q "internal"; then
+        log "Network 'internal' already exists. Stopping/removing any containers on it..."
+        
+        # Stop any running containers on the 'internal' network
+        RUNNING_CONTAINERS="$(docker ps --filter network=internal -q)"
+        if [ -n "$RUNNING_CONTAINERS" ]; then
+            log "Stopping containers on 'internal' network: $RUNNING_CONTAINERS"
+            docker stop $RUNNING_CONTAINERS || true
+            docker rm $RUNNING_CONTAINERS || true
+        fi
+
+        # Now remove the existing network
         docker network rm internal || true
     fi
+
+    # Create the 'internal' network fresh
     docker network create internal
 
     # ----------------------------
-    # Single-phase Docker Compose example (Auth + TLS)
+    # Single-phase Docker Compose for Auth + TLS
     # ----------------------------
     log "Creating docker-compose.mongodb.yml..."
     cat <<EOF > "$MONGODB_DIR/docker-compose.mongodb.yml"
@@ -438,12 +450,13 @@ networks:
 EOF
 
     chown "$USERNAME":"$USERNAME" "$MONGODB_DIR/docker-compose.mongodb.yml"
+
     # Start MongoDB container
     log "Starting MongoDB container with Auth + TLS..."
     cd "$MONGODB_DIR"
     sudo -u "$USERNAME" docker-compose --env-file "$MONGO_ENV_FILE" -f docker-compose.mongodb.yml up -d
 
-    # Wait for MongoDB to become healthy (reuse your existing wait_for_mongodb_health function)
+    # Wait for MongoDB to become healthy (using your existing wait_for_mongodb_health function)
     if ! wait_for_mongodb_health; then
         log_error "MongoDB failed to become healthy"
         docker logs mongodb
