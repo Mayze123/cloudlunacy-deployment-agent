@@ -493,7 +493,7 @@ create_mongo_management_user() {
         -v "$TEMP_CERT_DIR:/certs:ro" \
         mongo:6.0 \
         mongosh \
-        --host mongodb.cloudlunacy.uk:27017 \
+        --host mongodb:27017 \            # <-- Use the container name instead of domain
         --tls \
         --tlsCAFile /certs/chain.pem \
         --tlsCertificateKeyFile /certs/combined.pem \
@@ -504,12 +504,12 @@ create_mongo_management_user() {
 
     log "Creating management user..."
     MONGO_COMMAND="db.getSiblingDB('admin').createUser({user: '$MONGO_MANAGER_USERNAME', pwd: '$MONGO_MANAGER_PASSWORD', roles: [{role: 'userAdminAnyDatabase', db: 'admin'}, {role: 'readWriteAnyDatabase', db: 'admin'}]});"
-    
+
     docker run --rm --network=internal \
         -v "$TEMP_CERT_DIR:/certs:ro" \
         mongo:6.0 \
         mongosh \
-        --host mongodb.cloudlunacy.uk:27017 \
+        --host mongodb:27017 \            # <-- same fix here
         --tls \
         --tlsCAFile /certs/chain.pem \
         --tlsCertificateKeyFile /certs/combined.pem \
@@ -517,7 +517,7 @@ create_mongo_management_user() {
         -p "$MONGO_INITDB_ROOT_PASSWORD" \
         --authenticationDatabase admin \
         --eval "$MONGO_COMMAND"
-    
+
     rm -rf "$TEMP_CERT_DIR"
 }
 
