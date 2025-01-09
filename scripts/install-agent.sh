@@ -475,7 +475,7 @@ create_mongo_management_user() {
         exit 1
     fi
 
-    # Source environment variables (so $MONGO_INITDB_ROOT_USERNAME, etc. exist)
+    # Source environment variables
     source "$MONGO_ENV_FILE"
     if [ -z "$MONGO_INITDB_ROOT_USERNAME" ] || [ -z "$MONGO_INITDB_ROOT_PASSWORD" ]; then
         log_error "MongoDB root credentials not found in environment file"
@@ -495,8 +495,7 @@ create_mongo_management_user() {
     docker run --rm --network=internal \
         -v "$TEMP_CERT_DIR:/certs:ro" \
         mongo:6.0 \
-        mongosh \
-        --host mongodb:27017 \           # <-- No trailing space here
+        mongosh "mongodb://mongodb:27017" \
         --tls \
         --tlsCAFile /certs/chain.pem \
         --tlsCertificateKeyFile /certs/combined.pem \
@@ -518,8 +517,7 @@ create_mongo_management_user() {
     docker run --rm --network=internal \
         -v "$TEMP_CERT_DIR:/certs:ro" \
         mongo:6.0 \
-        mongosh \
-        --host mongodb:27017 \          # <-- Again, same host, no trailing space
+        mongosh "mongodb://mongodb:27017" \
         --tls \
         --tlsCAFile /certs/chain.pem \
         --tlsCertificateKeyFile /certs/combined.pem \
