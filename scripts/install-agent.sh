@@ -408,7 +408,7 @@ EOF
     # Single-phase Docker Compose for Auth + TLS
     # ----------------------------
     log "Creating docker-compose.mongodb.yml..."
-    cat <<EOF > "$MONGODB_DIR/docker-compose.mongodb.yml"
+     cat <<EOF > "$MONGODB_DIR/docker-compose.mongodb.yml"
 version: '3.8'
 
 services:
@@ -416,6 +416,7 @@ services:
     image: mongo:6.0
     container_name: mongodb
     restart: unless-stopped
+    hostname: mongodb.cloudlunacy.uk
     environment:
       - MONGO_INITDB_ROOT_USERNAME=\${MONGO_INITDB_ROOT_USERNAME}
       - MONGO_INITDB_ROOT_PASSWORD=\${MONGO_INITDB_ROOT_PASSWORD}
@@ -429,10 +430,12 @@ services:
       - mongo_data:/data/db
       - /etc/ssl/mongo:/etc/ssl/mongo:ro
     networks:
-      - internal
+      internal:
+        aliases:
+          - mongodb.cloudlunacy.uk
     healthcheck:
       test: >
-        mongosh --tls
+        mongosh "mongodb://mongodb.cloudlunacy.uk:27017" --tls
         --tlsCAFile /etc/ssl/mongo/chain.pem
         --tlsCertificateKeyFile /etc/ssl/mongo/combined.pem
         --eval "db.adminCommand('ping')"
