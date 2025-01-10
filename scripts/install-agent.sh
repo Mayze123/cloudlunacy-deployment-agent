@@ -488,14 +488,15 @@ create_mongo_management_user() {
     TEMP_CERT_DIR="/tmp/mongo-certs"
     mkdir -p "$TEMP_CERT_DIR"
     cp "/etc/ssl/mongo/combined.pem" "$TEMP_CERT_DIR/combined.pem"
-    cp "/etc/ssl/mongo/chain.pem"    "$TEMP_CERT_DIR/chain.pem"
+    cp "/etc/ssl/mongo/chain.pem" "$TEMP_CERT_DIR/chain.pem"
     chmod 644 "$TEMP_CERT_DIR"/*
 
     log "Testing connectivity to MongoDB with auth & TLS..."
     docker run --rm --network=internal \
         -v "$TEMP_CERT_DIR:/certs:ro" \
+        --add-host="mongodb.cloudlunacy.uk:$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' mongodb)" \
         mongo:6.0 \
-        mongosh "mongodb://mongodb:27017" \
+        mongosh "mongodb://mongodb.cloudlunacy.uk:27017" \
         --tls \
         --tlsCAFile /certs/chain.pem \
         --tlsCertificateKeyFile /certs/combined.pem \
@@ -509,15 +510,16 @@ create_mongo_management_user() {
         user: '$MONGO_MANAGER_USERNAME',
         pwd: '$MONGO_MANAGER_PASSWORD',
         roles: [
-          {role: 'userAdminAnyDatabase', db: 'admin'},
-          {role: 'readWriteAnyDatabase', db: 'admin'}
+            {role: 'userAdminAnyDatabase', db: 'admin'},
+            {role: 'readWriteAnyDatabase', db: 'admin'}
         ]
     });"
 
     docker run --rm --network=internal \
         -v "$TEMP_CERT_DIR:/certs:ro" \
+        --add-host="mongodb.cloudlunacy.uk:$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' mongodb)" \
         mongo:6.0 \
-        mongosh "mongodb://mongodb:27017" \
+        mongosh "mongodb://mongodb.cloudlunacy.uk:27017" \
         --tls \
         --tlsCAFile /certs/chain.pem \
         --tlsCertificateKeyFile /certs/combined.pem \
