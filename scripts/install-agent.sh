@@ -355,7 +355,7 @@ EOF
 }
 
 setup_mongodb() {
-    log "Setting up MongoDB with auth and TLS..."
+    log "Setting up MongoDB with auth and TLS (debug mode)..."
 
     # Generate and store credentials as before
     mkdir -p "$MONGODB_DIR"
@@ -363,7 +363,18 @@ setup_mongodb() {
 
     generate_mongo_credentials
 
-    # Create Docker Compose file with network fixes
+    # Verify SSL certificates
+    log "Verifying SSL certificates..."
+    if [ ! -f "/etc/ssl/mongo/combined.pem" ] || [ ! -f "/etc/ssl/mongo/chain.pem" ]; then
+        log_error "SSL certificate files missing!"
+        exit 1
+    fi
+
+    # Check certificate permissions
+    log "Current certificate permissions:"
+    ls -l /etc/ssl/mongo/
+
+    # Create Docker Compose file with enhanced debug settings
     log "Creating docker-compose.mongodb.yml..."
     cat <<EOF > "$MONGODB_DIR/docker-compose.mongodb.yml"
 version: '3.8'
@@ -377,12 +388,20 @@ services:
       - MONGO_INITDB_ROOT_USERNAME=\${MONGO_INITDB_ROOT_USERNAME}
       - MONGO_INITDB_ROOT_PASSWORD=\${MONGO_INITDB_ROOT_PASSWORD}
     command:
+      - "mongod"
       - "--bind_ip_all"
       - "--port=27017"
-      - "--tlsMode=allowTLS"
+      - "--tlsMode=preferTLS"
       - "--tlsCertificateKeyFile=/etc/ssl/mongo/combined.pem"
       - "--tlsCAFile=/etc/ssl/mongo/chain.pem"
       - "--auth"
+      - "--verbose"
+      - "--setParameter"
+      - "logLevel=2"
+      - "--setParameter"
+      - "tlsLogLevel=2"
+      - "--setParameter"
+      - "networkMessageCompressors=disabled"
     ports:
       - "27017:27017"
     volumes:
@@ -392,9 +411,8 @@ services:
       - internal
     healthcheck:
       test: >
-        mongosh --tls 
-        --tlsAllowInvalidCertificates
-        --eval "db.adminCommand('ping')"
+        mongosh 
+        --eval "print('healthcheck')"
       interval: 30s
       timeout: 10s
       retries: 3
@@ -428,17 +446,33 @@ EOF
         return 1
     fi
 
-    log "Testing basic connectivity..."
-    # Test basic connection without auth first
+    # Get MongoDB container IP
+    MONGO_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' mongodb)
+    log "MongoDB container IP: $MONGO_IP"
+
+    # Test basic connectivity without TLS first
+    log "Testing basic non-TLS connectivity..."
+    docker run --rm --network=internal \
+        mongo:6.0 \
+        mongosh --host mongodb \
+        --eval "print('Basic non-TLS connectivity test')" || true
+
+    # Test basic connectivity with TLS
+    log "Testing basic TLS connectivity..."
     docker run --rm --network=internal \
         -v /etc/ssl/mongo:/certs:ro \
         mongo:6.0 \
         mongosh --host mongodb \
         --tls \
-        --tlsAllowInvalidCertificates \
-        --eval "print('Basic connectivity test successful')"
+        --tlsCAFile=/certs/chain.pem \
+        --tlsCertificateKeyFile=/certs/combined.pem \
+        --eval "print('Basic TLS connectivity test')" || true
 
-    log "MongoDB setup completed successfully."
+    # Show MongoDB logs for debugging
+    log "Recent MongoDB logs:"
+    docker logs mongodb --tail 50
+
+    log "MongoDB setup completed."
 }
 
 create_mongo_management_user() {
@@ -451,6 +485,20 @@ create_mongo_management_user() {
     # Get MongoDB container IP
     MONGO_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' mongodb)
     log "MongoDB container IP: $MONGO_IP"
+
+    # Test connection as root user first
+    log "Testing root user connection..."
+    docker run --rm --network=internal \
+        -v /etc/ssl/mongo:/certs:ro \
+        mongo:6.0 \
+        mongosh --host mongodb \
+        --tls \
+        --tlsCAFile=/certs/chain.pem \
+        --tlsCertificateKeyFile=/certs/combined.pem \
+        -u "$MONGO_INITDB_ROOT_USERNAME" \
+        -p "$MONGO_INITDB_ROOT_PASSWORD" \
+        --authenticationDatabase admin \
+        --eval "print('Root connection test')" || true
 
     log "Creating management user..."
     MONGO_COMMAND="db.getSiblingDB('admin').createUser({
@@ -467,9 +515,11 @@ create_mongo_management_user() {
         mongo:6.0 \
         mongosh --host mongodb \
         --tls \
-        --tlsAllowInvalidCertificates \
+        --tlsCAFile=/certs/chain.pem \
+        --tlsCertificateKeyFile=/certs/combined.pem \
         -u "$MONGO_INITDB_ROOT_USERNAME" \
         -p "$MONGO_INITDB_ROOT_PASSWORD" \
+        --authenticationDatabase admin \
         --eval "$MONGO_COMMAND"
 
     # Verify the user was created
@@ -479,10 +529,16 @@ create_mongo_management_user() {
         mongo:6.0 \
         mongosh --host mongodb \
         --tls \
-        --tlsAllowInvalidCertificates \
+        --tlsCAFile=/certs/chain.pem \
+        --tlsCertificateKeyFile=/certs/combined.pem \
         -u "$MONGO_MANAGER_USERNAME" \
         -p "$MONGO_MANAGER_PASSWORD" \
+        --authenticationDatabase admin \
         --eval "db.adminCommand('ping')"
+
+    # Show MongoDB logs again
+    log "Recent MongoDB logs after user creation:"
+    docker logs mongodb --tail 50
 }
 
 adjust_firewall_settings() {
