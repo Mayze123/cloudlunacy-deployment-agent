@@ -488,17 +488,17 @@ create_mongo_management_user() {
     # Wait until MongoDB is healthy
     wait_for_mongodb_health
 
-    TEMP_CERT_DIR="/tmp/mongo-certs"
+      TEMP_CERT_DIR="/tmp/mongo-certs"
     mkdir -p "$TEMP_CERT_DIR"
     cp "/etc/ssl/mongo/combined.pem" "$TEMP_CERT_DIR/combined.pem"
-    cp "/etc/ssl/mongo/chain.pem"    "$TEMP_CERT_DIR/chain.pem"
+    cp "/etc/ssl/mongo/chain.pem" "$TEMP_CERT_DIR/chain.pem"
     chmod 644 "$TEMP_CERT_DIR"/*
 
     log "Testing connectivity to MongoDB with auth & TLS..."
     docker run --rm --network=internal \
         -v "$TEMP_CERT_DIR:/certs:ro" \
         mongo:6.0 \
-        mongosh "mongodb://mongodb:27017" \
+        mongosh "mongodb://mongodb.cloudlunacy.uk:27017" \
         --tls \
         --tlsCAFile /certs/chain.pem \
         --tlsCertificateKeyFile /certs/combined.pem \
@@ -520,7 +520,7 @@ create_mongo_management_user() {
     docker run --rm --network=internal \
         -v "$TEMP_CERT_DIR:/certs:ro" \
         mongo:6.0 \
-        mongosh "mongodb://mongodb:27017" \
+        mongosh "mongodb://mongodb.cloudlunacy.uk:27017" \
         --tls \
         --tlsCAFile /certs/chain.pem \
         --tlsCertificateKeyFile /certs/combined.pem \
