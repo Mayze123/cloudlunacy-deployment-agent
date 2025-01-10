@@ -485,31 +485,31 @@ create_mongo_management_user() {
         exit 1
     fi
 
-    # Wait until MongoDB is healthy (reuse your existing function)
+    # Wait until MongoDB is healthy
     wait_for_mongodb_health
 
-    # 1) Define and populate TEMP_CERT_DIR on the host:
+    # 1) Define and populate TEMP_CERT_DIR on the host
     TEMP_CERT_DIR="/tmp/mongo-certs"
     mkdir -p "$TEMP_CERT_DIR"
     cp "/etc/ssl/mongo/combined.pem" "$TEMP_CERT_DIR/combined.pem"
     cp "/etc/ssl/mongo/chain.pem"    "$TEMP_CERT_DIR/chain.pem"
     chmod 644 "$TEMP_CERT_DIR"/*
 
-    # 2) Test connectivity from a separate ephemeral container:
+    # 2) Test connectivity from a separate ephemeral container
+    #    using your custom image with CA certs, 'my-mongo-with-certs'
     log "Testing connectivity to MongoDB with auth & TLS..."
     docker run --rm --network=internal \
       -v "$TEMP_CERT_DIR:/certs:ro" \
-      mongo:6.0 \
+      my-mongo-with-certs \
       mongosh "mongodb://mongodb.cloudlunacy.uk:27017" \
         --tls \
         --tlsCAFile /certs/chain.pem \
-        --tlsCertificateKeyFile /certs/combined.pem \
         -u "$MONGO_INITDB_ROOT_USERNAME" \
         -p "$MONGO_INITDB_ROOT_PASSWORD" \
         --authenticationDatabase admin \
         --eval "db.runCommand({ ping: 1 })"
 
-    # 3) Create the management user with the root credentials:
+    # 3) Create the management user with the root credentials
     log "Creating management user..."
     MONGO_COMMAND="db.getSiblingDB('admin').createUser({
         user: '$MONGO_MANAGER_USERNAME',
@@ -522,17 +522,16 @@ create_mongo_management_user() {
 
     docker run --rm --network=internal \
       -v "$TEMP_CERT_DIR:/certs:ro" \
-      mongo:6.0 \
+      my-mongo-with-certs \
       mongosh "mongodb://mongodb.cloudlunacy.uk:27017" \
         --tls \
         --tlsCAFile /certs/chain.pem \
-        --tlsCertificateKeyFile /certs/combined.pem \
         -u "$MONGO_INITDB_ROOT_USERNAME" \
         -p "$MONGO_INITDB_ROOT_PASSWORD" \
         --authenticationDatabase admin \
         --eval "$MONGO_COMMAND"
 
-    # 4) Remove temporary cert directory from the host
+    # 4) Cleanup
     rm -rf "$TEMP_CERT_DIR"
 }
 
