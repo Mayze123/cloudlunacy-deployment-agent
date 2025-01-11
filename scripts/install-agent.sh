@@ -406,7 +406,9 @@ services:
       - mongo_data:/data/db
       - /etc/ssl/mongo:/etc/ssl/mongo:ro
     networks:
-      - internal
+      internal:
+        aliases:
+          - mongodb.cloudlunacy.uk   
     healthcheck:
       test: >
         mongosh --host mongodb
