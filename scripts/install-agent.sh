@@ -361,6 +361,9 @@ EOF
 setup_mongodb() {
     log "Setting up MongoDB with phased approach..."
     
+    # Configure environment first
+    configure_environment
+    
     # Phase 1: Start MongoDB without auth or TLS to verify basic connectivity
     log "Phase 1: Starting MongoDB without security features..."
     
@@ -392,15 +395,28 @@ networks:
     external: true
 COMPOSE
 
-    cd "$MONGODB_DIR"
-    sudo -u "$USERNAME" docker-compose -f docker-compose.mongodb.yml down
+    # Set correct ownership and permissions for the compose file
+    chown "$USERNAME":"$USERNAME" "$MONGODB_DIR/docker-compose.mongodb.yml"
+    chmod 640 "$MONGODB_DIR/docker-compose.mongodb.yml"
+
+    # Ensure we're in the correct directory
+    cd "$MONGODB_DIR" || {
+        log_error "Failed to change to MongoDB directory"
+        return 1
+    }
+
+    # Stop any existing containers
+    log "Stopping any existing MongoDB containers..."
+    sudo -u "$USERNAME" docker-compose -f docker-compose.mongodb.yml down || true
+    
+    # Start MongoDB in basic mode
+    log "Starting MongoDB in basic mode..."
     sudo -u "$USERNAME" docker-compose -f docker-compose.mongodb.yml up -d
 
-    # Wait for basic MongoDB to be healthy
-    log "Waiting for basic MongoDB to be healthy..."
+    # Test basic connectivity
+    log "Waiting for MongoDB to start..."
     sleep 30
     
-    # Test basic connectivity
     if ! docker exec mongodb mongosh --eval "db.adminCommand('ping')"; then
         log_error "Basic MongoDB connectivity failed"
         docker logs mongodb
@@ -411,16 +427,6 @@ COMPOSE
 
     # Phase 2: Configure with TLS
     log "Phase 2: Configuring TLS..."
-    
-    # Verify SSL files
-    if [ ! -f "/etc/ssl/mongo/combined.pem" ] || [ ! -f "/etc/ssl/mongo/chain.pem" ]; then
-        log_error "SSL certificate files missing!"
-        return 1
-    fi
-    
-    # Test SSL file permissions
-    log "Testing SSL file permissions..."
-    ls -l /etc/ssl/mongo/combined.pem /etc/ssl/mongo/chain.pem
     
     # Generate secure credentials
     MONGO_INITDB_ROOT_USERNAME=$(openssl rand -hex 12)
@@ -446,6 +452,7 @@ EOF
     "
 
     # Update compose file with security features
+    log "Updating MongoDB configuration with security features..."
     cat <<COMPOSE > "$MONGODB_DIR/docker-compose.mongodb.yml"
 version: '3.8'
 
@@ -470,7 +477,7 @@ services:
     networks:
       internal:
         aliases:
-          - mongodb.cloudlunacy.uk
+          - $DOMAIN
     healthcheck:
       test: >
         mongosh 
@@ -497,21 +504,19 @@ COMPOSE
     log "Restarting MongoDB with security features..."
     sudo -u "$USERNAME" docker-compose --env-file "$MONGO_ENV_FILE" -f docker-compose.mongodb.yml up -d
 
-    # Wait for secure MongoDB to be healthy
+    # Final verification
+    log "Verifying secure MongoDB setup..."
     sleep 30
     
-    # Test secure connectivity
-    log "Testing secure connection..."
-    docker exec mongodb mongosh \
+    if ! docker exec mongodb mongosh \
         --tls \
         --tlsAllowInvalidHostnames \
         --tlsCAFile=/etc/ssl/mongo/chain.pem \
         -u "$MONGO_INITDB_ROOT_USERNAME" \
         -p "$MONGO_INITDB_ROOT_PASSWORD" \
-        --eval "db.adminCommand('ping')"
-
-    if [ $? -ne 0 ]; then
-        log_error "Secure MongoDB connection failed"
+        --eval "db.adminCommand('ping')"; then
+        
+        log_error "Secure MongoDB setup failed"
         docker logs mongodb
         return 1
     fi
@@ -622,6 +627,34 @@ EOF
     chown "$USERNAME":"$USERNAME" "$ENV_FILE"
     chmod 600 "$ENV_FILE"
     log "Environment variables configured."
+}
+
+configure_environment() {
+    # Base configuration
+    export BASE_DIR="/opt/cloudlunacy"
+    export USERNAME="cloudlunacy"
+    export MONGODB_DIR="$BASE_DIR/mongodb"
+    export MONGO_ENV_FILE="$MONGODB_DIR/.env"
+
+    # Create necessary directories
+    mkdir -p "$MONGODB_DIR"
+    
+    # Set ownership
+    chown -R "$USERNAME":"$USERNAME" "$MONGODB_DIR"
+    chmod 750 "$MONGODB_DIR"
+
+    # Verify environment
+    log "Environment Configuration:"
+    log "BASE_DIR = $BASE_DIR"
+    log "USERNAME = $USERNAME"
+    log "MONGODB_DIR = $MONGODB_DIR"
+    log "MONGO_ENV_FILE = $MONGO_ENV_FILE"
+
+    # Create Docker network if it doesn't exist
+    if ! docker network ls | grep -q "internal"; then
+        log "Creating internal Docker network..."
+        docker network create internal
+    fi
 }
 
 display_mongodb_credentials() {
