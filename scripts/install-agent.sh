@@ -466,25 +466,29 @@ create_mongo_management_user() {
         ]
     });"
 
-    # Wait until MongoDB is healthy
+    # 1) Wait until MongoDB is healthy
     if ! wait_for_mongodb_health; then
         log_error "MongoDB container not healthy, cannot create user."
         exit 1
     fi
 
-    # Run the creation command from an ephemeral container
+    # 2) Add a short sleep for extra safety
+    sleep 5
+
+    # 3) Create the user with forced SNI
     docker run --rm --network=internal \
         -v /etc/ssl/mongo:/certs:ro \
         mongo:6.0 \
         mongosh --host mongodb.cloudlunacy.uk \
                 --tls \
                 --tlsCAFile=/certs/chain.pem \
+                --tlsHostnameOverride mongodb.cloudlunacy.uk \
                 -u "$MONGO_INITDB_ROOT_USERNAME" \
                 -p "$MONGO_INITDB_ROOT_PASSWORD" \
                 --authenticationDatabase admin \
                 --eval "$MONGO_COMMAND"
 
-    # Optionally store these new credentials in your .env or secrets manager
+    # Store these new credentials if needed
     echo "MONGO_MANAGER_USERNAME=$MONGO_MANAGER_USERNAME" >> "$MONGO_ENV_FILE"
     echo "MONGO_MANAGER_PASSWORD=$MONGO_MANAGER_PASSWORD" >> "$MONGO_ENV_FILE"
     log "Manager user created successfully."
