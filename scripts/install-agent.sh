@@ -482,7 +482,6 @@ create_mongo_management_user() {
         mongosh --host mongodb.cloudlunacy.uk \
                 --tls \
                 --tlsCAFile=/certs/chain.pem \
-                --tlsHostnameOverride mongodb.cloudlunacy.uk \
                 -u "$MONGO_INITDB_ROOT_USERNAME" \
                 -p "$MONGO_INITDB_ROOT_PASSWORD" \
                 --authenticationDatabase admin \
