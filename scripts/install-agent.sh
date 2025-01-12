@@ -378,8 +378,8 @@ EOF
     chown "$USERNAME":"$USERNAME" "$MONGO_ENV_FILE"
     chmod 600 "$MONGO_ENV_FILE"
 
-    # Create Docker Compose file with modified configuration
-    cat <<'COMPOSE' > "$MONGODB_DIR/docker-compose.mongodb.yml"
+    # Create Docker Compose file with domain configuration
+    cat <<COMPOSE > "$MONGODB_DIR/docker-compose.mongodb.yml"
 version: '3.8'
 
 services:
@@ -388,8 +388,8 @@ services:
     container_name: mongodb
     restart: unless-stopped
     environment:
-      MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME}
-      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD}
+      MONGO_INITDB_ROOT_USERNAME: \${MONGO_INITDB_ROOT_USERNAME}
+      MONGO_INITDB_ROOT_PASSWORD: \${MONGO_INITDB_ROOT_PASSWORD}
     command: >
       mongod
       --auth
@@ -401,15 +401,18 @@ services:
       - mongo_data:/data/db
       - /etc/ssl/mongo:/etc/ssl/mongo:ro
     networks:
-      - internal
+      internal:
+        aliases:
+          - $DOMAIN
     healthcheck:
       test: >
-        mongosh --tls 
+        mongosh 
+        --tls 
         --tlsCAFile=/etc/ssl/mongo/chain.pem
-        --host localhost
+        --host $DOMAIN
         --port 27017
-        -u $${MONGO_INITDB_ROOT_USERNAME}
-        -p $${MONGO_INITDB_ROOT_PASSWORD}
+        -u \$\${MONGO_INITDB_ROOT_USERNAME}
+        -p \$\${MONGO_INITDB_ROOT_PASSWORD}
         --eval "db.adminCommand({ ping: 1 })"
       interval: 30s
       timeout: 10s
@@ -472,11 +475,11 @@ EOF
     # Add a short sleep for extra safety
     sleep 5
 
-    # Create the user using mongosh with modified connection parameters
+    # Create the user using mongosh with domain name
     docker exec mongodb mongosh \
         --tls \
         --tlsCAFile=/etc/ssl/mongo/chain.pem \
-        --host localhost \
+        --host "$DOMAIN" \
         --port 27017 \
         -u "$MONGO_INITDB_ROOT_USERNAME" \
         -p "$MONGO_INITDB_ROOT_PASSWORD" \
