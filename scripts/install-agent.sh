@@ -411,7 +411,7 @@ services:
           - mongodb.cloudlunacy.uk   
     healthcheck:
       test: >
-        mongosh --host mongodb
+        mongosh --host mongodb.cloudlunacy.uk
                 --port 27017
                 --tls
                 --tlsCAFile=/etc/ssl/mongo/chain.pem
@@ -476,7 +476,7 @@ create_mongo_management_user() {
     docker run --rm --network=internal \
         -v /etc/ssl/mongo:/certs:ro \
         mongo:6.0 \
-        mongosh --host mongodb \
+        mongosh --host mongodb.cloudlunacy.uk \
                 --tls \
                 --tlsCAFile=/certs/chain.pem \
                 -u "$MONGO_INITDB_ROOT_USERNAME" \
