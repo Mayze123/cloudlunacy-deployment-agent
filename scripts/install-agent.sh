@@ -879,6 +879,7 @@ main() {
     BACKEND_BASE_URL="${4:-https://your-default-backend-url}"
     BACKEND_URL="${BACKEND_BASE_URL}"
 
+    configure_environment
     detect_os
     log "Detected OS: $OS_TYPE $OS_VERSION"
 
