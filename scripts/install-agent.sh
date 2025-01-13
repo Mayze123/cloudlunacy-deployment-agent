@@ -848,16 +848,35 @@ verify_installation() {
     
     if ! systemctl is-active --quiet cloudlunacy; then
         log_error "CloudLunacy Deployment Agent failed to start. Debug information:"
+        
+        # Check Node.js installation
+        log_error "------- Node.js Version -------"
+        node --version
+        
+        # Check agent.js existence and permissions
+        log_error "------- Agent.js Status -------"
+        ls -l /opt/cloudlunacy/agent.js
+        
+        # Service Logs with more context
         log_error "------- Service Status -------"
         systemctl status cloudlunacy
-        log_error "------- Service Logs -------"
-        journalctl -u cloudlunacy -n 10 --no-pager
-        log_error "------- Environment File -------"
+        
+        log_error "------- Detailed Service Logs -------"
+        journalctl -u cloudlunacy -n 50 --no-pager
+        
+        log_error "------- Environment File Contents -------"
         cat "$BASE_DIR/.env"
-        log_error "------- CA File Status -------"
-        ls -l /etc/ssl/mongo/chain.pem
-        log_error "------- Service File Contents -------"
-        cat /etc/systemd/system/cloudlunacy.service
+        
+        log_error "------- MongoDB CA File Status -------"
+        ls -la /etc/ssl/mongo/
+        
+        log_error "------- Agent Log File -------"
+        if [ -f "$BASE_DIR/logs/agent.log" ]; then
+            tail -n 50 "$BASE_DIR/logs/agent.log"
+        else
+            echo "Agent log file not found at $BASE_DIR/logs/agent.log"
+        fi
+
         return 1
     fi
     
