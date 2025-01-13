@@ -516,7 +516,7 @@ create_mongo_management_user() {
     MONGO_MANAGER_USERNAME="manager"
     MONGO_MANAGER_PASSWORD=$(openssl rand -hex 24)
 
-    # First check if the user exists
+    # Check if user exists
     USER_EXISTS=$(docker exec mongodb mongosh \
         --tls \
         --tlsAllowInvalidCertificates \
@@ -529,11 +529,14 @@ create_mongo_management_user() {
 
     if [ -n "$USER_EXISTS" ]; then
         log "Management user already exists, skipping creation"
-        # Get existing password from env file if it exists
-        EXISTING_PASSWORD=$(grep MONGO_MANAGER_PASSWORD "$MONGO_ENV_FILE" | cut -d '=' -f2)
-        if [ -n "$EXISTING_PASSWORD" ]; then
-            MONGO_MANAGER_PASSWORD=$EXISTING_PASSWORD
-        fi
+        # Update env file with credentials
+        {
+            echo "MONGO_INITDB_ROOT_USERNAME=$MONGO_INITDB_ROOT_USERNAME"
+            echo "MONGO_INITDB_ROOT_PASSWORD=$MONGO_INITDB_ROOT_PASSWORD"
+            echo "MONGO_MANAGER_USERNAME=$MONGO_MANAGER_USERNAME"
+            echo "MONGO_MANAGER_PASSWORD=$MONGO_MANAGER_PASSWORD"
+        } > "$MONGO_ENV_FILE"
+        chmod 600 "$MONGO_ENV_FILE"
     else
         # Create management user with proper authentication
         docker exec mongodb mongosh \
@@ -553,18 +556,17 @@ create_mongo_management_user() {
                     ]
                 })
             "
+        
+        # Save credentials to env file
+        {
+            echo "MONGO_INITDB_ROOT_USERNAME=$MONGO_INITDB_ROOT_USERNAME"
+            echo "MONGO_INITDB_ROOT_PASSWORD=$MONGO_INITDB_ROOT_PASSWORD"
+            echo "MONGO_MANAGER_USERNAME=$MONGO_MANAGER_USERNAME"
+            echo "MONGO_MANAGER_PASSWORD=$MONGO_MANAGER_PASSWORD"
+        } > "$MONGO_ENV_FILE"
+        chmod 600 "$MONGO_ENV_FILE"
     fi
 
-    # Update env file with manager credentials
-    if ! grep -q "MONGO_MANAGER_USERNAME" "$MONGO_ENV_FILE"; then
-        echo "MONGO_MANAGER_USERNAME=$MONGO_MANAGER_USERNAME" >> "$MONGO_ENV_FILE"
-    fi
-    if ! grep -q "MONGO_MANAGER_PASSWORD" "$MONGO_ENV_FILE"; then
-        echo "MONGO_MANAGER_PASSWORD=$MONGO_MANAGER_PASSWORD" >> "$MONGO_ENV_FILE"
-    fi
-
-    log "Management user configuration completed"
-    
     # Verify management user access
     log "Verifying management user access..."
     docker exec mongodb mongosh \
@@ -575,6 +577,9 @@ create_mongo_management_user() {
         -u "$MONGO_MANAGER_USERNAME" \
         -p "$MONGO_MANAGER_PASSWORD" \
         --eval "db.adminCommand('ping')"
+
+    log "Management user setup completed"
+    return 0
 }
 
 adjust_firewall_settings() {
