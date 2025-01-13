@@ -834,7 +834,7 @@ setup_service() {
     log "Setting up CloudLunacy Deployment Agent as a systemd service..."
     SERVICE_FILE="/etc/systemd/system/cloudlunacy.service"
 
-    # (Optional) verify /etc/ssl/mongo/chain.pem is readable by $USERNAME
+    # Verify that the user cloudlunacy can read chain.pem
     if ! sudo -u "$USERNAME" test -r "/etc/ssl/mongo/chain.pem"; then
         log_error "CA file not readable by $USERNAME"
         ls -l /etc/ssl/mongo/chain.pem
@@ -851,20 +851,20 @@ Requires=docker.service
 Type=simple
 User=$USERNAME
 Group=docker
-Environment=HOME=$BASE_DIR
+Environment=HOME=/opt/cloudlunacy
 Environment=NODE_ENV=production
 Environment=SSL_CERT_DIR=/etc/ssl/mongo
 Environment=SSL_CERT_FILE=/etc/ssl/mongo/chain.pem
 Environment=NODE_EXTRA_CA_CERTS=/etc/ssl/mongo/chain.pem
-EnvironmentFile=/opt/cloudlunacy/.env       # <-- Use an absolute path here!
-WorkingDirectory=$BASE_DIR
-ExecStart=/usr/bin/node $BASE_DIR/agent.js
+EnvironmentFile=/opt/cloudlunacy/.env
+WorkingDirectory=/opt/cloudlunacy
+ExecStart=/usr/bin/node /opt/cloudlunacy/agent.js
 Restart=on-failure
 RestartSec=10
 
 ProtectSystem=full
 ReadOnlyPaths=/etc/ssl/mongo
-ReadWritePaths=$BASE_DIR
+ReadWritePaths=/opt/cloudlunacy
 
 [Install]
 WantedBy=multi-user.target
@@ -873,26 +873,19 @@ EOF
     chmod 644 "$SERVICE_FILE"
     systemctl daemon-reload
 
-    # It's a good idea to enable as well, so it starts on reboot
+    # Enable for autostart
     systemctl enable cloudlunacy
+
     systemctl stop cloudlunacy || true
     sleep 2
     systemctl start cloudlunacy
-    
-    # Verify service status with more detailed diagnostics
-    sleep 5
+
+    # Check service status
     if ! systemctl is-active --quiet cloudlunacy; then
-        log_error "Service failed to start. Diagnostics:"
-        echo "CA File permissions:"
-        ls -l /etc/ssl/mongo/chain.pem
-        echo "Environment file permissions:"
-        ls -l "$BASE_DIR/.env"
-        echo "Service logs:"
+        log_error "Service failed to start. Checking logs..."
         journalctl -u cloudlunacy --no-pager -n 50
         return 1
     fi
-
-    return 0
 }
 
 verify_installation() {
