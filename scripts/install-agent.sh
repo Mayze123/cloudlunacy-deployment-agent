@@ -609,23 +609,21 @@ configure_env() {
     log "Configuring environment variables..."
     ENV_FILE="$BASE_DIR/.env"
     
-    # First ensure base directory exists
-    mkdir -p "$BASE_DIR"
-    
+    # Verify CA file first
+    verify_ca_file || return 1
+
+    # Ensure MongoDB credentials are available
     if [ ! -f "$MONGO_ENV_FILE" ]; then
-        log_error "MongoDB environment file not found at $MONGO_ENV_FILE."
+        log_error "MongoDB environment file not found at $MONGO_ENV_FILE"
         return 1
     fi
 
     # Read MongoDB environment variables
     source "$MONGO_ENV_FILE"
 
-    # Create a temporary file first to ensure atomic write
-    TMP_ENV_FILE=$(mktemp)
-    
-    # Write to temporary file
-    cat > "$TMP_ENV_FILE" << EOL
-BACKEND_URL=${BACKEND_URL}
+    # Create environment file with absolute paths
+    cat > "$ENV_FILE" << EOL
+BACKEND_URL=${BACKEND_URL:-https://your-default-backend-url}
 AGENT_API_TOKEN=${AGENT_TOKEN}
 SERVER_ID=${SERVER_ID}
 MONGO_MANAGER_USERNAME=${MONGO_MANAGER_USERNAME}
@@ -634,44 +632,36 @@ MONGO_HOST=${DOMAIN}
 MONGO_PORT=27017
 MONGO_CA_FILE=/etc/ssl/mongo/chain.pem
 MONGODB_CA_FILE=/etc/ssl/mongo/chain.pem
+SSL_CERT_FILE=/etc/ssl/mongo/chain.pem
+NODE_TLS_REJECT_UNAUTHORIZED=1
 EOL
 
-    # Move temporary file to final location
-    mv "$TMP_ENV_FILE" "$ENV_FILE"
-    
-    # Set permissions
+    # Set proper ownership and permissions
     chown "$USERNAME":"$USERNAME" "$ENV_FILE"
     chmod 600 "$ENV_FILE"
 
-    # Verify environment file was created
-    if [ ! -f "$ENV_FILE" ]; then
-        log_error "Failed to create environment file at $ENV_FILE"
+    # Verify environment file is readable
+    if ! sudo -u "$USERNAME" test -r "$ENV_FILE"; then
+        log_error "Environment file is not readable by $USERNAME"
         return 1
     fi
 
-    # Verify essential variables are present
-    if ! grep -q "MONGODB_CA_FILE" "$ENV_FILE"; then
-        log_error "Failed to write MONGODB_CA_FILE to environment file"
-        return 1
-    fi
+    # Verify all required variables are present
+    local required_vars=(
+        "MONGO_MANAGER_USERNAME"
+        "MONGO_MANAGER_PASSWORD"
+        "MONGO_CA_FILE"
+        "MONGODB_CA_FILE"
+    )
 
-    # Verify CA file exists and permissions
-    if [ ! -f "/etc/ssl/mongo/chain.pem" ]; then
-        log_error "MongoDB CA file not found at /etc/ssl/mongo/chain.pem"
-        return 1
-    fi
+    for var in "${required_vars[@]}"; do
+        if ! grep -q "^${var}=" "$ENV_FILE"; then
+            log_error "Missing required variable: $var"
+            return 1
+        fi
+    done
 
-    # Set CA file permissions
-    chown "$USERNAME":"$USERNAME" "/etc/ssl/mongo/chain.pem"
-    chmod 644 "/etc/ssl/mongo/chain.pem"
-
-    # Test file readability as service user
-    if ! sudo -u "$USERNAME" test -r "/etc/ssl/mongo/chain.pem"; then
-        log_error "MongoDB CA file is not readable by $USERNAME"
-        return 1
-    fi
-
-    log "Environment variables configured successfully."
+    log "Environment configured successfully"
     return 0
 }
 
@@ -701,6 +691,38 @@ configure_environment() {
         log "Creating internal Docker network..."
         docker network create internal
     fi
+}
+
+verify_ca_file() {
+    log "Verifying MongoDB CA file setup..."
+    local CA_FILE="/etc/ssl/mongo/chain.pem"
+    local CERT_DIR="/etc/letsencrypt/live/$DOMAIN"
+
+    # Ensure CA file exists and has correct content
+    if [ ! -f "$CA_FILE" ] || [ ! -s "$CA_FILE" ]; then
+        log "Recreating CA file from Let's Encrypt certificate..."
+        mkdir -p "/etc/ssl/mongo"
+        cp "$CERT_DIR/chain.pem" "$CA_FILE"
+    fi
+
+    # Set correct ownership and permissions
+    chown "$USERNAME":"$USERNAME" "$CA_FILE"
+    chmod 644 "$CA_FILE"
+
+    # Verify the file is readable by service user
+    if ! sudo -u "$USERNAME" test -r "$CA_FILE"; then
+        log_error "CA file is not readable by $USERNAME"
+        return 1
+    fi
+
+    # Verify file content
+    if ! openssl x509 -in "$CA_FILE" -text -noout >/dev/null 2>&1; then
+        log_error "Invalid CA file content"
+        return 1
+    fi
+
+    log "CA file verified successfully"
+    return 0
 }
 
 display_mongodb_credentials() {
@@ -835,43 +857,46 @@ EOF
 
 setup_service() {
     log "Setting up CloudLunacy Deployment Agent as a systemd service..."
+    
+    # Verify CA file and environment setup first
+    verify_ca_file || return 1
+    
     SERVICE_FILE="/etc/systemd/system/cloudlunacy.service"
-
-    # Wait for environment file to be ready
-    local max_attempts=5
-    local attempt=1
-    while [ ! -f "$BASE_DIR/.env" ] && [ $attempt -le $max_attempts ]; do
-        log "Waiting for environment file to be created (attempt $attempt/$max_attempts)..."
-        sleep 2
-        attempt=$((attempt + 1))
-    done
-
-    if [ ! -f "$BASE_DIR/.env" ]; then
-        log_error "Environment file not found after waiting. Aborting service setup."
-        return 1
-    fi
-
-    # Create service file
+    
+    # Create service file with proper file access
     cat > "$SERVICE_FILE" << EOF
 [Unit]
 Description=CloudLunacy Deployment Agent
-After=network.target docker.service
+After=network.target docker.service mongodb.service
 Requires=docker.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
 User=$USERNAME
 Group=docker
 Environment=HOME=$BASE_DIR
-Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=NODE_ENV=production
+Environment=SSL_CERT_FILE=/etc/ssl/mongo/chain.pem
 EnvironmentFile=$BASE_DIR/.env
 WorkingDirectory=$BASE_DIR
+
+# Pre-start verification
+ExecStartPre=/bin/bash -c 'test -f /etc/ssl/mongo/chain.pem && test -r /etc/ssl/mongo/chain.pem'
 ExecStart=/usr/bin/node $BASE_DIR/agent.js
-Restart=always
+
+Restart=on-failure
 RestartSec=10
 
-# Add specific paths that need to be readable
+# File access configuration
 ReadOnlyPaths=/etc/ssl/mongo/chain.pem
+ReadWritePaths=$BASE_DIR
+
+# Security settings
+ProtectSystem=strict
+ProtectHome=true
+NoNewPrivileges=true
 
 [Install]
 WantedBy=multi-user.target
@@ -879,33 +904,20 @@ EOF
 
     chmod 644 "$SERVICE_FILE"
 
-    # Create a systemd drop-in directory for additional configurations
-    mkdir -p "/etc/systemd/system/cloudlunacy.service.d"
-    
-    # Create an override file that ensures environment file is loaded
-    cat > "/etc/systemd/system/cloudlunacy.service.d/override.conf" << EOF
-[Service]
-EnvironmentFile=$BASE_DIR/.env
-EOF
-
-    chmod 644 "/etc/systemd/system/cloudlunacy.service.d/override.conf"
-
-    # Reload systemd and start service
+    # Reload and restart
     systemctl daemon-reload
     systemctl enable cloudlunacy
     systemctl restart cloudlunacy
 
-    # Wait for service to start
+    # Verify service started successfully
     sleep 5
-
-    # Check service status
     if ! systemctl is-active --quiet cloudlunacy; then
         log_error "Service failed to start. Checking logs..."
         journalctl -u cloudlunacy --no-pager -n 50
         return 1
     fi
 
-    log "CloudLunacy service set up and started successfully."
+    log "Service setup completed successfully"
     return 0
 }
 
