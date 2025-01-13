@@ -609,59 +609,35 @@ configure_env() {
     log "Configuring environment variables..."
     ENV_FILE="$BASE_DIR/.env"
     
-    # Verify CA file first
-    verify_ca_file || return 1
-
-    # Ensure MongoDB credentials are available
-    if [ ! -f "$MONGO_ENV_FILE" ]; then
-        log_error "MongoDB environment file not found at $MONGO_ENV_FILE"
-        return 1
-    fi
-
-    # Read MongoDB environment variables
+    # First ensure directory exists
+    mkdir -p "$BASE_DIR"
+    
+    # Source MongoDB environment
     source "$MONGO_ENV_FILE"
-
-    # Create environment file with absolute paths
+    
+    # Create environment file with explicit values
     cat > "$ENV_FILE" << EOL
-BACKEND_URL=${BACKEND_URL:-https://your-default-backend-url}
-AGENT_API_TOKEN=${AGENT_TOKEN}
-SERVER_ID=${SERVER_ID}
-MONGO_MANAGER_USERNAME=${MONGO_MANAGER_USERNAME}
-MONGO_MANAGER_PASSWORD=${MONGO_MANAGER_PASSWORD}
-MONGO_HOST=${DOMAIN}
+BACKEND_URL="${BACKEND_URL:-https://your-default-backend-url}"
+AGENT_API_TOKEN="${AGENT_TOKEN}"
+SERVER_ID="${SERVER_ID}"
+MONGO_MANAGER_USERNAME="${MONGO_MANAGER_USERNAME}"
+MONGO_MANAGER_PASSWORD="${MONGO_MANAGER_PASSWORD}"
+MONGO_HOST="mongodb.cloudlunacy.uk"
 MONGO_PORT=27017
 MONGO_CA_FILE=/etc/ssl/mongo/chain.pem
 MONGODB_CA_FILE=/etc/ssl/mongo/chain.pem
-SSL_CERT_FILE=/etc/ssl/mongo/chain.pem
-NODE_TLS_REJECT_UNAUTHORIZED=1
+NODE_ENV=production
 EOL
 
-    # Set proper ownership and permissions
-    chown "$USERNAME":"$USERNAME" "$ENV_FILE"
+    chown "$USERNAME:$USERNAME" "$ENV_FILE"
     chmod 600 "$ENV_FILE"
-
-    # Verify environment file is readable
-    if ! sudo -u "$USERNAME" test -r "$ENV_FILE"; then
-        log_error "Environment file is not readable by $USERNAME"
+    
+    # Verify file
+    if [ ! -s "$ENV_FILE" ]; then
+        log_error "Environment file is empty or not created properly"
         return 1
     fi
-
-    # Verify all required variables are present
-    local required_vars=(
-        "MONGO_MANAGER_USERNAME"
-        "MONGO_MANAGER_PASSWORD"
-        "MONGO_CA_FILE"
-        "MONGODB_CA_FILE"
-    )
-
-    for var in "${required_vars[@]}"; do
-        if ! grep -q "^${var}=" "$ENV_FILE"; then
-            log_error "Missing required variable: $var"
-            return 1
-        fi
-    done
-
-    log "Environment configured successfully"
+    
     return 0
 }
 
@@ -857,20 +833,25 @@ EOF
 
 setup_service() {
     log "Setting up CloudLunacy Deployment Agent as a systemd service..."
-    
-    # Verify CA file and environment setup first
-    verify_ca_file || return 1
-    
     SERVICE_FILE="/etc/systemd/system/cloudlunacy.service"
     
-    # Create service file with proper file access
+    # First, verify that all required files exist
+    if [ ! -f "$BASE_DIR/.env" ]; then
+        log_error "Environment file $BASE_DIR/.env does not exist"
+        return 1
+    fi
+
+    if [ ! -f "/etc/ssl/mongo/chain.pem" ]; then
+        log_error "CA file /etc/ssl/mongo/chain.pem does not exist"
+        return 1
+    fi
+
+    # Create service with absolute paths
     cat > "$SERVICE_FILE" << EOF
 [Unit]
 Description=CloudLunacy Deployment Agent
-After=network.target docker.service mongodb.service
+After=network.target docker.service
 Requires=docker.service
-StartLimitIntervalSec=300
-StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -878,14 +859,11 @@ User=$USERNAME
 Group=docker
 Environment=HOME=$BASE_DIR
 Environment=NODE_ENV=production
-Environment=SSL_CERT_FILE=/etc/ssl/mongo/chain.pem
-EnvironmentFile=$BASE_DIR/.env
+Environment=MONGO_CA_FILE=/etc/ssl/mongo/chain.pem
+Environment=MONGODB_CA_FILE=/etc/ssl/mongo/chain.pem
+EnvironmentFile=${BASE_DIR}/.env
 WorkingDirectory=$BASE_DIR
-
-# Pre-start verification
-ExecStartPre=/bin/bash -c 'test -f /etc/ssl/mongo/chain.pem && test -r /etc/ssl/mongo/chain.pem'
 ExecStart=/usr/bin/node $BASE_DIR/agent.js
-
 Restart=on-failure
 RestartSec=10
 
@@ -893,31 +871,33 @@ RestartSec=10
 ReadOnlyPaths=/etc/ssl/mongo/chain.pem
 ReadWritePaths=$BASE_DIR
 
-# Security settings
-ProtectSystem=strict
-ProtectHome=true
-NoNewPrivileges=true
-
 [Install]
 WantedBy=multi-user.target
 EOF
 
+    # Set correct permissions
     chmod 644 "$SERVICE_FILE"
 
-    # Reload and restart
+    # Force reload systemd manager configuration
     systemctl daemon-reload
+    
+    # Stop the service if it's running
+    systemctl stop cloudlunacy || true
+    
+    # Start fresh
     systemctl enable cloudlunacy
-    systemctl restart cloudlunacy
+    systemctl start cloudlunacy
 
-    # Verify service started successfully
+    # Wait for service to stabilize
     sleep 5
+    
+    # Check service status
     if ! systemctl is-active --quiet cloudlunacy; then
         log_error "Service failed to start. Checking logs..."
         journalctl -u cloudlunacy --no-pager -n 50
         return 1
     fi
 
-    log "Service setup completed successfully"
     return 0
 }
 
