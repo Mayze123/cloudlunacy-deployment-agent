@@ -291,12 +291,15 @@ create_combined_certificate() {
 
     # Combine private key and full chain into single .pem
     cat "$CERT_DIR/privkey.pem" "$CERT_DIR/fullchain.pem" > "$SSL_DIR/combined.pem"
-    # Place chain.pem separately if needed
+    
+    # Place chain.pem separately - this is the critical file for client connections
     cp "$CERT_DIR/chain.pem" "$SSL_DIR/chain.pem"
 
-    # Correct ownership and permissions
-    chown -R 999:999 "$SSL_DIR"
-    chmod 600 "$SSL_DIR"/*.pem
+    # Set permissions that work for both MongoDB and the service user
+    chown "$USERNAME:docker" "$SSL_DIR"          # Service user owns directory
+    chmod 750 "$SSL_DIR"                         # Directory is traversable
+    chown "$USERNAME:docker" "$SSL_DIR"/*.pem    # Service user owns files
+    chmod 644 "$SSL_DIR"/*.pem                   # Files are readable
 
     log "Certificate files created at $SSL_DIR"
 }
@@ -834,19 +837,15 @@ EOF
 setup_service() {
     log "Setting up CloudLunacy Deployment Agent as a systemd service..."
     SERVICE_FILE="/etc/systemd/system/cloudlunacy.service"
-    
-    # First, verify that all required files exist
-    if [ ! -f "$BASE_DIR/.env" ]; then
-        log_error "Environment file $BASE_DIR/.env does not exist"
+
+    # Verify file access before proceeding
+    if ! sudo -u "$USERNAME" test -r "/etc/ssl/mongo/chain.pem"; then
+        log_error "CA file not readable by $USERNAME"
+        ls -l /etc/ssl/mongo/chain.pem
         return 1
     fi
 
-    if [ ! -f "/etc/ssl/mongo/chain.pem" ]; then
-        log_error "CA file /etc/ssl/mongo/chain.pem does not exist"
-        return 1
-    fi
-
-    # Create service with absolute paths
+    # Create service with explicit CA file environment
     cat > "$SERVICE_FILE" << EOF
 [Unit]
 Description=CloudLunacy Deployment Agent
@@ -859,41 +858,39 @@ User=$USERNAME
 Group=docker
 Environment=HOME=$BASE_DIR
 Environment=NODE_ENV=production
-Environment=MONGO_CA_FILE=/etc/ssl/mongo/chain.pem
-Environment=MONGODB_CA_FILE=/etc/ssl/mongo/chain.pem
-EnvironmentFile=${BASE_DIR}/.env
+Environment=SSL_CERT_DIR=/etc/ssl/mongo
+Environment=SSL_CERT_FILE=/etc/ssl/mongo/chain.pem
+Environment=NODE_EXTRA_CA_CERTS=/etc/ssl/mongo/chain.pem
+EnvironmentFile=$BASE_DIR/.env
 WorkingDirectory=$BASE_DIR
 ExecStart=/usr/bin/node $BASE_DIR/agent.js
 Restart=on-failure
 RestartSec=10
 
-# File access configuration
-ReadOnlyPaths=/etc/ssl/mongo/chain.pem
+# Security directives
+ProtectSystem=full
+ReadOnlyPaths=/etc/ssl/mongo
 ReadWritePaths=$BASE_DIR
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-    # Set correct permissions
     chmod 644 "$SERVICE_FILE"
-
-    # Force reload systemd manager configuration
     systemctl daemon-reload
-    
-    # Stop the service if it's running
     systemctl stop cloudlunacy || true
-    
-    # Start fresh
-    systemctl enable cloudlunacy
+    sleep 2
     systemctl start cloudlunacy
-
-    # Wait for service to stabilize
-    sleep 5
     
-    # Check service status
+    # Verify service status with more detailed diagnostics
+    sleep 5
     if ! systemctl is-active --quiet cloudlunacy; then
-        log_error "Service failed to start. Checking logs..."
+        log_error "Service failed to start. Diagnostics:"
+        echo "CA File permissions:"
+        ls -l /etc/ssl/mongo/chain.pem
+        echo "Environment file permissions:"
+        ls -l "$BASE_DIR/.env"
+        echo "Service logs:"
         journalctl -u cloudlunacy --no-pager -n 50
         return 1
     fi
