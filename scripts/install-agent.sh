@@ -615,36 +615,42 @@ configure_env() {
         exit 1
     fi
 
-    # First write to a temporary file to ensure atomic write
-    TMP_ENV_FILE=$(mktemp)
-    cat <<EOF > "$TMP_ENV_FILE"
-BACKEND_URL=$BACKEND_URL
-AGENT_API_TOKEN=$AGENT_TOKEN
-SERVER_ID=$SERVER_ID
-MONGO_MANAGER_USERNAME=$MONGO_MANAGER_USERNAME
-MONGO_MANAGER_PASSWORD=$MONGO_MANAGER_PASSWORD
-MONGO_HOST=$DOMAIN
+    # Create environment file with proper escaping and quoting
+    cat <<EOF > "$ENV_FILE"
+BACKEND_URL="${BACKEND_URL}"
+AGENT_API_TOKEN="${AGENT_TOKEN}"
+SERVER_ID="${SERVER_ID}"
+MONGO_MANAGER_USERNAME="${MONGO_MANAGER_USERNAME}"
+MONGO_MANAGER_PASSWORD="${MONGO_MANAGER_PASSWORD}"
+MONGO_HOST="${DOMAIN}"
 MONGO_PORT=27017
 MONGO_CA_FILE=/etc/ssl/mongo/chain.pem
 MONGODB_CA_FILE=/etc/ssl/mongo/chain.pem
 EOF
 
-    # Move the temporary file to the final location
-    mv "$TMP_ENV_FILE" "$ENV_FILE"
     chown "$USERNAME":"$USERNAME" "$ENV_FILE"
     chmod 600 "$ENV_FILE"
 
-    # Verify the file contents
+    # Verify environment file contents
     log "Verifying environment file contents..."
     if ! grep -q "MONGODB_CA_FILE" "$ENV_FILE"; then
         log_error "Failed to write MONGODB_CA_FILE to environment file"
         return 1
     fi
 
-    # Also ensure the CA file permissions are correct
+    # Ensure the CA file exists and has correct permissions
     if [ -f "/etc/ssl/mongo/chain.pem" ]; then
         chown "$USERNAME":"$USERNAME" "/etc/ssl/mongo/chain.pem"
         chmod 644 "/etc/ssl/mongo/chain.pem"
+    else
+        log_error "MongoDB CA file not found at /etc/ssl/mongo/chain.pem"
+        return 1
+    fi
+
+    # Verify the CA file is readable by the service user
+    if ! sudo -u "$USERNAME" test -r "/etc/ssl/mongo/chain.pem"; then
+        log_error "MongoDB CA file is not readable by $USERNAME"
+        return 1
     fi
 
     log "Environment variables configured."
@@ -812,6 +818,7 @@ setup_service() {
     log "Setting up CloudLunacy Deployment Agent as a systemd service..."
     SERVICE_FILE="/etc/systemd/system/cloudlunacy.service"
 
+    # Create service file with proper environment configuration
     cat <<EOF > "$SERVICE_FILE"
 [Unit]
 Description=CloudLunacy Deployment Agent
@@ -819,6 +826,7 @@ After=network.target docker.service
 Requires=docker.service
 
 [Service]
+Type=simple
 ExecStart=/usr/bin/node $BASE_DIR/agent.js
 WorkingDirectory=$BASE_DIR
 Restart=always
@@ -829,13 +837,39 @@ Environment=HOME=$BASE_DIR
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 EnvironmentFile=$BASE_DIR/.env
 
+# Ensure we can read the CA file
+ReadOnlyPaths=/etc/ssl/mongo/chain.pem
+
 [Install]
 WantedBy=multi-user.target
 EOF
 
+    # Set correct permissions on service file
+    chmod 644 "$SERVICE_FILE"
+
+    # Create systemd override directory
+    mkdir -p "/etc/systemd/system/cloudlunacy.service.d"
+    
+    # Create override file to ensure environment is loaded
+    cat <<EOF > "/etc/systemd/system/cloudlunacy.service.d/override.conf"
+[Service]
+EnvironmentFile=$BASE_DIR/.env
+EOF
+
+    chmod 644 "/etc/systemd/system/cloudlunacy.service.d/override.conf"
+
+    # Reload systemd and enable/start service
     systemctl daemon-reload
     systemctl enable cloudlunacy
     systemctl start cloudlunacy
+
+    # Wait for service to start and verify its status
+    sleep 5
+    if ! systemctl is-active --quiet cloudlunacy; then
+        log_error "Service failed to start. Checking logs..."
+        journalctl -u cloudlunacy --no-pager -n 50
+        return 1
+    fi
 
     log "CloudLunacy service set up and started."
 }
