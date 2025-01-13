@@ -851,11 +851,13 @@ verify_installation() {
         log_error "------- Service Status -------"
         systemctl status cloudlunacy
         log_error "------- Service Logs -------"
-        journalctl -u cloudlunacy -n 50 --no-pager
+        journalctl -u cloudlunacy -n 10 --no-pager
         log_error "------- Environment File -------"
         cat "$BASE_DIR/.env"
-        log_error "------- CA File Permissions -------"
+        log_error "------- CA File Status -------"
         ls -l /etc/ssl/mongo/chain.pem
+        log_error "------- Service File Contents -------"
+        cat /etc/systemd/system/cloudlunacy.service
         return 1
     fi
     
