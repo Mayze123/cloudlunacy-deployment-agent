@@ -361,78 +361,14 @@ EOF
 setup_mongodb() {
     log "Setting up MongoDB with phased approach..."
     
-    # Configure environment first
-    configure_environment
-    
-    # Phase 1: Start MongoDB without auth or TLS to verify basic connectivity
-    log "Phase 1: Starting MongoDB without security features..."
-    
-    cat <<COMPOSE > "$MONGODB_DIR/docker-compose.mongodb.yml"
-version: '3.8'
+    mkdir -p "$MONGODB_DIR"
+    chown "$USERNAME":"$USERNAME" "$MONGODB_DIR"
 
-services:
-  mongodb:
-    image: mongo:6.0
-    container_name: mongodb
-    restart: unless-stopped
-    command: mongod --bind_ip_all
-    volumes:
-      - mongo_data:/data/db
-    networks:
-      - internal
-    healthcheck:
-      test: mongosh --eval "db.adminCommand('ping')"
-      interval: 10s
-      timeout: 5s
-      retries: 3
-      start_period: 20s
-
-volumes:
-  mongo_data:
-
-networks:
-  internal:
-    external: true
-COMPOSE
-
-    # Set correct ownership and permissions for the compose file
-    chown "$USERNAME":"$USERNAME" "$MONGODB_DIR/docker-compose.mongodb.yml"
-    chmod 640 "$MONGODB_DIR/docker-compose.mongodb.yml"
-
-    # Ensure we're in the correct directory
-    cd "$MONGODB_DIR" || {
-        log_error "Failed to change to MongoDB directory"
-        return 1
-    }
-
-    # Stop any existing containers
-    log "Stopping any existing MongoDB containers..."
-    sudo -u "$USERNAME" docker-compose -f docker-compose.mongodb.yml down || true
-    
-    # Start MongoDB in basic mode
-    log "Starting MongoDB in basic mode..."
-    sudo -u "$USERNAME" docker-compose -f docker-compose.mongodb.yml up -d
-
-    # Test basic connectivity
-    log "Waiting for MongoDB to start..."
-    sleep 30
-    
-    if ! docker exec mongodb mongosh --eval "db.adminCommand('ping')"; then
-        log_error "Basic MongoDB connectivity failed"
-        docker logs mongodb
-        return 1
-    fi
-    
-    log "Basic MongoDB connectivity verified"
-
-    # Phase 2: Configure with TLS
-    log "Phase 2: Configuring TLS..."
-    
-    # Generate secure credentials
+    # Generate credentials
     MONGO_INITDB_ROOT_USERNAME=$(openssl rand -hex 12)
     MONGO_INITDB_ROOT_PASSWORD=$(openssl rand -hex 24)
 
-    # Save credentials
+    # Create .env file
     cat <<EOF > "$MONGO_ENV_FILE"
 MONGO_INITDB_ROOT_USERNAME=$MONGO_INITDB_ROOT_USERNAME
 MONGO_INITDB_ROOT_PASSWORD=$MONGO_INITDB_ROOT_PASSWORD
@@ -441,18 +377,7 @@ EOF
     chown "$USERNAME":"$USERNAME" "$MONGO_ENV_FILE"
     chmod 600 "$MONGO_ENV_FILE"
 
-    # Create root user before enabling auth
-    log "Creating root user..."
-    docker exec mongodb mongosh --eval "
-        db.getSiblingDB('admin').createUser({
-            user: '$MONGO_INITDB_ROOT_USERNAME',
-            pwd: '$MONGO_INITDB_ROOT_PASSWORD',
-            roles: ['root']
-        })
-    "
-
-    # Update compose file with security features
-    log "Updating MongoDB configuration with security features..."
+    # Create Docker Compose file
     cat <<COMPOSE > "$MONGODB_DIR/docker-compose.mongodb.yml"
 version: '3.8'
 
@@ -467,9 +392,10 @@ services:
     command: >
       mongod
       --auth
-      --tlsMode=preferTLS
+      --tlsMode=requireTLS
       --tlsCertificateKeyFile=/etc/ssl/mongo/combined.pem
       --tlsCAFile=/etc/ssl/mongo/chain.pem
+      --tlsAllowConnectionsWithoutCertificates
       --bind_ip_all
     volumes:
       - mongo_data:/data/db
@@ -482,11 +408,13 @@ services:
       test: >
         mongosh 
         --tls 
-        --tlsAllowInvalidHostnames
+        --tlsAllowInvalidCertificates
         --tlsCAFile=/etc/ssl/mongo/chain.pem
+        --host $DOMAIN
+        --port 27017
         -u \$\${MONGO_INITDB_ROOT_USERNAME}
         -p \$\${MONGO_INITDB_ROOT_PASSWORD}
-        --eval "db.adminCommand('ping')"
+        --eval "db.adminCommand({ ping: 1 })"
       interval: 10s
       timeout: 5s
       retries: 3
@@ -500,28 +428,22 @@ networks:
     external: true
 COMPOSE
 
-    # Restart with security features
-    log "Restarting MongoDB with security features..."
+    chown "$USERNAME":"$USERNAME" "$MONGODB_DIR/docker-compose.mongodb.yml"
+
+    # Start MongoDB
+    log "Starting MongoDB with TLS and authentication..."
+    cd "$MONGODB_DIR"
+    sudo -u "$USERNAME" docker-compose --env-file "$MONGO_ENV_FILE" -f docker-compose.mongodb.yml down
     sudo -u "$USERNAME" docker-compose --env-file "$MONGO_ENV_FILE" -f docker-compose.mongodb.yml up -d
 
-    # Final verification
-    log "Verifying secure MongoDB setup..."
-    sleep 30
-    
-    if ! docker exec mongodb mongosh \
-        --tls \
-        --tlsAllowInvalidHostnames \
-        --tlsCAFile=/etc/ssl/mongo/chain.pem \
-        -u "$MONGO_INITDB_ROOT_USERNAME" \
-        -p "$MONGO_INITDB_ROOT_PASSWORD" \
-        --eval "db.adminCommand('ping')"; then
-        
-        log_error "Secure MongoDB setup failed"
+    # Wait for MongoDB to be healthy
+    if ! wait_for_mongodb_health; then
+        log_error "MongoDB failed to become healthy."
         docker logs mongodb
         return 1
     fi
 
-    log "MongoDB setup completed successfully"
+    log "MongoDB is up and healthy with TLS + auth."
 }
 
 create_mongo_management_user() {
@@ -531,27 +453,12 @@ create_mongo_management_user() {
     MONGO_MANAGER_USERNAME="manager"
     MONGO_MANAGER_PASSWORD=$(openssl rand -hex 24)
 
-    # Test connection before creating user
-    log "Testing connection before user creation..."
-    if ! docker exec mongodb mongosh \
+    # Create management user with mongosh
+    docker exec mongodb mongosh \
         --tls \
-        --tlsAllowInvalidHostnames \
+        --tlsAllowInvalidCertificates \
         --tlsCAFile=/etc/ssl/mongo/chain.pem \
-        -u "$MONGO_INITDB_ROOT_USERNAME" \
-        -p "$MONGO_INITDB_ROOT_PASSWORD" \
-        --eval "db.adminCommand('ping')"; then
-        
-        log_error "Cannot connect to MongoDB before user creation"
-        docker logs mongodb
-        return 1
-    fi
-
-    # Create management user
-    log "Creating management user..."
-    if ! docker exec mongodb mongosh \
-        --tls \
-        --tlsAllowInvalidHostnames \
-        --tlsCAFile=/etc/ssl/mongo/chain.pem \
+        --host "$DOMAIN" \
         -u "$MONGO_INITDB_ROOT_USERNAME" \
         -p "$MONGO_INITDB_ROOT_PASSWORD" \
         --eval "
@@ -563,29 +470,25 @@ create_mongo_management_user() {
                     {role: 'readWriteAnyDatabase', db: 'admin'}
                 ]
             })
-        "; then
+        "
+
+    if [ $? -eq 0 ]; then
+        echo "MONGO_MANAGER_USERNAME=$MONGO_MANAGER_USERNAME" >> "$MONGO_ENV_FILE"
+        echo "MONGO_MANAGER_PASSWORD=$MONGO_MANAGER_PASSWORD" >> "$MONGO_ENV_FILE"
+        log "Manager user created successfully."
         
-        log_error "Failed to create management user"
-        docker logs mongodb
-        return 1
-    fi
-
-    # Store management credentials
-    echo "MONGO_MANAGER_USERNAME=$MONGO_MANAGER_USERNAME" >> "$MONGO_ENV_FILE"
-    echo "MONGO_MANAGER_PASSWORD=$MONGO_MANAGER_PASSWORD" >> "$MONGO_ENV_FILE"
-
-    # Verify management user access
-    log "Verifying management user access..."
-    if docker exec mongodb mongosh \
-        --tls \
-        --tlsAllowInvalidHostnames \
-        --tlsCAFile=/etc/ssl/mongo/chain.pem \
-        -u "$MONGO_MANAGER_USERNAME" \
-        -p "$MONGO_MANAGER_PASSWORD" \
-        --eval "db.adminCommand('ping')"; then
-        log "Management user created and verified successfully"
+        # Verify the management user can connect
+        log "Verifying management user access..."
+        docker exec mongodb mongosh \
+            --tls \
+            --tlsAllowInvalidCertificates \
+            --tlsCAFile=/etc/ssl/mongo/chain.pem \
+            --host "$DOMAIN" \
+            -u "$MONGO_MANAGER_USERNAME" \
+            -p "$MONGO_MANAGER_PASSWORD" \
+            --eval "db.adminCommand({ ping: 1 })"
     else
-        log_error "Management user verification failed"
+        log_error "Failed to create management user."
         docker logs mongodb
         return 1
     fi
