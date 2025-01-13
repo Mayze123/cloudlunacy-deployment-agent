@@ -615,7 +615,9 @@ configure_env() {
         exit 1
     fi
 
-    cat <<EOF > "$ENV_FILE"
+    # First write to a temporary file to ensure atomic write
+    TMP_ENV_FILE=$(mktemp)
+    cat <<EOF > "$TMP_ENV_FILE"
 BACKEND_URL=$BACKEND_URL
 AGENT_API_TOKEN=$AGENT_TOKEN
 SERVER_ID=$SERVER_ID
@@ -627,8 +629,24 @@ MONGO_CA_FILE=/etc/ssl/mongo/chain.pem
 MONGODB_CA_FILE=/etc/ssl/mongo/chain.pem
 EOF
 
+    # Move the temporary file to the final location
+    mv "$TMP_ENV_FILE" "$ENV_FILE"
     chown "$USERNAME":"$USERNAME" "$ENV_FILE"
     chmod 600 "$ENV_FILE"
+
+    # Verify the file contents
+    log "Verifying environment file contents..."
+    if ! grep -q "MONGODB_CA_FILE" "$ENV_FILE"; then
+        log_error "Failed to write MONGODB_CA_FILE to environment file"
+        return 1
+    fi
+
+    # Also ensure the CA file permissions are correct
+    if [ -f "/etc/ssl/mongo/chain.pem" ]; then
+        chown "$USERNAME":"$USERNAME" "/etc/ssl/mongo/chain.pem"
+        chmod 644 "/etc/ssl/mongo/chain.pem"
+    fi
+
     log "Environment variables configured."
 }
 
@@ -824,20 +842,31 @@ EOF
 
 verify_installation() {
     log "Verifying CloudLunacy Deployment Agent installation..."
-    if systemctl is-active --quiet cloudlunacy; then
-        log "CloudLunacy Deployment Agent is running successfully."
-    else
-        log_error "CloudLunacy Deployment Agent failed to start. Check the logs for details."
-        exit 1
+    
+    # Wait a bit for the service to stabilize
+    sleep 5
+    
+    if ! systemctl is-active --quiet cloudlunacy; then
+        log_error "CloudLunacy Deployment Agent failed to start. Debug information:"
+        log_error "------- Service Status -------"
+        systemctl status cloudlunacy
+        log_error "------- Service Logs -------"
+        journalctl -u cloudlunacy -n 50 --no-pager
+        log_error "------- Environment File -------"
+        cat "$BASE_DIR/.env"
+        log_error "------- CA File Permissions -------"
+        ls -l /etc/ssl/mongo/chain.pem
+        return 1
     fi
-
+    
+    log "CloudLunacy Deployment Agent is running successfully."
+    
     log "Verifying Traefik installation..."
-    if docker ps | grep -q "traefik"; then
-        log "Traefik is running successfully."
-    else
+    if ! docker ps | grep -q "traefik"; then
         log_error "Traefik failed to start. Check Docker logs for details."
-        exit 1
+        return 1
     fi
+    log "Traefik is running successfully."
 }
 
 completion_message() {
