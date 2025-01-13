@@ -35,7 +35,7 @@
 
 set -euo pipefail
 # Uncomment the following line to enable debugging
-set -x
+# set -x
 IFS=$'\n\t'
 
 # ----------------------------
