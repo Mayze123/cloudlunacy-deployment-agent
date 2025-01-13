@@ -516,45 +516,65 @@ create_mongo_management_user() {
     MONGO_MANAGER_USERNAME="manager"
     MONGO_MANAGER_PASSWORD=$(openssl rand -hex 24)
 
-    # Create management user with proper authentication
-    docker exec mongodb mongosh \
+    # First check if the user exists
+    USER_EXISTS=$(docker exec mongodb mongosh \
         --tls \
         --tlsAllowInvalidCertificates \
         --tlsCAFile=/etc/ssl/mongo/chain.pem \
         --host "$DOMAIN" \
         -u "$MONGO_INITDB_ROOT_USERNAME" \
         -p "$MONGO_INITDB_ROOT_PASSWORD" \
-        --eval "
-            db.getSiblingDB('admin').createUser({
-                user: '$MONGO_MANAGER_USERNAME',
-                pwd: '$MONGO_MANAGER_PASSWORD',
-                roles: [
-                    {role: 'userAdminAnyDatabase', db: 'admin'},
-                    {role: 'readWriteAnyDatabase', db: 'admin'}
-                ]
-            })
-        "
+        --eval "db.getSiblingDB('admin').getUser('$MONGO_MANAGER_USERNAME')" \
+        --quiet)
 
-    if [ $? -eq 0 ]; then
-        echo "MONGO_MANAGER_USERNAME=$MONGO_MANAGER_USERNAME" >> "$MONGO_ENV_FILE"
-        echo "MONGO_MANAGER_PASSWORD=$MONGO_MANAGER_PASSWORD" >> "$MONGO_ENV_FILE"
-        log "Management user created successfully"
-        
-        # Verify management user access
-        log "Verifying management user access..."
+    if [ -n "$USER_EXISTS" ]; then
+        log "Management user already exists, skipping creation"
+        # Get existing password from env file if it exists
+        EXISTING_PASSWORD=$(grep MONGO_MANAGER_PASSWORD "$MONGO_ENV_FILE" | cut -d '=' -f2)
+        if [ -n "$EXISTING_PASSWORD" ]; then
+            MONGO_MANAGER_PASSWORD=$EXISTING_PASSWORD
+        fi
+    else
+        # Create management user with proper authentication
         docker exec mongodb mongosh \
             --tls \
             --tlsAllowInvalidCertificates \
             --tlsCAFile=/etc/ssl/mongo/chain.pem \
             --host "$DOMAIN" \
-            -u "$MONGO_MANAGER_USERNAME" \
-            -p "$MONGO_MANAGER_PASSWORD" \
-            --eval "db.adminCommand('ping')"
-    else
-        log_error "Failed to create management user"
-        docker logs mongodb
-        return 1
+            -u "$MONGO_INITDB_ROOT_USERNAME" \
+            -p "$MONGO_INITDB_ROOT_PASSWORD" \
+            --eval "
+                db.getSiblingDB('admin').createUser({
+                    user: '$MONGO_MANAGER_USERNAME',
+                    pwd: '$MONGO_MANAGER_PASSWORD',
+                    roles: [
+                        {role: 'userAdminAnyDatabase', db: 'admin'},
+                        {role: 'readWriteAnyDatabase', db: 'admin'}
+                    ]
+                })
+            "
     fi
+
+    # Update env file with manager credentials
+    if ! grep -q "MONGO_MANAGER_USERNAME" "$MONGO_ENV_FILE"; then
+        echo "MONGO_MANAGER_USERNAME=$MONGO_MANAGER_USERNAME" >> "$MONGO_ENV_FILE"
+    fi
+    if ! grep -q "MONGO_MANAGER_PASSWORD" "$MONGO_ENV_FILE"; then
+        echo "MONGO_MANAGER_PASSWORD=$MONGO_MANAGER_PASSWORD" >> "$MONGO_ENV_FILE"
+    fi
+
+    log "Management user configuration completed"
+    
+    # Verify management user access
+    log "Verifying management user access..."
+    docker exec mongodb mongosh \
+        --tls \
+        --tlsAllowInvalidCertificates \
+        --tlsCAFile=/etc/ssl/mongo/chain.pem \
+        --host "$DOMAIN" \
+        -u "$MONGO_MANAGER_USERNAME" \
+        -p "$MONGO_MANAGER_PASSWORD" \
+        --eval "db.adminCommand('ping')"
 }
 
 adjust_firewall_settings() {
