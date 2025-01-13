@@ -514,8 +514,7 @@ create_mongo_management_user() {
     source "$MONGO_ENV_FILE"
 
     MONGO_MANAGER_USERNAME="manager"
-    MONGO_MANAGER_PASSWORD=$(openssl rand -hex 24)
-
+    
     # Check if user exists
     USER_EXISTS=$(docker exec mongodb mongosh \
         --tls \
@@ -528,16 +527,27 @@ create_mongo_management_user() {
         --quiet)
 
     if [ -n "$USER_EXISTS" ]; then
-        log "Management user already exists, skipping creation"
-        # Update env file with credentials
-        {
-            echo "MONGO_INITDB_ROOT_USERNAME=$MONGO_INITDB_ROOT_USERNAME"
-            echo "MONGO_INITDB_ROOT_PASSWORD=$MONGO_INITDB_ROOT_PASSWORD"
-            echo "MONGO_MANAGER_USERNAME=$MONGO_MANAGER_USERNAME"
-            echo "MONGO_MANAGER_PASSWORD=$MONGO_MANAGER_PASSWORD"
-        } > "$MONGO_ENV_FILE"
-        chmod 600 "$MONGO_ENV_FILE"
+        log "Management user exists, retrieving existing credentials"
+        # Get existing password from previous env file
+        if grep -q "MONGO_MANAGER_PASSWORD" "$MONGO_ENV_FILE"; then
+            MONGO_MANAGER_PASSWORD=$(grep "MONGO_MANAGER_PASSWORD" "$MONGO_ENV_FILE" | cut -d= -f2)
+        else
+            # If we can't find the existing password, we need to generate a new one and update the user
+            MONGO_MANAGER_PASSWORD=$(openssl rand -hex 24)
+            log "Updating existing management user password..."
+            docker exec mongodb mongosh \
+                --tls \
+                --tlsAllowInvalidCertificates \
+                --tlsCAFile=/etc/ssl/mongo/chain.pem \
+                --host "$DOMAIN" \
+                -u "$MONGO_INITDB_ROOT_USERNAME" \
+                -p "$MONGO_INITDB_ROOT_PASSWORD" \
+                --eval "db.getSiblingDB('admin').updateUser('$MONGO_MANAGER_USERNAME', { pwd: '$MONGO_MANAGER_PASSWORD' })"
+        fi
     else
+        # Generate new password for new user
+        MONGO_MANAGER_PASSWORD=$(openssl rand -hex 24)
+        
         # Create management user with proper authentication
         docker exec mongodb mongosh \
             --tls \
@@ -556,16 +566,16 @@ create_mongo_management_user() {
                     ]
                 })
             "
-        
-        # Save credentials to env file
-        {
-            echo "MONGO_INITDB_ROOT_USERNAME=$MONGO_INITDB_ROOT_USERNAME"
-            echo "MONGO_INITDB_ROOT_PASSWORD=$MONGO_INITDB_ROOT_PASSWORD"
-            echo "MONGO_MANAGER_USERNAME=$MONGO_MANAGER_USERNAME"
-            echo "MONGO_MANAGER_PASSWORD=$MONGO_MANAGER_PASSWORD"
-        } > "$MONGO_ENV_FILE"
-        chmod 600 "$MONGO_ENV_FILE"
     fi
+
+    # Update env file with current credentials
+    {
+        echo "MONGO_INITDB_ROOT_USERNAME=$MONGO_INITDB_ROOT_USERNAME"
+        echo "MONGO_INITDB_ROOT_PASSWORD=$MONGO_INITDB_ROOT_PASSWORD"
+        echo "MONGO_MANAGER_USERNAME=$MONGO_MANAGER_USERNAME"
+        echo "MONGO_MANAGER_PASSWORD=$MONGO_MANAGER_PASSWORD"
+    } > "$MONGO_ENV_FILE"
+    chmod 600 "$MONGO_ENV_FILE"
 
     # Verify management user access
     log "Verifying management user access..."
