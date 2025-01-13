@@ -662,9 +662,11 @@ configure_environment() {
     log "MONGO_ENV_FILE = $MONGO_ENV_FILE"
 
     # Create Docker network if it doesn't exist
-    if ! docker network ls | grep -q "internal"; then
+    if ! docker network ls --format '{{.Name}}' | grep -qw "internal"; then
         log "Creating internal Docker network..."
         docker network create internal
+    else
+        log "Docker network 'internal' already exists. Skipping creation."
     fi
 }
 
