@@ -289,17 +289,13 @@ create_combined_certificate() {
     mkdir -p "$SSL_DIR"
     CERT_DIR="/etc/letsencrypt/live/$DOMAIN"
 
-    # Combine private key and full chain into single .pem
+    # Combine private key and full chain
     cat "$CERT_DIR/privkey.pem" "$CERT_DIR/fullchain.pem" > "$SSL_DIR/combined.pem"
-    
-    # Place chain.pem separately - this is the critical file for client connections
     cp "$CERT_DIR/chain.pem" "$SSL_DIR/chain.pem"
 
-    # Set permissions that work for both MongoDB and the service user
-    chown "$USERNAME:docker" "$SSL_DIR"          # Service user owns directory
-    chmod 750 "$SSL_DIR"                         # Directory is traversable
-    chown "$USERNAME:docker" "$SSL_DIR"/*.pem    # Service user owns files
-    chmod 644 "$SSL_DIR"/*.pem                   # Files are readable
+    # Instead of 999:999 with chmod 600, do:
+    chown -R "$USERNAME:docker" "$SSL_DIR"
+    chmod 640 "$SSL_DIR"/*.pem
 
     log "Certificate files created at $SSL_DIR"
 }
@@ -838,14 +834,13 @@ setup_service() {
     log "Setting up CloudLunacy Deployment Agent as a systemd service..."
     SERVICE_FILE="/etc/systemd/system/cloudlunacy.service"
 
-    # Verify file access before proceeding
+    # (Optional) verify /etc/ssl/mongo/chain.pem is readable by $USERNAME
     if ! sudo -u "$USERNAME" test -r "/etc/ssl/mongo/chain.pem"; then
         log_error "CA file not readable by $USERNAME"
         ls -l /etc/ssl/mongo/chain.pem
         return 1
     fi
 
-    # Create service with explicit CA file environment
     cat > "$SERVICE_FILE" << EOF
 [Unit]
 Description=CloudLunacy Deployment Agent
@@ -861,13 +856,12 @@ Environment=NODE_ENV=production
 Environment=SSL_CERT_DIR=/etc/ssl/mongo
 Environment=SSL_CERT_FILE=/etc/ssl/mongo/chain.pem
 Environment=NODE_EXTRA_CA_CERTS=/etc/ssl/mongo/chain.pem
-EnvironmentFile=$BASE_DIR/.env
+EnvironmentFile=/opt/cloudlunacy/.env       # <-- Use an absolute path here!
 WorkingDirectory=$BASE_DIR
 ExecStart=/usr/bin/node $BASE_DIR/agent.js
 Restart=on-failure
 RestartSec=10
 
-# Security directives
 ProtectSystem=full
 ReadOnlyPaths=/etc/ssl/mongo
 ReadWritePaths=$BASE_DIR
@@ -878,6 +872,9 @@ EOF
 
     chmod 644 "$SERVICE_FILE"
     systemctl daemon-reload
+
+    # It's a good idea to enable as well, so it starts on reboot
+    systemctl enable cloudlunacy
     systemctl stop cloudlunacy || true
     sleep 2
     systemctl start cloudlunacy
