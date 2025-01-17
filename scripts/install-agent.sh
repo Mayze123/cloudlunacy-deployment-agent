@@ -513,13 +513,64 @@ COMPOSE
 }
 
 create_mongo_management_user() {
-    log "Creating MongoDB management user..."
-    source "$MONGO_ENV_FILE"
-
-    MONGO_MANAGER_USERNAME="manager"
+    log "Creating/updating MongoDB management user..."
     
-    # Check if user exists
-    USER_EXISTS=$(docker exec mongodb mongosh \
+    # Ensure environment file exists and can be read
+    if [ ! -f "$MONGO_ENV_FILE" ]; then
+        log_error "MongoDB environment file not found at $MONGO_ENV_FILE"
+        return 1
+    fi
+
+    # Source MongoDB environment variables
+    set +u  # Temporarily disable errors for unbound variables
+    source "$MONGO_ENV_FILE"
+    set -u
+
+    # Verify required variables are set
+    if [ -z "${MONGO_INITDB_ROOT_USERNAME:-}" ] || [ -z "${MONGO_INITDB_ROOT_PASSWORD:-}" ]; then
+        log_error "Root credentials not found in environment file"
+        return 1
+    fi
+
+    # Set management user constants
+    MONGO_MANAGER_USERNAME="manager"
+    local max_retries=3
+    local retry_count=0
+    local success=false
+
+    # Function to verify MongoDB connection
+    verify_mongodb_connection() {
+        docker exec mongodb mongosh \
+            --tls \
+            --tlsAllowInvalidCertificates \
+            --tlsCAFile=/etc/ssl/mongo/chain.pem \
+            --host "$DOMAIN" \
+            -u "$MONGO_INITDB_ROOT_USERNAME" \
+            -p "$MONGO_INITDB_ROOT_PASSWORD" \
+            --eval "db.adminCommand('ping')" &>/dev/null
+    }
+
+    # Wait for MongoDB to be fully operational
+    log "Waiting for MongoDB to be ready..."
+    while [ $retry_count -lt $max_retries ]; do
+        if verify_mongodb_connection; then
+            success=true
+            break
+        fi
+        log "Attempt $((retry_count + 1))/$max_retries: MongoDB not ready yet, waiting..."
+        sleep 10
+        retry_count=$((retry_count + 1))
+    done
+
+    if [ "$success" != "true" ]; then
+        log_error "Failed to connect to MongoDB after $max_retries attempts"
+        return 1
+    fi
+
+    # Check if management user exists
+    log "Checking for existing management user..."
+    local user_exists
+    user_exists=$(docker exec mongodb mongosh \
         --tls \
         --tlsAllowInvalidCertificates \
         --tlsCAFile=/etc/ssl/mongo/chain.pem \
@@ -529,69 +580,82 @@ create_mongo_management_user() {
         --eval "db.getSiblingDB('admin').getUser('$MONGO_MANAGER_USERNAME')" \
         --quiet)
 
-    if [ -n "$USER_EXISTS" ]; then
-        log "Management user exists, retrieving existing credentials"
-        # Get existing password from previous env file
-        if grep -q "MONGO_MANAGER_PASSWORD" "$MONGO_ENV_FILE"; then
-            MONGO_MANAGER_PASSWORD=$(grep "MONGO_MANAGER_PASSWORD" "$MONGO_ENV_FILE" | cut -d= -f2)
-        else
-            # If we can't find the existing password, we need to generate a new one and update the user
-            MONGO_MANAGER_PASSWORD=$(openssl rand -hex 24)
-            log "Updating existing management user password..."
-            docker exec mongodb mongosh \
-                --tls \
-                --tlsAllowInvalidCertificates \
-                --tlsCAFile=/etc/ssl/mongo/chain.pem \
-                --host "$DOMAIN" \
-                -u "$MONGO_INITDB_ROOT_USERNAME" \
-                -p "$MONGO_INITDB_ROOT_PASSWORD" \
-                --eval "db.getSiblingDB('admin').updateUser('$MONGO_MANAGER_USERNAME', { pwd: '$MONGO_MANAGER_PASSWORD' })"
-        fi
-    else
-        # Generate new password for new user
-        MONGO_MANAGER_PASSWORD=$(openssl rand -hex 24)
-        
-        # Create management user with proper authentication
-        docker exec mongodb mongosh \
+    # Generate new password regardless of whether we're creating or updating
+    MONGO_MANAGER_PASSWORD=$(openssl rand -hex 24)
+
+    if [ "$user_exists" = "null" ] || [ -z "$user_exists" ]; then
+        log "Creating new management user..."
+        # Create new management user
+        if ! docker exec mongodb mongosh \
             --tls \
             --tlsAllowInvalidCertificates \
             --tlsCAFile=/etc/ssl/mongo/chain.pem \
             --host "$DOMAIN" \
             -u "$MONGO_INITDB_ROOT_USERNAME" \
             -p "$MONGO_INITDB_ROOT_PASSWORD" \
-            --eval "
-                db.getSiblingDB('admin').createUser({
-                    user: '$MONGO_MANAGER_USERNAME',
-                    pwd: '$MONGO_MANAGER_PASSWORD',
-                    roles: [
-                        {role: 'userAdminAnyDatabase', db: 'admin'},
-                        {role: 'readWriteAnyDatabase', db: 'admin'}
-                    ]
-                })
-            "
+            --eval "db.getSiblingDB('admin').createUser({
+                user: '$MONGO_MANAGER_USERNAME',
+                pwd: '$MONGO_MANAGER_PASSWORD',
+                roles: [
+                    {role: 'userAdminAnyDatabase', db: 'admin'},
+                    {role: 'readWriteAnyDatabase', db: 'admin'},
+                    {role: 'clusterMonitor', db: 'admin'}
+                ]
+            })"; then
+            log_error "Failed to create management user"
+            return 1
+        fi
+    else
+        log "Updating existing management user password..."
+        # Update existing management user
+        if ! docker exec mongodb mongosh \
+            --tls \
+            --tlsAllowInvalidCertificates \
+            --tlsCAFile=/etc/ssl/mongo/chain.pem \
+            --host "$DOMAIN" \
+            -u "$MONGO_INITDB_ROOT_USERNAME" \
+            -p "$MONGO_INITDB_ROOT_PASSWORD" \
+            --eval "db.getSiblingDB('admin').updateUser('$MONGO_MANAGER_USERNAME', {
+                pwd: '$MONGO_MANAGER_PASSWORD',
+                roles: [
+                    {role: 'userAdminAnyDatabase', db: 'admin'},
+                    {role: 'readWriteAnyDatabase', db: 'admin'},
+                    {role: 'clusterMonitor', db: 'admin'}
+                ]
+            })"; then
+            log_error "Failed to update management user"
+            return 1
+        fi
     fi
 
-    # Update env file with current credentials
+    # Update environment file with all credentials
+    log "Updating environment file with credentials..."
     {
         echo "MONGO_INITDB_ROOT_USERNAME=$MONGO_INITDB_ROOT_USERNAME"
         echo "MONGO_INITDB_ROOT_PASSWORD=$MONGO_INITDB_ROOT_PASSWORD"
         echo "MONGO_MANAGER_USERNAME=$MONGO_MANAGER_USERNAME"
         echo "MONGO_MANAGER_PASSWORD=$MONGO_MANAGER_PASSWORD"
     } > "$MONGO_ENV_FILE"
+
+    # Secure the environment file
     chmod 600 "$MONGO_ENV_FILE"
+    chown "$USERNAME:$USERNAME" "$MONGO_ENV_FILE"
 
     # Verify management user access
     log "Verifying management user access..."
-    docker exec mongodb mongosh \
+    if ! docker exec mongodb mongosh \
         --tls \
         --tlsAllowInvalidCertificates \
         --tlsCAFile=/etc/ssl/mongo/chain.pem \
         --host "$DOMAIN" \
         -u "$MONGO_MANAGER_USERNAME" \
         -p "$MONGO_MANAGER_PASSWORD" \
-        --eval "db.adminCommand('ping')"
+        --eval "db.adminCommand('ping')"; then
+        log_error "Failed to verify management user access"
+        return 1
+    fi
 
-    log "Management user setup completed"
+    log "Management user setup completed successfully"
     return 0
 }
 
