@@ -4,7 +4,7 @@ const fs = require("fs").promises;
 
 class MongoManager {
   constructor() {
-    // Root credentials - used only for initial setup
+    // Root credentials
     this.rootUsername = process.env.MONGO_INITDB_ROOT_USERNAME;
     this.rootPassword = process.env.MONGO_INITDB_ROOT_PASSWORD;
 
@@ -12,11 +12,11 @@ class MongoManager {
     this.managerUsername = process.env.MONGO_MANAGER_USERNAME;
     this.managerPassword = process.env.MONGO_MANAGER_PASSWORD;
 
-    // MongoDB connection settings
+    // Connection settings
     this.mongoHost = process.env.MONGO_HOST || "mongodb.cloudlunacy.uk";
     this.mongoPort = process.env.MONGO_PORT || "27017";
 
-    // TLS settings
+    // Certificate paths
     this.caFile = process.env.MONGODB_CA_FILE || "/etc/ssl/mongo/chain.pem";
 
     this.client = null;
@@ -24,26 +24,30 @@ class MongoManager {
   }
 
   async checkCertificates() {
+    logger.info("Checking MongoDB certificates...");
+
     try {
-      for (const [key, path] of Object.entries(this.certPaths)) {
-        const stats = await fs.stat(path);
-        logger.info(`Certificate ${key}: ${path} (size: ${stats.size} bytes)`);
+      // Check if CA file exists
+      const stats = await fs.stat(this.caFile);
+      logger.info(`Found CA file: ${this.caFile} (size: ${stats.size} bytes)`);
 
-        if (stats.size === 0) {
-          throw new Error(`Certificate file ${path} is empty`);
-        }
-
-        // Verify file permissions
-        const mode = (stats.mode & parseInt("777", 8)).toString(8);
-        logger.info(`Certificate ${key} permissions: ${mode}`);
-
-        if (mode !== "644" && mode !== "640") {
-          logger.warn(`Certificate ${key} has unexpected permissions: ${mode}`);
-        }
+      if (stats.size === 0) {
+        throw new Error(`CA file ${this.caFile} is empty`);
       }
+
+      // Basic certificate validation
+      try {
+        require("crypto").createCredentials({
+          ca: await fs.readFile(this.caFile),
+        });
+        logger.info("CA file validated successfully");
+      } catch (certError) {
+        throw new Error(`Invalid CA file: ${certError.message}`);
+      }
+
       return true;
     } catch (error) {
-      logger.error("Certificate check failed:", error);
+      logger.error("Certificate check failed:", error.message);
       throw error;
     }
   }
@@ -145,13 +149,25 @@ class MongoManager {
 
   async connect() {
     try {
+      // Always verify certificates first
+      await this.checkCertificates();
+
       if (!this.client) {
+        // Verify credentials are available
+        if (!this.managerUsername || !this.managerPassword) {
+          throw new Error("MongoDB credentials not found in environment");
+        }
+
+        logger.info(
+          `Attempting to connect to MongoDB at ${this.mongoHost}:${this.mongoPort}`
+        );
+
         const uri = `mongodb://${this.managerUsername}:${this.managerPassword}@${this.mongoHost}:${this.mongoPort}/admin`;
 
         this.client = new MongoClient(uri, {
           tls: true,
           tlsCAFile: this.caFile,
-          tlsAllowInvalidCertificates: false,
+          tlsAllowInvalidCertificates: true, // Temporarily allow invalid certs for debugging
           authSource: "admin",
           authMechanism: "SCRAM-SHA-256",
           directConnection: true,
@@ -165,7 +181,7 @@ class MongoManager {
 
       return this.client;
     } catch (error) {
-      logger.error("Connection failed:", error);
+      logger.error("Connection failed:", error.message);
       throw error;
     }
   }
@@ -191,15 +207,9 @@ class MongoManager {
   }
 
   async close() {
-    try {
-      if (this.client) {
-        await this.client.close();
-        this.client = null;
-        logger.info("MongoDB connection closed");
-      }
-    } catch (error) {
-      logger.error("Error closing MongoDB connection:", error);
-      throw error;
+    if (this.client) {
+      await this.client.close();
+      this.client = null;
     }
   }
 
