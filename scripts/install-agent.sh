@@ -289,13 +289,17 @@ create_combined_certificate() {
     mkdir -p "$SSL_DIR"
     CERT_DIR="/etc/letsencrypt/live/$DOMAIN"
 
-    # Combine private key and full chain
+    # Combine private key and full chain into single .pem
     cat "$CERT_DIR/privkey.pem" "$CERT_DIR/fullchain.pem" > "$SSL_DIR/combined.pem"
+    
+    # Place chain.pem separately - this is the critical file for client connections
     cp "$CERT_DIR/chain.pem" "$SSL_DIR/chain.pem"
 
-    # Instead of 999:999 with chmod 600, do:
-    chown -R "$USERNAME:docker" "$SSL_DIR"
-    chmod 640 "$SSL_DIR"/*.pem
+    # Set permissions that work for both MongoDB and the service user
+    chown "$USERNAME:docker" "$SSL_DIR"          # Service user owns directory
+    chmod 750 "$SSL_DIR"                         # Directory is traversable
+    chown "$USERNAME:docker" "$SSL_DIR"/*.pem    # Service user owns files
+    chmod 644 "$SSL_DIR"/*.pem                   # Files are readable
 
     log "Certificate files created at $SSL_DIR"
 }
@@ -327,29 +331,6 @@ wait_for_mongodb_health() {
     
     log_error "MongoDB failed to become healthy after $max_attempts attempts"
     log_error "Container logs:"
-    docker logs mongodb
-    return 1
-}
-
-wait_for_mongodb() {
-    log "Waiting for MongoDB container to be ready..."
-    local max_attempts=30
-    local attempt=1
-    
-    while [ $attempt -le $max_attempts ]; do
-        if docker ps --filter "name=mongodb" --format "{{.Status}}" | grep -q "Up"; then
-            # Additional check to ensure MongoDB is actually ready
-            if docker exec mongodb mongosh --eval "db.adminCommand('ping')" &>/dev/null; then
-                log "MongoDB is ready"
-                return 0
-            fi
-        fi
-        log "Waiting for MongoDB to be ready (attempt $attempt/$max_attempts)..."
-        sleep 10
-        attempt=$((attempt + 1))
-    done
-    
-    log_error "MongoDB failed to become ready after $max_attempts attempts"
     docker logs mongodb
     return 1
 }
@@ -400,23 +381,18 @@ services:
       mongod
       --bind_ip_all
     volumes:
-      - mongo_data:/data/db:rw
+      - mongo_data:/data/db
       - /etc/ssl/mongo:/etc/ssl/mongo:ro
     networks:
       internal:
         aliases:
           - $DOMAIN
     healthcheck:
-      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      test: mongosh --eval "db.adminCommand('ping')"
       interval: 10s
       timeout: 5s
-      retries: 5
-      start_period: 30s
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
+      retries: 3
+      start_period: 20s
 
 volumes:
   mongo_data:
@@ -430,40 +406,23 @@ COMPOSE
     sudo -u "$USERNAME" docker-compose -f docker-compose.mongodb.yml down
     sudo -u "$USERNAME" docker-compose -f docker-compose.mongodb.yml up -d
 
-    # Wait for MongoDB to be ready
-    if ! wait_for_mongodb; then
-        return 1
-    fi
+    # Wait for initial MongoDB to be healthy
+    sleep 30
 
     # Step 2: Create root user
     log "Step 2: Creating root user..."
     MONGO_INITDB_ROOT_USERNAME=$(openssl rand -hex 12)
     MONGO_INITDB_ROOT_PASSWORD=$(openssl rand -hex 24)
 
-    # Create root user with retries
-    local max_attempts=5
-    local attempt=1
-    local root_user_created=false
-    
-    while [ $attempt -le $max_attempts ] && [ "$root_user_created" = false ]; do
-        if docker exec mongodb mongosh --eval "
-            db.getSiblingDB('admin').createUser({
-                user: '$MONGO_INITDB_ROOT_USERNAME',
-                pwd: '$MONGO_INITDB_ROOT_PASSWORD',
-                roles: ['root']
-            })
-        "; then
-            root_user_created=true
-            log "Root user created successfully"
-        else
-            log "Root user creation attempt $attempt failed, retrying..."
-            sleep 10
-            attempt=$((attempt + 1))
-        fi
-    done
-
-    if [ "$root_user_created" = false ]; then
-        log_error "Failed to create root user after $max_attempts attempts"
+    # Create root user without auth
+    if ! docker exec mongodb mongosh --eval "
+        db.getSiblingDB('admin').createUser({
+            user: '$MONGO_INITDB_ROOT_USERNAME',
+            pwd: '$MONGO_INITDB_ROOT_PASSWORD',
+            roles: ['root']
+        })
+    "; then
+        log_error "Failed to create root user"
         return 1
     fi
 
@@ -498,7 +457,7 @@ services:
       --tlsAllowConnectionsWithoutCertificates
       --bind_ip_all
     volumes:
-      - mongo_data:/data/db:rw
+      - mongo_data:/data/db
       - /etc/ssl/mongo:/etc/ssl/mongo:ro
     networks:
       internal:
@@ -516,13 +475,8 @@ services:
         --eval "db.adminCommand('ping')"
       interval: 10s
       timeout: 5s
-      retries: 5
-      start_period: 30s
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
+      retries: 3
+      start_period: 20s
 
 volumes:
   mongo_data:
@@ -535,29 +489,27 @@ COMPOSE
     sudo -u "$USERNAME" docker-compose --env-file "$MONGO_ENV_FILE" -f docker-compose.mongodb.yml down
     sudo -u "$USERNAME" docker-compose --env-file "$MONGO_ENV_FILE" -f docker-compose.mongodb.yml up -d
 
-    # Wait for secure MongoDB to be ready
-    if ! wait_for_mongodb; then
-        return 1
-    fi
+    # Wait for secure MongoDB to be healthy
+    sleep 30
 
     # Verify secure connection
     log "Verifying secure connection..."
-    if ! docker exec mongodb mongosh \
+    docker exec mongodb mongosh \
         --tls \
         --tlsAllowInvalidCertificates \
         --tlsCAFile=/etc/ssl/mongo/chain.pem \
         --host "$DOMAIN" \
         -u "$MONGO_INITDB_ROOT_USERNAME" \
         -p "$MONGO_INITDB_ROOT_PASSWORD" \
-        --eval "db.adminCommand('ping')"; then
-        
+        --eval "db.adminCommand('ping')"
+
+    if [ $? -eq 0 ]; then
+        log "MongoDB setup completed successfully"
+    else
         log_error "Failed to verify secure MongoDB connection"
         docker logs mongodb
         return 1
     fi
-
-    log "MongoDB setup completed successfully"
-    return 0
 }
 
 create_mongo_management_user() {
@@ -714,11 +666,9 @@ configure_environment() {
     log "MONGO_ENV_FILE = $MONGO_ENV_FILE"
 
     # Create Docker network if it doesn't exist
-    if ! docker network ls --format '{{.Name}}' | grep -qw "internal"; then
+    if ! docker network ls | grep -q "internal"; then
         log "Creating internal Docker network..."
         docker network create internal
-    else
-        log "Docker network 'internal' already exists. Skipping creation."
     fi
 }
 
@@ -888,13 +838,14 @@ setup_service() {
     log "Setting up CloudLunacy Deployment Agent as a systemd service..."
     SERVICE_FILE="/etc/systemd/system/cloudlunacy.service"
 
-    # Verify that the user cloudlunacy can read chain.pem
+    # Verify file access before proceeding
     if ! sudo -u "$USERNAME" test -r "/etc/ssl/mongo/chain.pem"; then
         log_error "CA file not readable by $USERNAME"
         ls -l /etc/ssl/mongo/chain.pem
         return 1
     fi
 
+    # Create service with explicit CA file environment
     cat > "$SERVICE_FILE" << EOF
 [Unit]
 Description=CloudLunacy Deployment Agent
@@ -905,20 +856,21 @@ Requires=docker.service
 Type=simple
 User=$USERNAME
 Group=docker
-Environment=HOME=/opt/cloudlunacy
+Environment=HOME=$BASE_DIR
 Environment=NODE_ENV=production
 Environment=SSL_CERT_DIR=/etc/ssl/mongo
 Environment=SSL_CERT_FILE=/etc/ssl/mongo/chain.pem
 Environment=NODE_EXTRA_CA_CERTS=/etc/ssl/mongo/chain.pem
-EnvironmentFile=/opt/cloudlunacy/.env
-WorkingDirectory=/opt/cloudlunacy
-ExecStart=/usr/bin/node /opt/cloudlunacy/agent.js
+EnvironmentFile=$BASE_DIR/.env
+WorkingDirectory=$BASE_DIR
+ExecStart=/usr/bin/node $BASE_DIR/agent.js
 Restart=on-failure
 RestartSec=10
 
+# Security directives
 ProtectSystem=full
 ReadOnlyPaths=/etc/ssl/mongo
-ReadWritePaths=/opt/cloudlunacy
+ReadWritePaths=$BASE_DIR
 
 [Install]
 WantedBy=multi-user.target
@@ -926,20 +878,24 @@ EOF
 
     chmod 644 "$SERVICE_FILE"
     systemctl daemon-reload
-
-    # Enable for autostart
-    systemctl enable cloudlunacy
-
     systemctl stop cloudlunacy || true
     sleep 2
     systemctl start cloudlunacy
-
-    # Check service status
+    
+    # Verify service status with more detailed diagnostics
+    sleep 5
     if ! systemctl is-active --quiet cloudlunacy; then
-        log_error "Service failed to start. Checking logs..."
+        log_error "Service failed to start. Diagnostics:"
+        echo "CA File permissions:"
+        ls -l /etc/ssl/mongo/chain.pem
+        echo "Environment file permissions:"
+        ls -l "$BASE_DIR/.env"
+        echo "Service logs:"
         journalctl -u cloudlunacy --no-pager -n 50
         return 1
     fi
+
+    return 0
 }
 
 verify_installation() {
@@ -996,7 +952,7 @@ completion_message() {
     echo -e "\033[0;35m
    ____                            _         _       _   _                 _
   / ___|___  _ __   __ _ _ __ __ _| |_ _   _| | __ _| |_(_) ___  _ __  ___| |
- | |   / _ \\| '_ \\ / _\` | '__/ _\` | __| | | | |/ _\` | __| |/ _ \\| '_ \\/ __| |
+ | |   / _ \\| '_ \\ / _\ | '__/ _\ | __| | | | |/ _\` | __| |/ _ \\| '_ \\/ __| |
  | |__| (_) | | | | (_| | | | (_| | |_| |_| | | (_| | |_| | (_) | | | \\__ \\_|
   \\____\\___/|_| |_|\\__, |_|  \\__,_|\\__|\\__,_|_|\\__,_|\\__|_|\\___/|_| |_|___(_)
                        |___/
