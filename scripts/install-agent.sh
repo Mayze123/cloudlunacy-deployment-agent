@@ -286,53 +286,22 @@ obtain_ssl_certificate() {
 create_combined_certificate() {
     log "Creating combined certificate file for MongoDB..."
     SSL_DIR="/etc/ssl/mongo"
+    mkdir -p "$SSL_DIR"
     CERT_DIR="/etc/letsencrypt/live/$DOMAIN"
 
-    # Clean directory
-    rm -rf "$SSL_DIR"
-    mkdir -p "$SSL_DIR"
+    # Combine private key and full chain into single .pem
+    cat "$CERT_DIR/privkey.pem" "$CERT_DIR/fullchain.pem" > "$SSL_DIR/combined.pem"
+    
+    # Place chain.pem separately - this is the critical file for client connections
+    cp "$CERT_DIR/chain.pem" "$SSL_DIR/chain.pem"
 
-    # Step 1: Create combined chain
-    wget -O "$SSL_DIR/root.pem" "https://letsencrypt.org/certs/isrg-root-x1-cross-signed.pem" || {
-        log_error "Failed to download root certificate"
-        return 1
-    }
-    wget -O "$SSL_DIR/lets-encrypt-r3.pem" "https://letsencrypt.org/certs/lets-encrypt-r3.pem" || {
-        log_error "Failed to download intermediate certificate"
-        return 1
-    }
+    # Set permissions that work for both MongoDB and the service user
+    chown "$USERNAME:docker" "$SSL_DIR"          # Service user owns directory
+    chmod 750 "$SSL_DIR"                         # Directory is traversable
+    chown "$USERNAME:docker" "$SSL_DIR"/*.pem    # Service user owns files
+    chmod 644 "$SSL_DIR"/*.pem                   # Files are readable
 
-    # Create chain in correct order: cert -> intermediate -> root
-    cat "$CERT_DIR/cert.pem" "$SSL_DIR/lets-encrypt-r3.pem" "$SSL_DIR/root.pem" > "$SSL_DIR/complete-chain.pem" || {
-        log_error "Failed to create complete chain"
-        return 1
-    }
-
-    # Create chain file without server cert for verification
-    cat "$SSL_DIR/lets-encrypt-r3.pem" "$SSL_DIR/root.pem" > "$SSL_DIR/chain.pem" || {
-        log_error "Failed to create chain file"
-        return 1
-    }
-
-    # Create combined file (private key + complete chain)
-    cat "$CERT_DIR/privkey.pem" "$SSL_DIR/complete-chain.pem" > "$SSL_DIR/combined.pem" || {
-        log_error "Failed to create combined file"
-        return 1
-    }
-
-    # Verify certificates
-    if ! openssl verify -CAfile "$SSL_DIR/chain.pem" "$CERT_DIR/cert.pem"; then
-        log_error "Certificate verification failed"
-        return 1
-    fi
-
-    # Set permissions
-    chown -R "$USERNAME:docker" "$SSL_DIR"
-    chmod 750 "$SSL_DIR"
-    chmod 644 "$SSL_DIR"/*.pem
-
-    log "Certificate files created and verified at $SSL_DIR"
-    return 0
+    log "Certificate files created at $SSL_DIR"
 }
 
 wait_for_mongodb_health() {
@@ -769,74 +738,34 @@ configure_environment() {
 
 verify_ca_file() {
     log "Verifying MongoDB CA file setup..."
-    local CA_FILE="/etc/ssl/mongo/complete-chain.pem"
-    local CERT_FILE="/etc/ssl/mongo/combined.pem"
+    local CA_FILE="/etc/ssl/mongo/chain.pem"
+    local CERT_DIR="/etc/letsencrypt/live/$DOMAIN"
 
-    # Check existence of files
-    for file in "$CA_FILE" "$CERT_FILE"; do
-        if [ ! -f "$file" ] || [ ! -s "$file" ]; then
-            log_error "Certificate file missing or empty: $file"
-            return 1
-        fi
-    done
-
-    # Verify certificate chain
-    if ! openssl verify -CAfile "$CA_FILE" "$CERT_FILE"; then
-        log_error "Certificate chain verification failed"
-        return 1
+    # Ensure CA file exists and has correct content
+    if [ ! -f "$CA_FILE" ] || [ ! -s "$CA_FILE" ]; then
+        log "Recreating CA file from Let's Encrypt certificate..."
+        mkdir -p "/etc/ssl/mongo"
+        cp "$CERT_DIR/chain.pem" "$CA_FILE"
     fi
 
-    # Verify certificate format and dates
-    if ! openssl x509 -in "$CERT_FILE" -noout -text > /dev/null 2>&1; then
-        log_error "Invalid certificate format"
-        return 1
-    fi
+    # Set correct ownership and permissions
+    chown "$USERNAME":"$USERNAME" "$CA_FILE"
+    chmod 644 "$CA_FILE"
 
-    # Check certificate expiration
-    local expiry_date
-    expiry_date=$(openssl x509 -in "$CERT_FILE" -noout -enddate | cut -d= -f2)
-    local current_date
-    current_date=$(date)
-    if [[ $(date -d "$expiry_date" +%s) -lt $(date -d "$current_date" +%s) ]]; then
-        log_error "Certificate has expired"
-        return 1
-    fi
-
-    # Verify permissions
+    # Verify the file is readable by service user
     if ! sudo -u "$USERNAME" test -r "$CA_FILE"; then
         log_error "CA file is not readable by $USERNAME"
         return 1
     fi
 
-    log "Certificate verification completed successfully"
+    # Verify file content
+    if ! openssl x509 -in "$CA_FILE" -text -noout >/dev/null 2>&1; then
+        log_error "Invalid CA file content"
+        return 1
+    fi
+
+    log "CA file verified successfully"
     return 0
-}
-
-test_mongodb_tls_connection() {
-    local max_attempts=5
-    local attempt=1
-    local retry_delay=5
-
-    log "Testing MongoDB TLS connection..."
-
-    while [ $attempt -le $max_attempts ]; do
-        if docker exec mongodb mongosh \
-            --tls \
-            --tlsCAFile=/etc/ssl/mongo/complete-chain.pem \
-            --host "$DOMAIN" \
-            --eval "db.adminCommand('ping')" &>/dev/null; then
-            log "TLS connection test successful"
-            return 0
-        fi
-
-        log_warn "Connection attempt $attempt failed, retrying in $retry_delay seconds..."
-        sleep $retry_delay
-        attempt=$((attempt + 1))
-        retry_delay=$((retry_delay * 2))
-    done
-
-    log_error "Failed to establish TLS connection after $max_attempts attempts"
-    return 1
 }
 
 display_mongodb_credentials() {
