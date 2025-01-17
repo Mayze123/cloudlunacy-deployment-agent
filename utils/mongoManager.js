@@ -4,19 +4,15 @@ const fs = require("fs").promises;
 
 class MongoManager {
   constructor() {
-    // Root credentials - used only for initial setup
-    this.rootUsername = process.env.MONGO_INITDB_ROOT_USERNAME;
-    this.rootPassword = process.env.MONGO_INITDB_ROOT_PASSWORD;
-
     // Manager credentials
     this.managerUsername = process.env.MONGO_MANAGER_USERNAME;
     this.managerPassword = process.env.MONGO_MANAGER_PASSWORD;
 
-    // MongoDB connection settings
+    // Connection settings
     this.mongoHost = process.env.MONGO_HOST || "mongodb.cloudlunacy.uk";
     this.mongoPort = process.env.MONGO_PORT || "27017";
 
-    // TLS settings
+    // Certificate paths
     this.caFile = process.env.MONGODB_CA_FILE || "/etc/ssl/mongo/chain.pem";
 
     this.client = null;
@@ -103,63 +99,60 @@ class MongoManager {
       return;
     }
 
-    let client = null;
     try {
-      // Verify certificates before attempting connection
+      // Check certificates first
       await this.checkCertificates();
 
-      // Wait for MongoDB to be ready
-      await this.waitForMongoDB();
-
-      const uri = `mongodb://${this.rootUsername}:${this.rootPassword}@${this.mongoHost}:${this.mongoPort}/admin`;
-      client = new MongoClient(uri, {
+      // Create MongoDB connection options
+      const uri = `mongodb://${this.mongoHost}:${this.mongoPort}/admin`;
+      const options = {
+        auth: {
+          username: this.managerUsername,
+          password: this.managerPassword,
+        },
         tls: true,
-        tlsCAFile: this.certPaths.chain,
-        serverSelectionTimeoutMS: 30000,
+        tlsCAFile: this.caFile,
+        authSource: "admin",
+        authMechanism: "SCRAM-SHA-256",
         directConnection: true,
-      });
+        serverSelectionTimeoutMS: 5000,
+      };
 
+      // Create client and test connection
+      const client = new MongoClient(uri, options);
       await client.connect();
-      const adminDb = client.db("admin");
 
-      // Check if management user exists
-      const users = await adminDb.command({ usersInfo: this.managerUsername });
+      // Verify connection with ping
+      const pingResult = await client.db("admin").command({ ping: 1 });
+      logger.info("Successfully connected to MongoDB", pingResult);
 
-      if (users.users.length === 0) {
-        logger.info("Creating new management user...");
-        await adminDb.addUser(this.managerUsername, this.managerPassword, {
-          roles: [
-            { role: "userAdminAnyDatabase", db: "admin" },
-            { role: "readWriteAnyDatabase", db: "admin" },
-            { role: "clusterMonitor", db: "admin" },
-          ],
-          mechanisms: ["SCRAM-SHA-256"],
-        });
-        logger.info("Management user created successfully");
-      } else {
-        logger.info("Management user already exists");
-      }
+      // Close test connection
+      await client.close();
 
       this.isInitialized = true;
+      logger.info("MongoDB manager initialized successfully");
     } catch (error) {
-      logger.error("Failed to initialize manager user:", error);
+      logger.error("Failed to initialize manager user:", error.message);
       throw error;
-    } finally {
-      if (client) {
-        await client.close();
-      }
     }
   }
 
   async connect() {
     try {
+      if (!this.isInitialized) {
+        await this.initializeManagerUser();
+      }
+
       if (!this.client) {
-        const uri = `mongodb://${this.managerUsername}:${this.managerPassword}@${this.mongoHost}:${this.mongoPort}/admin`;
+        const uri = `mongodb://${this.mongoHost}:${this.mongoPort}/admin`;
 
         this.client = new MongoClient(uri, {
+          auth: {
+            username: this.managerUsername,
+            password: this.managerPassword,
+          },
           tls: true,
           tlsCAFile: this.caFile,
-          tlsAllowInvalidCertificates: false,
           authSource: "admin",
           authMechanism: "SCRAM-SHA-256",
           directConnection: true,
@@ -167,13 +160,12 @@ class MongoManager {
         });
 
         await this.client.connect();
-        const result = await this.client.db("admin").command({ ping: 1 });
-        logger.info("Connected to MongoDB successfully", result);
+        logger.info("Connected to MongoDB successfully");
       }
 
       return this.client;
     } catch (error) {
-      logger.error("Connection failed:", error);
+      logger.error("Connection failed:", error.message);
       throw error;
     }
   }
@@ -193,7 +185,7 @@ class MongoManager {
       );
       return { dbName, username, password };
     } catch (error) {
-      logger.error("Error creating database and user:", error);
+      logger.error("Error creating database and user:", error.message);
       throw error;
     }
   }
