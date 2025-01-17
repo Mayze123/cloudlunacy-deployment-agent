@@ -7,11 +7,13 @@ const execPromise = util.promisify(exec);
 
 class MongoManager {
   constructor() {
-    // Root credentials
+    // Use the domain name that matches the SSL certificate
+    this.mongoHost = process.env.MONGO_HOST || "mongodb.cloudlunacy.uk";
+    this.mongoPort = process.env.MONGO_PORT || "27017";
+
+    // Credentials from environment
     this.rootUsername = process.env.MONGO_INITDB_ROOT_USERNAME;
     this.rootPassword = process.env.MONGO_INITDB_ROOT_PASSWORD;
-
-    // Manager credentials
     this.managerUsername = process.env.MONGO_MANAGER_USERNAME;
     this.managerPassword = process.env.MONGO_MANAGER_PASSWORD;
 
@@ -19,17 +21,6 @@ class MongoManager {
     this.certPaths = {
       combined: "/etc/ssl/mongo/combined.pem",
       chain: "/etc/ssl/mongo/chain.pem",
-    };
-
-    // Connection options
-    this.commonOptions = {
-      tls: true,
-      tlsCertificateKeyFile: this.certPaths.combined,
-      tlsCAFile: this.certPaths.chain,
-      tlsAllowInvalidHostnames: false,
-      useUnifiedTopology: false,
-      serverSelectionTimeoutMS: 30000,
-      connectTimeoutMS: 30000,
     };
 
     this.client = null;
