@@ -291,15 +291,21 @@ create_combined_certificate() {
 
     # Combine private key and full chain into single .pem
     cat "$CERT_DIR/privkey.pem" "$CERT_DIR/fullchain.pem" > "$SSL_DIR/combined.pem"
-    
-    # Place chain.pem separately - this is the critical file for client connections
+
+    # Copy the default chain (intermediate only)
     cp "$CERT_DIR/chain.pem" "$SSL_DIR/chain.pem"
 
-    # Set permissions that work for both MongoDB and the service user
-    chown "$USERNAME:docker" "$SSL_DIR"          # Service user owns directory
-    chmod 750 "$SSL_DIR"                         # Directory is traversable
-    chown "$USERNAME:docker" "$SSL_DIR"/*.pem    # Service user owns files
-    chmod 644 "$SSL_DIR"/*.pem                   # Files are readable
+    # ADDED: Download Let’s Encrypt root cert and append it to chain.pem
+    curl -s https://letsencrypt.org/certs/isrgrootx1.pem > "$SSL_DIR/isrgrootx1.pem"
+    cat "$SSL_DIR/chain.pem" "$SSL_DIR/isrgrootx1.pem" > "$SSL_DIR/chain-with-root.pem"
+    mv "$SSL_DIR/chain-with-root.pem" "$SSL_DIR/chain.pem"
+    rm -f "$SSL_DIR/isrgrootx1.pem"
+
+    # Adjust file ownership/permissions
+    chown "$USERNAME:docker" "$SSL_DIR"
+    chmod 750 "$SSL_DIR"
+    chown "$USERNAME:docker" "$SSL_DIR"/*.pem
+    chmod 644 "$SSL_DIR"/*.pem
 
     log "Certificate files created at $SSL_DIR"
 }
