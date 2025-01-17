@@ -292,40 +292,36 @@ create_combined_certificate() {
     rm -rf "$SSL_DIR"
     mkdir -p "$SSL_DIR"
 
-    # Step 1: Copy fresh certificates
-    cp "$CERT_DIR/privkey.pem" "$SSL_DIR/privkey.pem" || {
-        log_error "Failed to copy private key"
-        return 1
-    }
-    cp "$CERT_DIR/fullchain.pem" "$SSL_DIR/fullchain.pem" || {
-        log_error "Failed to copy fullchain certificate"
-        return 1
-    }
-    cp "$CERT_DIR/chain.pem" "$SSL_DIR/chain.pem" || {
-        log_error "Failed to copy chain certificate"
-        return 1
-    }
-
-    # Step 2: Download root certificate
-    curl -s -o "$SSL_DIR/root.pem" https://letsencrypt.org/certs/isrg-root-x1-cross-signed.pem || {
+    # Step 1: Create combined chain
+    wget -O "$SSL_DIR/root.pem" "https://letsencrypt.org/certs/isrg-root-x1-cross-signed.pem" || {
         log_error "Failed to download root certificate"
         return 1
     }
+    wget -O "$SSL_DIR/lets-encrypt-r3.pem" "https://letsencrypt.org/certs/lets-encrypt-r3.pem" || {
+        log_error "Failed to download intermediate certificate"
+        return 1
+    }
 
-    # Step 3: Create complete chain with root cert
-    cat "$SSL_DIR/chain.pem" "$SSL_DIR/root.pem" > "$SSL_DIR/complete-chain.pem" || {
+    # Create chain in correct order: cert -> intermediate -> root
+    cat "$CERT_DIR/cert.pem" "$SSL_DIR/lets-encrypt-r3.pem" "$SSL_DIR/root.pem" > "$SSL_DIR/complete-chain.pem" || {
         log_error "Failed to create complete chain"
         return 1
     }
 
-    # Step 4: Create combined certificate
-    cat "$SSL_DIR/privkey.pem" "$SSL_DIR/fullchain.pem" > "$SSL_DIR/combined.pem" || {
-        log_error "Failed to create combined certificate"
+    # Create chain file without server cert for verification
+    cat "$SSL_DIR/lets-encrypt-r3.pem" "$SSL_DIR/root.pem" > "$SSL_DIR/chain.pem" || {
+        log_error "Failed to create chain file"
         return 1
     }
 
-    # Step 5: Verify certificates
-    if ! openssl verify -CAfile "$SSL_DIR/complete-chain.pem" "$SSL_DIR/combined.pem"; then
+    # Create combined file (private key + complete chain)
+    cat "$CERT_DIR/privkey.pem" "$SSL_DIR/complete-chain.pem" > "$SSL_DIR/combined.pem" || {
+        log_error "Failed to create combined file"
+        return 1
+    }
+
+    # Verify certificates
+    if ! openssl verify -CAfile "$SSL_DIR/chain.pem" "$CERT_DIR/cert.pem"; then
         log_error "Certificate verification failed"
         return 1
     fi
@@ -814,6 +810,33 @@ verify_ca_file() {
 
     log "Certificate verification completed successfully"
     return 0
+}
+
+test_mongodb_tls_connection() {
+    local max_attempts=5
+    local attempt=1
+    local retry_delay=5
+
+    log "Testing MongoDB TLS connection..."
+
+    while [ $attempt -le $max_attempts ]; do
+        if docker exec mongodb mongosh \
+            --tls \
+            --tlsCAFile=/etc/ssl/mongo/complete-chain.pem \
+            --host "$DOMAIN" \
+            --eval "db.adminCommand('ping')" &>/dev/null; then
+            log "TLS connection test successful"
+            return 0
+        fi
+
+        log_warn "Connection attempt $attempt failed, retrying in $retry_delay seconds..."
+        sleep $retry_delay
+        attempt=$((attempt + 1))
+        retry_delay=$((retry_delay * 2))
+    done
+
+    log_error "Failed to establish TLS connection after $max_attempts attempts"
+    return 1
 }
 
 display_mongodb_credentials() {

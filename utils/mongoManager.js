@@ -26,8 +26,8 @@ class MongoManager {
       tls: true,
       tlsCertificateKeyFile: this.certPaths.combined,
       tlsCAFile: this.certPaths.chain,
-      tlsAllowInvalidHostnames: true,
-      useUnifiedTopology: true,
+      tlsAllowInvalidHostnames: false,
+      useUnifiedTopology: false,
       serverSelectionTimeoutMS: 30000,
       connectTimeoutMS: 30000,
     };
