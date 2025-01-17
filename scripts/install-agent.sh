@@ -729,8 +729,38 @@ configure_env() {
     # First ensure directory exists
     mkdir -p "$BASE_DIR"
     
-    # Source MongoDB environment
+    # Source MongoDB environment and verify credentials exist
+    if [ ! -f "$MONGO_ENV_FILE" ]; then
+        log_error "MongoDB environment file not found at $MONGO_ENV_FILE"
+        return 1
+    fi
+    
+    # Source the MongoDB environment file
+    set +u  # Temporarily disable errors for unbound variables
     source "$MONGO_ENV_FILE"
+    set -u
+
+    # Verify required MongoDB variables are set
+    if [ -z "${MONGO_MANAGER_USERNAME:-}" ] || [ -z "${MONGO_MANAGER_PASSWORD:-}" ]; then
+        log_error "MongoDB manager credentials not found in environment file"
+        return 1
+    fi
+
+    # Log verification of credentials (without exposing them)
+    log "Verifying MongoDB manager credentials..."
+    if ! docker exec mongodb mongosh \
+        --tls \
+        --tlsAllowInvalidCertificates \
+        --tlsCAFile=/etc/ssl/mongo/chain.pem \
+        --host "$DOMAIN" \
+        -u "${MONGO_MANAGER_USERNAME}" \
+        -p "${MONGO_MANAGER_PASSWORD}" \
+        --eval "db.adminCommand('ping')" &>/dev/null; then
+        log_error "Failed to verify MongoDB manager credentials"
+        return 1
+    fi
+
+    log "MongoDB manager credentials verified successfully"
     
     # Create environment file with explicit values
     cat > "$ENV_FILE" << EOL
@@ -739,7 +769,7 @@ AGENT_API_TOKEN="${AGENT_TOKEN}"
 SERVER_ID="${SERVER_ID}"
 MONGO_MANAGER_USERNAME="${MONGO_MANAGER_USERNAME}"
 MONGO_MANAGER_PASSWORD="${MONGO_MANAGER_PASSWORD}"
-MONGO_HOST="mongodb.cloudlunacy.uk"
+MONGO_HOST="$DOMAIN"
 MONGO_PORT=27017
 MONGO_CA_FILE=/etc/ssl/mongo/chain.pem
 MONGODB_CA_FILE=/etc/ssl/mongo/chain.pem
@@ -749,12 +779,28 @@ EOL
     chown "$USERNAME:$USERNAME" "$ENV_FILE"
     chmod 600 "$ENV_FILE"
     
-    # Verify file
+    # Verify file contents
     if [ ! -s "$ENV_FILE" ]; then
         log_error "Environment file is empty or not created properly"
         return 1
     fi
+
+    # Verify required variables are present
+    local required_vars=(
+        "MONGO_MANAGER_USERNAME"
+        "MONGO_MANAGER_PASSWORD"
+        "MONGO_HOST"
+        "MONGODB_CA_FILE"
+    )
+
+    for var in "${required_vars[@]}"; do
+        if ! grep -q "^${var}=" "$ENV_FILE"; then
+            log_error "Missing required variable ${var} in environment file"
+            return 1
+        fi
+    fi
     
+    log "Environment configuration completed successfully"
     return 0
 }
 
