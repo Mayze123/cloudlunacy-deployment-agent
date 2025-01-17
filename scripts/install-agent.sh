@@ -902,14 +902,27 @@ setup_service() {
     log "Setting up CloudLunacy Deployment Agent as a systemd service..."
     SERVICE_FILE="/etc/systemd/system/cloudlunacy.service"
 
-    # Verify file access before proceeding
-    if ! sudo -u "$USERNAME" test -r "/etc/ssl/mongo/chain.pem"; then
-        log_error "CA file not readable by $USERNAME"
-        ls -l /etc/ssl/mongo/chain.pem
-        return 1
-    fi
+    # Verify required files and permissions
+    local required_files=(
+        "/etc/ssl/mongo/chain.pem"
+        "$BASE_DIR/.env"
+        "$BASE_DIR/agent.js"
+    )
 
-    # Create service with explicit CA file environment
+    for file in "${required_files[@]}"; do
+        if [ ! -f "$file" ]; then
+            log_error "Required file not found: $file"
+            return 1
+        fi
+        
+        # Ensure files are readable by service user
+        if ! sudo -u "$USERNAME" test -r "$file"; then
+            log_error "File not readable by $USERNAME: $file"
+            chmod 644 "$file"
+        fi
+    done
+
+    # Create systemd service file with explicit environment configuration
     cat > "$SERVICE_FILE" << EOF
 [Unit]
 Description=CloudLunacy Deployment Agent
@@ -922,43 +935,80 @@ User=$USERNAME
 Group=docker
 Environment=HOME=$BASE_DIR
 Environment=NODE_ENV=production
-Environment=SSL_CERT_DIR=/etc/ssl/mongo
-Environment=SSL_CERT_FILE=/etc/ssl/mongo/chain.pem
+Environment=MONGODB_CA_FILE=/etc/ssl/mongo/chain.pem
 Environment=NODE_EXTRA_CA_CERTS=/etc/ssl/mongo/chain.pem
 EnvironmentFile=$BASE_DIR/.env
 WorkingDirectory=$BASE_DIR
 ExecStart=/usr/bin/node $BASE_DIR/agent.js
-Restart=on-failure
+
+# Restart configuration
+Restart=always
 RestartSec=10
+StartLimitInterval=200
+StartLimitBurst=5
 
 # Security directives
 ProtectSystem=full
 ReadOnlyPaths=/etc/ssl/mongo
 ReadWritePaths=$BASE_DIR
+NoNewPrivileges=true
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
     chmod 644 "$SERVICE_FILE"
-    systemctl daemon-reload
-    systemctl stop cloudlunacy || true
-    sleep 2
-    systemctl start cloudlunacy
-    
-    # Verify service status with more detailed diagnostics
-    sleep 5
-    if ! systemctl is-active --quiet cloudlunacy; then
-        log_error "Service failed to start. Diagnostics:"
-        echo "CA File permissions:"
-        ls -l /etc/ssl/mongo/chain.pem
-        echo "Environment file permissions:"
-        ls -l "$BASE_DIR/.env"
-        echo "Service logs:"
-        journalctl -u cloudlunacy --no-pager -n 50
+
+    # Verify service file syntax
+    if ! systemctl verify "$SERVICE_FILE" &>/dev/null; then
+        log_error "Invalid service file configuration"
         return 1
     fi
 
+    # Clean existing service state
+    systemctl stop cloudlunacy 2>/dev/null || true
+    systemctl disable cloudlunacy 2>/dev/null || true
+    systemctl daemon-reload
+
+    # Start and enable the service
+    log "Starting CloudLunacy service..."
+    systemctl enable cloudlunacy
+    systemctl start cloudlunacy
+
+    # Wait for service to stabilize
+    sleep 5
+
+    # Check service status with detailed diagnostics
+    if ! systemctl is-active --quiet cloudlunacy; then
+        log_error "Service failed to start. Diagnostics:"
+        
+        echo "File permissions:"
+        ls -l /etc/ssl/mongo/chain.pem
+        ls -l "$BASE_DIR/.env"
+        ls -l "$BASE_DIR/agent.js"
+        
+        echo "Environment file contents verification:"
+        if [ -f "$BASE_DIR/.env" ]; then
+            # Print number of lines without showing sensitive content
+            wc -l "$BASE_DIR/.env"
+            # Verify required variables exist (without showing values)
+            grep -q "MONGODB_CA_FILE=" "$BASE_DIR/.env" || echo "Missing MONGODB_CA_FILE"
+            grep -q "MONGO_HOST=" "$BASE_DIR/.env" || echo "Missing MONGO_HOST"
+        else
+            echo "Environment file not found"
+        fi
+        
+        echo "Service Status:"
+        systemctl status cloudlunacy
+        
+        echo "Service Logs:"
+        journalctl -u cloudlunacy --no-pager -n 50
+        
+        return 1
+    fi
+
+    log "CloudLunacy service started successfully"
     return 0
 }
 
