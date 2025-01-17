@@ -331,6 +331,29 @@ wait_for_mongodb_health() {
     return 1
 }
 
+wait_for_mongodb() {
+    log "Waiting for MongoDB container to be ready..."
+    local max_attempts=30
+    local attempt=1
+    
+    while [ $attempt -le $max_attempts ]; do
+        if docker ps --filter "name=mongodb" --format "{{.Status}}" | grep -q "Up"; then
+            # Additional check to ensure MongoDB is actually ready
+            if docker exec mongodb mongosh --eval "db.adminCommand('ping')" &>/dev/null; then
+                log "MongoDB is ready"
+                return 0
+            fi
+        fi
+        log "Waiting for MongoDB to be ready (attempt $attempt/$max_attempts)..."
+        sleep 10
+        attempt=$((attempt + 1))
+    done
+    
+    log_error "MongoDB failed to become ready after $max_attempts attempts"
+    docker logs mongodb
+    return 1
+}
+
 generate_mongo_credentials() {
     log "Generating MongoDB credentials..."
 
@@ -377,18 +400,23 @@ services:
       mongod
       --bind_ip_all
     volumes:
-      - mongo_data:/data/db
+      - mongo_data:/data/db:rw
       - /etc/ssl/mongo:/etc/ssl/mongo:ro
     networks:
       internal:
         aliases:
           - $DOMAIN
     healthcheck:
-      test: mongosh --eval "db.adminCommand('ping')"
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
       interval: 10s
       timeout: 5s
-      retries: 3
-      start_period: 20s
+      retries: 5
+      start_period: 30s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   mongo_data:
@@ -402,23 +430,40 @@ COMPOSE
     sudo -u "$USERNAME" docker-compose -f docker-compose.mongodb.yml down
     sudo -u "$USERNAME" docker-compose -f docker-compose.mongodb.yml up -d
 
-    # Wait for initial MongoDB to be healthy
-    sleep 30
+    # Wait for MongoDB to be ready
+    if ! wait_for_mongodb; then
+        return 1
+    fi
 
     # Step 2: Create root user
     log "Step 2: Creating root user..."
     MONGO_INITDB_ROOT_USERNAME=$(openssl rand -hex 12)
     MONGO_INITDB_ROOT_PASSWORD=$(openssl rand -hex 24)
 
-    # Create root user without auth
-    if ! docker exec mongodb mongosh --eval "
-        db.getSiblingDB('admin').createUser({
-            user: '$MONGO_INITDB_ROOT_USERNAME',
-            pwd: '$MONGO_INITDB_ROOT_PASSWORD',
-            roles: ['root']
-        })
-    "; then
-        log_error "Failed to create root user"
+    # Create root user with retries
+    local max_attempts=5
+    local attempt=1
+    local root_user_created=false
+    
+    while [ $attempt -le $max_attempts ] && [ "$root_user_created" = false ]; do
+        if docker exec mongodb mongosh --eval "
+            db.getSiblingDB('admin').createUser({
+                user: '$MONGO_INITDB_ROOT_USERNAME',
+                pwd: '$MONGO_INITDB_ROOT_PASSWORD',
+                roles: ['root']
+            })
+        "; then
+            root_user_created=true
+            log "Root user created successfully"
+        else
+            log "Root user creation attempt $attempt failed, retrying..."
+            sleep 10
+            attempt=$((attempt + 1))
+        fi
+    done
+
+    if [ "$root_user_created" = false ]; then
+        log_error "Failed to create root user after $max_attempts attempts"
         return 1
     fi
 
@@ -453,7 +498,7 @@ services:
       --tlsAllowConnectionsWithoutCertificates
       --bind_ip_all
     volumes:
-      - mongo_data:/data/db
+      - mongo_data:/data/db:rw
       - /etc/ssl/mongo:/etc/ssl/mongo:ro
     networks:
       internal:
@@ -471,8 +516,13 @@ services:
         --eval "db.adminCommand('ping')"
       interval: 10s
       timeout: 5s
-      retries: 3
-      start_period: 20s
+      retries: 5
+      start_period: 30s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   mongo_data:
@@ -485,27 +535,29 @@ COMPOSE
     sudo -u "$USERNAME" docker-compose --env-file "$MONGO_ENV_FILE" -f docker-compose.mongodb.yml down
     sudo -u "$USERNAME" docker-compose --env-file "$MONGO_ENV_FILE" -f docker-compose.mongodb.yml up -d
 
-    # Wait for secure MongoDB to be healthy
-    sleep 30
+    # Wait for secure MongoDB to be ready
+    if ! wait_for_mongodb; then
+        return 1
+    fi
 
     # Verify secure connection
     log "Verifying secure connection..."
-    docker exec mongodb mongosh \
+    if ! docker exec mongodb mongosh \
         --tls \
         --tlsAllowInvalidCertificates \
         --tlsCAFile=/etc/ssl/mongo/chain.pem \
         --host "$DOMAIN" \
         -u "$MONGO_INITDB_ROOT_USERNAME" \
         -p "$MONGO_INITDB_ROOT_PASSWORD" \
-        --eval "db.adminCommand('ping')"
-
-    if [ $? -eq 0 ]; then
-        log "MongoDB setup completed successfully"
-    else
+        --eval "db.adminCommand('ping')"; then
+        
         log_error "Failed to verify secure MongoDB connection"
         docker logs mongodb
         return 1
     fi
+
+    log "MongoDB setup completed successfully"
+    return 0
 }
 
 create_mongo_management_user() {
