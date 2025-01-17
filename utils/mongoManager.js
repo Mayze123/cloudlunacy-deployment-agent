@@ -1,21 +1,20 @@
 const { MongoClient } = require("mongodb");
 const logger = require("./logger");
-const fs = require("fs");
-const { exec } = require("child_process");
-const util = require("util");
-const execPromise = util.promisify(exec);
+const fs = require("fs").promises;
 
 class MongoManager {
   constructor() {
-    // Use the domain name that matches the SSL certificate
-    this.mongoHost = process.env.MONGO_HOST || "mongodb.cloudlunacy.uk";
-    this.mongoPort = process.env.MONGO_PORT || "27017";
-
-    // Credentials from environment
+    // Root credentials
     this.rootUsername = process.env.MONGO_INITDB_ROOT_USERNAME;
     this.rootPassword = process.env.MONGO_INITDB_ROOT_PASSWORD;
+
+    // Manager credentials
     this.managerUsername = process.env.MONGO_MANAGER_USERNAME;
     this.managerPassword = process.env.MONGO_MANAGER_PASSWORD;
+
+    // MongoDB configuration
+    this.mongoHost = process.env.MONGO_HOST || "mongodb.cloudlunacy.uk";
+    this.mongoPort = process.env.MONGO_PORT || "27017";
 
     // Certificate paths
     this.certPaths = {
@@ -27,37 +26,28 @@ class MongoManager {
     this.isInitialized = false;
   }
 
-  async getMongoContainerIP() {
-    try {
-      const { stdout } = await execPromise(
-        "docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' mongodb"
-      );
-      const ip = stdout.trim();
-      if (!ip) {
-        throw new Error("Could not retrieve MongoDB container IP");
-      }
-      logger.info(`Retrieved MongoDB container IP: ${ip}`);
-      return ip;
-    } catch (error) {
-      logger.error("Error getting MongoDB container IP:", error);
-      throw error;
-    }
-  }
-
   async checkCertificates() {
     try {
       for (const [key, path] of Object.entries(this.certPaths)) {
-        const stats = await fs.promises.stat(path);
+        const stats = await fs.stat(path);
         logger.info(`Certificate ${key}: ${path} (size: ${stats.size} bytes)`);
 
         if (stats.size === 0) {
           throw new Error(`Certificate file ${path} is empty`);
         }
+
+        // Verify file permissions
+        const mode = (stats.mode & parseInt("777", 8)).toString(8);
+        logger.info(`Certificate ${key} permissions: ${mode}`);
+
+        if (mode !== "644" && mode !== "640") {
+          logger.warn(`Certificate ${key} has unexpected permissions: ${mode}`);
+        }
       }
       return true;
     } catch (error) {
       logger.error("Certificate check failed:", error);
-      return false;
+      throw error;
     }
   }
 
@@ -73,14 +63,14 @@ class MongoManager {
         const uri = `mongodb://${this.rootUsername}:${this.rootPassword}@${this.mongoHost}:${this.mongoPort}/admin`;
         const client = new MongoClient(uri, {
           tls: true,
-          tlsCertificateKeyFile: this.certPaths.combined,
           tlsCAFile: this.certPaths.chain,
           serverSelectionTimeoutMS: 5000,
           directConnection: true,
         });
 
         await client.connect();
-        await client.db("admin").command({ ping: 1 });
+        const result = await client.db("admin").command({ ping: 1 });
+        logger.info("MongoDB ping result:", result);
         await client.close();
 
         logger.info("Successfully connected to MongoDB");
@@ -95,7 +85,10 @@ class MongoManager {
           );
         }
 
-        await new Promise((resolve) => setTimeout(resolve, retryDelay));
+        // Add exponential backoff
+        const backoffDelay = retryDelay * Math.pow(1.5, attempt - 1);
+        logger.info(`Waiting ${backoffDelay}ms before next attempt...`);
+        await new Promise((resolve) => setTimeout(resolve, backoffDelay));
       }
     }
   }
@@ -107,24 +100,33 @@ class MongoManager {
 
     let client = null;
     try {
+      // Verify certificates before attempting connection
+      await this.checkCertificates();
+
+      // Wait for MongoDB to be ready
       await this.waitForMongoDB();
 
-      const mongoIP = await this.getMongoContainerIP();
-      const host = "mongodb.cloudlunacy.uk";
-      const uri = `mongodb://${this.rootUsername}:${this.rootPassword}@${host}:27017/admin`;
-
-      client = new MongoClient(uri, this.commonOptions);
+      const uri = `mongodb://${this.rootUsername}:${this.rootPassword}@${this.mongoHost}:${this.mongoPort}/admin`;
+      client = new MongoClient(uri, {
+        tls: true,
+        tlsCAFile: this.certPaths.chain,
+        serverSelectionTimeoutMS: 30000,
+        directConnection: true,
+      });
 
       await client.connect();
       const adminDb = client.db("admin");
 
+      // Check if management user exists
       const users = await adminDb.command({ usersInfo: this.managerUsername });
 
       if (users.users.length === 0) {
+        logger.info("Creating new management user...");
         await adminDb.addUser(this.managerUsername, this.managerPassword, {
           roles: [
             { role: "userAdminAnyDatabase", db: "admin" },
             { role: "readWriteAnyDatabase", db: "admin" },
+            { role: "clusterMonitor", db: "admin" },
           ],
           mechanisms: ["SCRAM-SHA-256"],
         });
@@ -144,24 +146,6 @@ class MongoManager {
     }
   }
 
-  async getMongoUri(useRootCredentials = false) {
-    try {
-      // Use the domain name instead of container IP
-      const host = "mongodb.cloudlunacy.uk";
-      const username = useRootCredentials
-        ? this.rootUsername
-        : this.managerUsername;
-      const password = useRootCredentials
-        ? this.rootPassword
-        : this.managerPassword;
-
-      return `mongodb://${username}:${password}@${host}:27017/admin?ssl=true`;
-    } catch (error) {
-      logger.error("Error generating MongoDB URI:", error);
-      throw error;
-    }
-  }
-
   async connect() {
     try {
       if (!this.isInitialized) {
@@ -173,18 +157,30 @@ class MongoManager {
 
         this.client = new MongoClient(uri, {
           tls: true,
-          tlsCertificateKeyFile: this.certPaths.combined,
           tlsCAFile: this.certPaths.chain,
           serverSelectionTimeoutMS: 30000,
           connectTimeoutMS: 30000,
           directConnection: true,
         });
+
+        // Add connection event listeners
+        this.client.on("connectionReady", () => {
+          logger.info("MongoDB connection established");
+        });
+
+        this.client.on("close", () => {
+          logger.info("MongoDB connection closed");
+        });
+
+        this.client.on("error", (err) => {
+          logger.error("MongoDB connection error:", err);
+        });
       }
 
       if (!this.client.isConnected()) {
         await this.client.connect();
-        await this.client.db("admin").command({ ping: 1 });
-        logger.info("Connected to MongoDB successfully");
+        const pingResult = await this.client.db("admin").command({ ping: 1 });
+        logger.info("Connected to MongoDB successfully", pingResult);
       }
 
       return this.client;
@@ -199,10 +195,17 @@ class MongoManager {
       const client = await this.connect();
       const db = client.db(dbName);
 
+      // Create the user with specific roles
       await db.addUser(username, password, {
         roles: [{ role: "readWrite", db: dbName }],
         mechanisms: ["SCRAM-SHA-256"],
       });
+
+      // Verify the user was created
+      const users = await db.command({ usersInfo: username });
+      if (!users.users.length) {
+        throw new Error(`Failed to verify user creation for ${username}`);
+      }
 
       logger.info(
         `Database ${dbName} and user ${username} created successfully`

@@ -413,7 +413,26 @@ COMPOSE
     sudo -u "$USERNAME" docker-compose -f docker-compose.mongodb.yml up -d
 
     # Wait for initial MongoDB to be healthy
-    sleep 30
+    log "Waiting for MongoDB to be healthy..."
+    local max_attempts=10
+    local attempt=1
+    local healthy=false
+    
+    while [ $attempt -le $max_attempts ]; do
+        if docker ps --filter "name=mongodb" --format "{{.Status}}" | grep -q "healthy"; then
+            healthy=true
+            break
+        fi
+        log "Waiting for MongoDB to be healthy (attempt $attempt/$max_attempts)..."
+        sleep 5
+        attempt=$((attempt + 1))
+    done
+
+    if [ "$healthy" != "true" ]; then
+        log_error "MongoDB failed to become healthy"
+        docker logs mongodb
+        return 1
+    fi
 
     # Step 2: Create root user
     log "Step 2: Creating root user..."
@@ -462,6 +481,8 @@ services:
       --tlsCAFile=/etc/ssl/mongo/chain.pem
       --tlsAllowConnectionsWithoutCertificates
       --bind_ip_all
+    ports:
+      - "127.0.0.1:27017:27017"  # Only bind to localhost
     volumes:
       - mongo_data:/data/db
       - /etc/ssl/mongo:/etc/ssl/mongo:ro
@@ -479,10 +500,10 @@ services:
         -u \$\${MONGO_INITDB_ROOT_USERNAME}
         -p \$\${MONGO_INITDB_ROOT_PASSWORD}
         --eval "db.adminCommand('ping')"
-      interval: 10s
+      interval: 5s
       timeout: 5s
       retries: 3
-      start_period: 20s
+      start_period: 10s
 
 volumes:
   mongo_data:
@@ -495,27 +516,50 @@ COMPOSE
     sudo -u "$USERNAME" docker-compose --env-file "$MONGO_ENV_FILE" -f docker-compose.mongodb.yml down
     sudo -u "$USERNAME" docker-compose --env-file "$MONGO_ENV_FILE" -f docker-compose.mongodb.yml up -d
 
-    # Wait for secure MongoDB to be healthy
-    sleep 30
+    # Wait for secure MongoDB to be healthy with increased timeout
+    log "Waiting for secure MongoDB to be healthy..."
+    attempt=1
+    healthy=false
+    
+    while [ $attempt -le $max_attempts ]; do
+        if docker ps --filter "name=mongodb" --format "{{.Status}}" | grep -q "healthy"; then
+            healthy=true
+            break
+        fi
+        log "Waiting for secure MongoDB to be healthy (attempt $attempt/$max_attempts)..."
+        # Show current container logs for debugging
+        docker logs --tail 10 mongodb
+        sleep 10
+        attempt=$((attempt + 1))
+    done
 
-    # Verify secure connection
-    log "Verifying secure connection..."
-    docker exec mongodb mongosh \
-        --tls \
-        --tlsAllowInvalidCertificates \
-        --tlsCAFile=/etc/ssl/mongo/chain.pem \
-        --host "$DOMAIN" \
-        -u "$MONGO_INITDB_ROOT_USERNAME" \
-        -p "$MONGO_INITDB_ROOT_PASSWORD" \
-        --eval "db.adminCommand('ping')"
-
-    if [ $? -eq 0 ]; then
-        log "MongoDB setup completed successfully"
-    else
-        log_error "Failed to verify secure MongoDB connection"
+    if [ "$healthy" != "true" ]; then
+        log_error "Secure MongoDB failed to become healthy"
         docker logs mongodb
         return 1
     fi
+
+    # Verify secure connection
+    log "Verifying secure connection..."
+    for i in {1..5}; do
+        if docker exec mongodb mongosh \
+            --tls \
+            --tlsAllowInvalidCertificates \
+            --tlsCAFile=/etc/ssl/mongo/chain.pem \
+            --host "$DOMAIN" \
+            -u "$MONGO_INITDB_ROOT_USERNAME" \
+            -p "$MONGO_INITDB_ROOT_PASSWORD" \
+            --eval "db.adminCommand('ping')"; then
+            log "MongoDB setup completed successfully"
+            return 0
+        fi
+        log "Connection attempt $i failed, retrying..."
+        sleep 5
+    done
+
+    log_error "Failed to verify secure MongoDB connection"
+    docker logs mongodb
+    return 1
 }
 
 create_mongo_management_user() {
