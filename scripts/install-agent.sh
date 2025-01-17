@@ -383,19 +383,35 @@ services:
     volumes:
       - mongo_data:/data/db
       - /etc/ssl/mongo:/etc/ssl/mongo:ro
+      - /etc/hosts:/etc/hosts:ro
     networks:
       internal:
         aliases:
           - $DOMAIN
+    dns_search:
+      - cloudlunacy.uk
+    extra_hosts:
+      - "$DOMAIN:127.0.0.1"
     healthcheck:
       test: mongosh --eval "db.adminCommand('ping')"
       interval: 10s
       timeout: 5s
       retries: 3
       start_period: 20s
+    ulimits:
+      nproc: 64000
+      nofile:
+        soft: 64000
+        hard: 64000
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "3"
 
 volumes:
   mongo_data:
+    name: mongodb_data
 
 networks:
   internal:
@@ -407,7 +423,10 @@ COMPOSE
     sudo -u "$USERNAME" docker-compose -f docker-compose.mongodb.yml up -d
 
     # Wait for initial MongoDB to be healthy
-    sleep 30
+    if ! wait_for_mongodb_health; then
+        log_error "MongoDB failed to start in initial configuration"
+        return 1
+    fi
 
     # Step 2: Create root user
     log "Step 2: Creating root user..."
@@ -419,7 +438,7 @@ COMPOSE
         db.getSiblingDB('admin').createUser({
             user: '$MONGO_INITDB_ROOT_USERNAME',
             pwd: '$MONGO_INITDB_ROOT_PASSWORD',
-            roles: ['root']
+            roles: [{role: 'root', db: 'admin'}]
         })
     "; then
         log_error "Failed to create root user"
@@ -454,15 +473,21 @@ services:
       --tlsMode=requireTLS
       --tlsCertificateKeyFile=/etc/ssl/mongo/combined.pem
       --tlsCAFile=/etc/ssl/mongo/chain.pem
-      --tlsAllowConnectionsWithoutCertificates
       --bind_ip_all
     volumes:
       - mongo_data:/data/db
       - /etc/ssl/mongo:/etc/ssl/mongo:ro
+      - /etc/hosts:/etc/hosts:ro
+    ports:
+      - "27017:27017"
     networks:
       internal:
         aliases:
           - $DOMAIN
+    dns_search:
+      - cloudlunacy.uk
+    extra_hosts:
+      - "$DOMAIN:127.0.0.1"
     healthcheck:
       test: >
         mongosh 
@@ -477,39 +502,84 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
+    ulimits:
+      nproc: 64000
+      nofile:
+        soft: 64000
+        hard: 64000
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "3"
 
 volumes:
   mongo_data:
+    name: mongodb_data
 
 networks:
   internal:
     external: true
 COMPOSE
 
+    # Add hostname to /etc/hosts if not present
+    if ! grep -q "$DOMAIN" /etc/hosts; then
+        echo "127.0.0.1 $DOMAIN" >> /etc/hosts
+    fi
+
     sudo -u "$USERNAME" docker-compose --env-file "$MONGO_ENV_FILE" -f docker-compose.mongodb.yml down
     sudo -u "$USERNAME" docker-compose --env-file "$MONGO_ENV_FILE" -f docker-compose.mongodb.yml up -d
 
     # Wait for secure MongoDB to be healthy
-    sleep 30
+    if ! wait_for_mongodb_health; then
+        log_error "MongoDB failed to start in secure configuration"
+        return 1
+    fi
 
     # Verify secure connection
     log "Verifying secure connection..."
-    docker exec mongodb mongosh \
+    if ! docker exec mongodb mongosh \
         --tls \
         --tlsAllowInvalidCertificates \
         --tlsCAFile=/etc/ssl/mongo/chain.pem \
         --host "$DOMAIN" \
         -u "$MONGO_INITDB_ROOT_USERNAME" \
         -p "$MONGO_INITDB_ROOT_PASSWORD" \
-        --eval "db.adminCommand('ping')"
-
-    if [ $? -eq 0 ]; then
-        log "MongoDB setup completed successfully"
-    else
+        --eval "db.adminCommand('ping')"; then
         log_error "Failed to verify secure MongoDB connection"
         docker logs mongodb
         return 1
     fi
+
+    # Create systemd service for MongoDB
+    cat <<EOF > /etc/systemd/system/mongodb.service
+[Unit]
+Description=MongoDB Container
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=$MONGODB_DIR
+User=$USERNAME
+Group=docker
+Environment=COMPOSE_HTTP_TIMEOUT=300
+ExecStart=/usr/local/bin/docker-compose --env-file $MONGO_ENV_FILE -f docker-compose.mongodb.yml up -d
+ExecStop=/usr/local/bin/docker-compose --env-file $MONGO_ENV_FILE -f docker-compose.mongodb.yml down
+TimeoutStartSec=0
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    # Enable and start MongoDB service
+    systemctl daemon-reload
+    systemctl enable mongodb
+    systemctl start mongodb
+
+    log "MongoDB setup completed successfully"
+    return 0
 }
 
 create_mongo_management_user() {
