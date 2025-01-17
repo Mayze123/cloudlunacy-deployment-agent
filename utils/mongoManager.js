@@ -72,25 +72,20 @@ class MongoManager {
 
   async waitForMongoDB() {
     logger.info("Waiting for MongoDB to be ready...");
-    const maxAttempts = 30;
-    const retryDelay = 2000;
-
-    // Remove the call to getMongoContainerIP()
-    // and use your real TLS domain instead:
-    const domain = "mongodb.cloudlunacy.uk"; // Must match cert’s SAN
+    const maxAttempts = 10;
+    const retryDelay = 5000;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
         logger.info(`Connection attempt ${attempt}/${maxAttempts}`);
-        const uri = `mongodb://${this.rootUsername}:${this.rootPassword}@${domain}:27017/admin`;
 
+        const uri = `mongodb://${this.rootUsername}:${this.rootPassword}@${this.mongoHost}:${this.mongoPort}/admin`;
         const client = new MongoClient(uri, {
           tls: true,
           tlsCertificateKeyFile: this.certPaths.combined,
           tlsCAFile: this.certPaths.chain,
-          // You can also leave tlsAllowInvalidHostnames=true if you wish,
-          // but best practice is to rely on the domain matching your cert.
           serverSelectionTimeoutMS: 5000,
+          directConnection: true,
         });
 
         await client.connect();
@@ -100,10 +95,12 @@ class MongoManager {
         logger.info("Successfully connected to MongoDB");
         return true;
       } catch (error) {
-        logger.warn(`Attempt ${attempt} failed:`, error.message);
+        const errorMessage = error.message || "Unknown error";
+        logger.warn(`Attempt ${attempt} failed: ${errorMessage}`);
+
         if (attempt === maxAttempts) {
           throw new Error(
-            `Failed to connect after ${maxAttempts} attempts: ${error.message}`
+            `Failed to connect after ${maxAttempts} attempts: ${errorMessage}`
           );
         }
 
@@ -181,13 +178,15 @@ class MongoManager {
       }
 
       if (!this.client) {
-        const uri = await this.getMongoUri();
+        const uri = `mongodb://${this.managerUsername}:${this.managerPassword}@${this.mongoHost}:${this.mongoPort}/admin`;
+
         this.client = new MongoClient(uri, {
           tls: true,
           tlsCertificateKeyFile: this.certPaths.combined,
           tlsCAFile: this.certPaths.chain,
           serverSelectionTimeoutMS: 30000,
           connectTimeoutMS: 30000,
+          directConnection: true,
         });
       }
 
