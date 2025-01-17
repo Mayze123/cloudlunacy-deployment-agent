@@ -482,7 +482,7 @@ services:
       --tlsAllowConnectionsWithoutCertificates
       --bind_ip_all
     ports:
-      - "127.0.0.1:27017:27017"  # Only bind to localhost
+      - "27017:27017"  
     volumes:
       - mongo_data:/data/db
       - /etc/ssl/mongo:/etc/ssl/mongo:ro
