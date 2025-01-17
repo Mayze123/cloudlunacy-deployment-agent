@@ -4,7 +4,7 @@ const fs = require("fs").promises;
 
 class MongoManager {
   constructor() {
-    // Root credentials
+    // Root credentials - used only for initial setup
     this.rootUsername = process.env.MONGO_INITDB_ROOT_USERNAME;
     this.rootPassword = process.env.MONGO_INITDB_ROOT_PASSWORD;
 
@@ -12,15 +12,12 @@ class MongoManager {
     this.managerUsername = process.env.MONGO_MANAGER_USERNAME;
     this.managerPassword = process.env.MONGO_MANAGER_PASSWORD;
 
-    // MongoDB configuration
+    // MongoDB connection settings
     this.mongoHost = process.env.MONGO_HOST || "mongodb.cloudlunacy.uk";
     this.mongoPort = process.env.MONGO_PORT || "27017";
 
-    // Certificate paths
-    this.certPaths = {
-      combined: "/etc/ssl/mongo/combined.pem",
-      chain: "/etc/ssl/mongo/chain.pem",
-    };
+    // TLS settings
+    this.caFile = process.env.MONGODB_CA_FILE || "/etc/ssl/mongo/chain.pem";
 
     this.client = null;
     this.isInitialized = false;
@@ -59,18 +56,19 @@ class MongoManager {
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
         logger.info(`Connection attempt ${attempt}/${maxAttempts}`);
+        const uri = `mongodb://${this.managerUsername}:${this.managerPassword}@${this.mongoHost}:${this.mongoPort}/admin`;
 
-        const uri = `mongodb://${this.rootUsername}:${this.rootPassword}@${this.mongoHost}:${this.mongoPort}/admin`;
         const client = new MongoClient(uri, {
           tls: true,
-          tlsCAFile: this.certPaths.chain,
-          serverSelectionTimeoutMS: 5000,
+          tlsCAFile: this.caFile,
+          tlsAllowInvalidCertificates: false,
+          authSource: "admin",
+          authMechanism: "SCRAM-SHA-256",
           directConnection: true,
         });
 
         await client.connect();
-        const result = await client.db("admin").command({ ping: 1 });
-        logger.info("MongoDB ping result:", result);
+        await client.db("admin").command({ ping: 1 });
         await client.close();
 
         logger.info("Successfully connected to MongoDB");
@@ -85,8 +83,7 @@ class MongoManager {
           );
         }
 
-        // Add exponential backoff
-        const backoffDelay = retryDelay * Math.pow(1.5, attempt - 1);
+        const backoffDelay = retryDelay;
         logger.info(`Waiting ${backoffDelay}ms before next attempt...`);
         await new Promise((resolve) => setTimeout(resolve, backoffDelay));
       }
@@ -148,39 +145,22 @@ class MongoManager {
 
   async connect() {
     try {
-      if (!this.isInitialized) {
-        await this.initializeManagerUser();
-      }
-
       if (!this.client) {
         const uri = `mongodb://${this.managerUsername}:${this.managerPassword}@${this.mongoHost}:${this.mongoPort}/admin`;
 
         this.client = new MongoClient(uri, {
           tls: true,
-          tlsCAFile: this.certPaths.chain,
-          serverSelectionTimeoutMS: 30000,
-          connectTimeoutMS: 30000,
+          tlsCAFile: this.caFile,
+          tlsAllowInvalidCertificates: false,
+          authSource: "admin",
+          authMechanism: "SCRAM-SHA-256",
           directConnection: true,
+          serverSelectionTimeoutMS: 5000,
         });
 
-        // Add connection event listeners
-        this.client.on("connectionReady", () => {
-          logger.info("MongoDB connection established");
-        });
-
-        this.client.on("close", () => {
-          logger.info("MongoDB connection closed");
-        });
-
-        this.client.on("error", (err) => {
-          logger.error("MongoDB connection error:", err);
-        });
-      }
-
-      if (!this.client.isConnected()) {
         await this.client.connect();
-        const pingResult = await this.client.db("admin").command({ ping: 1 });
-        logger.info("Connected to MongoDB successfully", pingResult);
+        const result = await this.client.db("admin").command({ ping: 1 });
+        logger.info("Connected to MongoDB successfully", result);
       }
 
       return this.client;
@@ -195,17 +175,10 @@ class MongoManager {
       const client = await this.connect();
       const db = client.db(dbName);
 
-      // Create the user with specific roles
       await db.addUser(username, password, {
         roles: [{ role: "readWrite", db: dbName }],
         mechanisms: ["SCRAM-SHA-256"],
       });
-
-      // Verify the user was created
-      const users = await db.command({ usersInfo: username });
-      if (!users.users.length) {
-        throw new Error(`Failed to verify user creation for ${username}`);
-      }
 
       logger.info(
         `Database ${dbName} and user ${username} created successfully`
