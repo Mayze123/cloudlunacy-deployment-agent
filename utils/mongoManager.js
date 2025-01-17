@@ -1,5 +1,5 @@
 const { MongoClient } = require("mongodb");
-const logger = require("./utils/logger");
+const logger = require("./logger");
 const fs = require("fs");
 const { exec } = require("child_process");
 const util = require("util");
