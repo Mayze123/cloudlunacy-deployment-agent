@@ -156,6 +156,24 @@ class MongoManager {
     }
   }
 
+  async getMongoUri(useRootCredentials = false) {
+    try {
+      // Use the domain name instead of container IP
+      const host = "mongodb.cloudlunacy.uk";
+      const username = useRootCredentials
+        ? this.rootUsername
+        : this.managerUsername;
+      const password = useRootCredentials
+        ? this.rootPassword
+        : this.managerPassword;
+
+      return `mongodb://${username}:${password}@${host}:27017/admin?ssl=true`;
+    } catch (error) {
+      logger.error("Error generating MongoDB URI:", error);
+      throw error;
+    }
+  }
+
   async connect() {
     try {
       if (!this.isInitialized) {
@@ -163,9 +181,14 @@ class MongoManager {
       }
 
       if (!this.client) {
-        const mongoIP = await this.getMongoContainerIP();
-        const uri = `mongodb://${this.managerUsername}:${this.managerPassword}@${mongoIP}:27017/?authSource=admin`;
-        this.client = new MongoClient(uri, this.commonOptions);
+        const uri = await this.getMongoUri();
+        this.client = new MongoClient(uri, {
+          tls: true,
+          tlsCertificateKeyFile: this.certPaths.combined,
+          tlsCAFile: this.certPaths.chain,
+          serverSelectionTimeoutMS: 30000,
+          connectTimeoutMS: 30000,
+        });
       }
 
       if (!this.client.isConnected()) {
