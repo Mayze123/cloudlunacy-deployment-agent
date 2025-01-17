@@ -798,7 +798,7 @@ EOL
             log_error "Missing required variable ${var} in environment file"
             return 1
         fi
-    fi
+    done
     
     log "Environment configuration completed successfully"
     return 0
