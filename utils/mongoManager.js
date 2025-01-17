@@ -122,7 +122,8 @@ class MongoManager {
       await this.waitForMongoDB();
 
       const mongoIP = await this.getMongoContainerIP();
-      const uri = `mongodb://${this.rootUsername}:${this.rootPassword}@${mongoIP}:27017/admin`;
+      const host = "mongodb.cloudlunacy.uk";
+      const uri = `mongodb://${this.rootUsername}:${this.rootPassword}@${host}:27017/admin`;
 
       client = new MongoClient(uri, this.commonOptions);
 
