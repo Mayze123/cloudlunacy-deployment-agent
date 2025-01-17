@@ -902,26 +902,26 @@ setup_service() {
     log "Setting up CloudLunacy Deployment Agent as a systemd service..."
     SERVICE_FILE="/etc/systemd/system/cloudlunacy.service"
 
-    # Verify required files and permissions
-    local required_files=(
-        "/etc/ssl/mongo/chain.pem"
-        "$BASE_DIR/.env"
-        "$BASE_DIR/agent.js"
-    )
+    # Set up logging directory with proper permissions
+    LOG_DIR="/var/log/cloudlunacy"
+    mkdir -p "$LOG_DIR"
+    chown -R "$USERNAME:$USERNAME" "$LOG_DIR"
+    chmod 750 "$LOG_DIR"
 
-    for file in "${required_files[@]}"; do
-        if [ ! -f "$file" ]; then
-            log_error "Required file not found: $file"
-            return 1
-        fi
-        
-        if ! sudo -u "$USERNAME" test -r "$file"; then
-            log_error "File not readable by $USERNAME: $file"
-            chmod 644 "$file"
-        fi
-    done
+    # Create log files
+    touch "$LOG_DIR/app.log" "$LOG_DIR/error.log"
+    chown "$USERNAME:$USERNAME" "$LOG_DIR/app.log" "$LOG_DIR/error.log"
+    chmod 640 "$LOG_DIR/app.log" "$LOG_DIR/error.log"
 
-    # Create systemd service file with correct syntax
+    # First, verify Node.js can run the application
+    log "Verifying Node.js application..."
+    if ! sudo -u "$USERNAME" bash -c "cd $BASE_DIR && NODE_ENV=production node -e 'require(\"./agent.js\")'" 2>"$LOG_DIR/verify.log"; then
+        log_error "Node.js application verification failed. Check $LOG_DIR/verify.log for details"
+        cat "$LOG_DIR/verify.log"
+        return 1
+    fi
+
+    # Create systemd service file with debug logging
     cat > "$SERVICE_FILE" << EOF
 [Unit]
 Description=CloudLunacy Deployment Agent
@@ -933,21 +933,36 @@ Type=simple
 User=$USERNAME
 Group=docker
 WorkingDirectory=$BASE_DIR
+RuntimeDirectory=cloudlunacy
+RuntimeDirectoryMode=0750
+
+# Environment setup
 Environment="HOME=$BASE_DIR"
 Environment="NODE_ENV=production"
+Environment="DEBUG=*"
+Environment="NODE_DEBUG=*"
 Environment="MONGODB_CA_FILE=/etc/ssl/mongo/chain.pem"
 Environment="NODE_EXTRA_CA_CERTS=/etc/ssl/mongo/chain.pem"
 EnvironmentFile=$BASE_DIR/.env
-ExecStart=/usr/bin/node $BASE_DIR/agent.js
+
+# Execution
+ExecStart=/usr/bin/node --trace-warnings $BASE_DIR/agent.js
+ExecStartPre=/usr/bin/node -c $BASE_DIR/agent.js
+
+# Logging
+StandardOutput=append:$LOG_DIR/app.log
+StandardError=append:$LOG_DIR/error.log
+
+# Restart configuration
 Restart=always
 RestartSec=10
-StandardOutput=append:/var/log/cloudlunacy.log
-StandardError=append:/var/log/cloudlunacy.error.log
+StartLimitInterval=200
+StartLimitBurst=5
 
-# Security settings
+# Security
 ProtectSystem=full
 ReadOnlyDirectories=/etc/ssl/mongo
-ReadWriteDirectories=$BASE_DIR
+ReadWriteDirectories=$BASE_DIR $LOG_DIR
 PrivateTmp=true
 NoNewPrivileges=true
 
@@ -955,13 +970,27 @@ NoNewPrivileges=true
 WantedBy=multi-user.target
 EOF
 
-    # Set proper permissions for service file
     chmod 644 "$SERVICE_FILE"
 
-    # Set up log files with proper permissions
-    touch /var/log/cloudlunacy.log /var/log/cloudlunacy.error.log
-    chown "$USERNAME:$USERNAME" /var/log/cloudlunacy.log /var/log/cloudlunacy.error.log
-    chmod 640 /var/log/cloudlunacy.log /var/log/cloudlunacy.error.log
+    # Verify environment file has required variables
+    ENV_CHECK=($BASE_DIR/.env)
+    REQUIRED_VARS=(
+        "BACKEND_URL"
+        "AGENT_API_TOKEN"
+        "SERVER_ID"
+        "MONGO_MANAGER_USERNAME"
+        "MONGO_MANAGER_PASSWORD"
+        "MONGO_HOST"
+        "MONGODB_CA_FILE"
+    )
+
+    log "Verifying environment variables..."
+    for var in "${REQUIRED_VARS[@]}"; do
+        if ! grep -q "^${var}=" "$BASE_DIR/.env"; then
+            log_error "Missing required environment variable: $var"
+            return 1
+        fi
+    done
 
     # Reload systemd and restart service
     systemctl daemon-reload
@@ -972,32 +1001,29 @@ EOF
     systemctl start cloudlunacy
     sleep 5
 
-    # Verify service status
+    # Check service status with enhanced diagnostics
     if ! systemctl is-active --quiet cloudlunacy; then
         log_error "Service failed to start. Diagnostics:"
+        
+        echo "Node.js Version:"
+        node --version
+        
+        echo "Environment File Contents (sanitized):"
+        grep -v "PASSWORD\|TOKEN" "$BASE_DIR/.env" || true
         
         echo "Service Status:"
         systemctl status cloudlunacy
         
-        echo "Recent Service Logs:"
-        journalctl -u cloudlunacy --no-pager -n 50
+        echo "Service Logs:"
+        tail -n 50 "$LOG_DIR/error.log"
         
-        echo "File Permissions:"
-        ls -l "/etc/ssl/mongo/chain.pem"
-        ls -l "$BASE_DIR/.env"
-        ls -l "$BASE_DIR/agent.js"
-        
-        echo "Environment Configuration:"
-        if [ -f "$BASE_DIR/.env" ]; then
-            echo "Environment file exists and contains $(wc -l < "$BASE_DIR/.env") lines"
-        else
-            echo "Environment file missing"
-        fi
-        
+        echo "Node.js Application Logs:"
+        tail -n 50 "$LOG_DIR/app.log"
+
         return 1
     fi
 
-    # Enable service to start on boot if everything is working
+    # Enable service for boot
     systemctl enable cloudlunacy
 
     log "CloudLunacy service setup completed successfully"
