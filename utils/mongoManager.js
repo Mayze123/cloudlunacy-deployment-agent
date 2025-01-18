@@ -39,20 +39,19 @@ class MongoManager {
         !certContent.includes("-----BEGIN CERTIFICATE-----") ||
         !certContent.includes("-----END CERTIFICATE-----")
       ) {
-        throw new Error("Invalid certificate format");
+        throw new Error(
+          "Invalid certificate format - missing BEGIN/END markers"
+        );
       }
 
-      // Attempt to create secure context with more detailed error handling
+      // Simple validation of certificate structure using crypto
       try {
-        const secureContext = tls.createSecureContext({
-          ca: [certContent],
-        });
-
-        if (!secureContext) {
-          throw new Error("Failed to create secure context");
-        }
+        const x509 = new crypto.X509Certificate(certContent);
+        logger.info(
+          `Certificate validated. Subject: ${x509.subject}, Issuer: ${x509.issuer}`
+        );
       } catch (certError) {
-        throw new Error(`Invalid certificate: ${certError.message}`);
+        throw new Error(`Invalid certificate structure: ${certError.message}`);
       }
 
       logger.info("CA file validated successfully");
@@ -165,12 +164,12 @@ class MongoManager {
         this.client = new MongoClient(uri, {
           tls: true,
           tlsCAFile: this.caFile,
-          tlsAllowInvalidCertificates: false, // Enforce strict certificate validation
+          tlsAllowInvalidCertificates: false,
           authSource: "admin",
           authMechanism: "SCRAM-SHA-256",
           directConnection: true,
           serverSelectionTimeoutMS: 5000,
-          tlsInsecure: false, // Explicitly disable insecure TLS
+          useUnifiedTopology: true,
         });
 
         await this.client.connect();
