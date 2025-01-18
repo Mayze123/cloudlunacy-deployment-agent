@@ -31,24 +31,36 @@ class MongoManager {
         throw new Error(`CA file ${this.caFile} is empty`);
       }
 
-      // Read and validate certificate
-      const cert = await fs.readFile(this.caFile);
+      // Read certificate file
+      const certContent = await fs.readFile(this.caFile, "utf8");
+
+      // Basic certificate format validation
+      if (
+        !certContent.includes("-----BEGIN CERTIFICATE-----") ||
+        !certContent.includes("-----END CERTIFICATE-----")
+      ) {
+        throw new Error("Invalid certificate format");
+      }
+
+      // Attempt to create secure context with more detailed error handling
       try {
         const secureContext = tls.createSecureContext({
-          ca: cert,
+          ca: [certContent],
         });
+
         if (!secureContext) {
           throw new Error("Failed to create secure context");
         }
-        logger.info("CA file validated successfully");
       } catch (certError) {
-        throw new Error(`Invalid CA file: ${certError.message}`);
+        throw new Error(`Invalid certificate: ${certError.message}`);
       }
 
+      logger.info("CA file validated successfully");
       return true;
     } catch (error) {
-      logger.error("Certificate check failed:", error.message);
-      throw error;
+      const errorMessage = `Certificate check failed: ${error.message}`;
+      logger.error(errorMessage);
+      throw new Error(errorMessage);
     }
   }
 
@@ -144,29 +156,35 @@ class MongoManager {
       }
 
       if (!this.client) {
-        const uri = `mongodb://${this.mongoHost}:${this.mongoPort}/admin`;
+        // Build connection string with proper escaping
+        const username = encodeURIComponent(this.managerUsername);
+        const password = encodeURIComponent(this.managerPassword);
+        const uri = `mongodb://${username}:${password}@${this.mongoHost}:${this.mongoPort}/admin`;
 
+        // Create client with updated options
         this.client = new MongoClient(uri, {
-          auth: {
-            username: this.managerUsername,
-            password: this.managerPassword,
-          },
           tls: true,
           tlsCAFile: this.caFile,
+          tlsAllowInvalidCertificates: false, // Enforce strict certificate validation
           authSource: "admin",
           authMechanism: "SCRAM-SHA-256",
           directConnection: true,
           serverSelectionTimeoutMS: 5000,
+          tlsInsecure: false, // Explicitly disable insecure TLS
         });
 
         await this.client.connect();
+
+        // Verify connection with ping
+        await this.client.db("admin").command({ ping: 1 });
         logger.info("Connected to MongoDB successfully");
       }
 
       return this.client;
     } catch (error) {
-      logger.error("Connection failed:", error.message);
-      throw error;
+      const errorMessage = `Connection failed: ${error.message}`;
+      logger.error(errorMessage);
+      throw new Error(errorMessage);
     }
   }
 
