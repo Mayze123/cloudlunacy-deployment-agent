@@ -31,30 +31,24 @@ class MongoManager {
         throw new Error(`CA file ${this.caFile} is empty`);
       }
 
-      // Read certificate file
+      // Read certificate file as text
       const certContent = await fs.readFile(this.caFile, "utf8");
 
       // Basic certificate format validation
-      if (
-        !certContent.includes("-----BEGIN CERTIFICATE-----") ||
-        !certContent.includes("-----END CERTIFICATE-----")
-      ) {
-        throw new Error(
-          "Invalid certificate format - missing BEGIN/END markers"
-        );
+      if (!certContent.includes("-----BEGIN CERTIFICATE-----")) {
+        throw new Error("Missing BEGIN CERTIFICATE marker");
       }
 
-      // Simple validation of certificate structure using crypto
-      try {
-        const x509 = new crypto.X509Certificate(certContent);
-        logger.info(
-          `Certificate validated. Subject: ${x509.subject}, Issuer: ${x509.issuer}`
-        );
-      } catch (certError) {
-        throw new Error(`Invalid certificate structure: ${certError.message}`);
+      if (!certContent.includes("-----END CERTIFICATE-----")) {
+        throw new Error("Missing END CERTIFICATE marker");
       }
 
-      logger.info("CA file validated successfully");
+      // Count certificates in chain
+      const certCount = (
+        certContent.match(/-----BEGIN CERTIFICATE-----/g) || []
+      ).length;
+      logger.info(`Certificate chain contains ${certCount} certificate(s)`);
+
       return true;
     } catch (error) {
       const errorMessage = `Certificate check failed: ${error.message}`;
@@ -114,30 +108,25 @@ class MongoManager {
       // Check certificates first
       await this.checkCertificates();
 
-      // Create MongoDB connection options
-      const uri = `mongodb://${this.mongoHost}:${this.mongoPort}/admin`;
-      const options = {
-        auth: {
-          username: this.managerUsername,
-          password: this.managerPassword,
-        },
-        tls: true,
-        tlsCAFile: this.caFile,
-        authSource: "admin",
-        authMechanism: "SCRAM-SHA-256",
-        directConnection: true,
-        serverSelectionTimeoutMS: 5000,
-      };
+      // Test connection with the provided credentials
+      const client = new MongoClient(
+        `mongodb://${this.mongoHost}:${this.mongoPort}/admin`,
+        {
+          auth: {
+            username: this.managerUsername,
+            password: this.managerPassword,
+          },
+          tls: true,
+          tlsCAFile: this.caFile,
+          authSource: "admin",
+          authMechanism: "SCRAM-SHA-256",
+          directConnection: true,
+          serverSelectionTimeoutMS: 5000,
+        }
+      );
 
-      // Create client and test connection
-      const client = new MongoClient(uri, options);
       await client.connect();
-
-      // Verify connection with ping
-      const pingResult = await client.db("admin").command({ ping: 1 });
-      logger.info("Successfully connected to MongoDB", pingResult);
-
-      // Close test connection
+      await client.db("admin").command({ ping: 1 });
       await client.close();
 
       this.isInitialized = true;
@@ -169,12 +158,9 @@ class MongoManager {
           authMechanism: "SCRAM-SHA-256",
           directConnection: true,
           serverSelectionTimeoutMS: 5000,
-          useUnifiedTopology: true,
         });
 
         await this.client.connect();
-
-        // Verify connection with ping
         await this.client.db("admin").command({ ping: 1 });
         logger.info("Connected to MongoDB successfully");
       }
