@@ -162,11 +162,10 @@ function establishWebSocketConnection(wsUrl) {
 function setupWebSocketEventHandlers() {
   let retryCount = 0;
   let retryDelay = WS_INITIAL_RETRY_DELAY;
-
-  ws.on("open", () => {
-    logger.info("WebSocket connection established.");
-    ws.send(JSON.stringify({ type: "register", serverId: SERVER_ID }));
-  });
+  let pingInterval;
+  let pingTimeout;
+  const PING_INTERVAL = 30000; // Send ping every 30 seconds
+  const PING_TIMEOUT = 5000; // Wait 5 seconds for pong response
 
   ws.on("message", (data) => {
     try {
@@ -177,10 +176,33 @@ function setupWebSocketEventHandlers() {
     }
   });
 
+  ws.on("open", () => {
+    logger.info("WebSocket connection established.");
+    ws.send(JSON.stringify({ type: "register", serverId: SERVER_ID }));
+
+    // Start ping interval
+    pingInterval = setInterval(() => {
+      ws.ping();
+      // Set timeout for pong response
+      pingTimeout = setTimeout(() => {
+        logger.warn("No pong received - closing connection");
+        ws.terminate();
+      }, PING_TIMEOUT);
+    }, PING_INTERVAL);
+  });
+
+  ws.on("pong", () => {
+    // Clear the timeout when pong is received
+    clearTimeout(pingTimeout);
+  });
+
   ws.on("close", () => {
+    // Clean up intervals on close
+    clearInterval(pingInterval);
+    clearTimeout(pingTimeout);
     handleWebSocketClose(retryCount, retryDelay);
     retryCount++;
-    retryDelay *= 2; // Exponential backoff
+    retryDelay *= 2;
   });
 
   ws.on("error", (error) => {
