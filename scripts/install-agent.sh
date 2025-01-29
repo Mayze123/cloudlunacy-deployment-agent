@@ -32,6 +32,7 @@ IFS=$'\n\t'
 # Configuration Variables
 # ----------------------------
 CURRENT_VERSION="3.0.0"
+MONGO_DOMAIN="mongodb.cloudlunacy.uk"
 VERSION_FILE="/opt/cloudlunacy/.version"
 USERNAME="cloudlunacy"
 BASE_DIR="/opt/cloudlunacy"
@@ -74,12 +75,11 @@ log_error() {
 }
 
 check_args() {
-    if [ "$#" -lt 4 ] || [ "$#" -gt 5 ]; then
+    if [ "$#" -lt 3 ] || [ "$#" -gt 4 ]; then  # Reduced argument count
         log_error "Invalid number of arguments."
-        echo "Usage: $0 <AGENT_TOKEN> <SERVER_ID> <EMAIL> <DOMAIN> [BACKEND_BASE_URL]"
+        echo "Usage: $0 <AGENT_TOKEN> <SERVER_ID> <EMAIL> [BACKEND_BASE_URL]"
         exit 1
     fi
-    validate_domain "$4"
 }
 
 initialize_logging() {
@@ -307,7 +307,7 @@ install_mongosh() {
 }
 
 obtain_ssl_certificate() {
-    log "Obtaining SSL/TLS certificate for domain $DOMAIN..."
+    log "Obtaining SSL/TLS certificate for MongoDB domain $MONGO_DOMAIN..."
     
     # Ensure port 80 is free
     if lsof -i :80 | grep LISTEN; then
@@ -322,23 +322,23 @@ obtain_ssl_certificate() {
         fi
     fi
 
-    certbot certonly --standalone --non-interactive --agree-tos --email "$EMAIL" -d "$DOMAIN" || true
-    if [ ! -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]; then
+    certbot certonly --standalone --non-interactive --agree-tos --email "$EMAIL" -d "$MONGO_DOMAIN" || true
+    if [ ! -f "/etc/letsencrypt/live/$MONGO_DOMAIN/fullchain.pem" ]; then
         certbot renew --dry-run || true
-        if [ ! -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]; then
-            log_error "Failed to obtain SSL/TLS certificate for $DOMAIN."
+        if [ ! -f "/etc/letsencrypt/live/$MONGO_DOMAIN/fullchain.pem" ]; then
+            log_error "Failed to obtain SSL/TLS certificate for $MONGO_DOMAIN."
             exit 1
         fi
     fi
 
-    log "SSL/TLS certificate obtained for $DOMAIN."
+    log "SSL/TLS certificate obtained for $MONGO_DOMAIN."
 }
 
 create_combined_certificate() {
     log "Creating combined certificate file for MongoDB..."
     SSL_DIR="/etc/ssl/mongo"
     mkdir -p "$SSL_DIR"
-    CERT_DIR="/etc/letsencrypt/live/$DOMAIN"
+    CERT_DIR="/etc/letsencrypt/live/$MONGO_DOMAIN"
 
     # Combine private key and full chain into single .pem
     cat "$CERT_DIR/privkey.pem" "$CERT_DIR/fullchain.pem" > "$SSL_DIR/combined.pem"
@@ -499,7 +499,7 @@ create_mongo_management_user() {
             --tls \
             --tlsAllowInvalidCertificates \
             --tlsCAFile=/etc/ssl/mongo/chain.pem \
-            --host "$DOMAIN" \
+            --host "$MONGO_DOMAIN" \
             -u "$MONGO_INITDB_ROOT_USERNAME" \
             -p "$MONGO_INITDB_ROOT_PASSWORD" \
             --eval "db.adminCommand('ping')" &>/dev/null
@@ -529,7 +529,7 @@ create_mongo_management_user() {
         --tls \
         --tlsAllowInvalidCertificates \
         --tlsCAFile=/etc/ssl/mongo/chain.pem \
-        --host "$DOMAIN" \
+        --host "$MONGO_DOMAIN" \
         -u "$MONGO_INITDB_ROOT_USERNAME" \
         -p "$MONGO_INITDB_ROOT_PASSWORD" \
         --eval "db.getSiblingDB('admin').getUser('$MONGO_MANAGER_USERNAME')" \
@@ -545,7 +545,7 @@ create_mongo_management_user() {
             --tls \
             --tlsAllowInvalidCertificates \
             --tlsCAFile=/etc/ssl/mongo/chain.pem \
-            --host "$DOMAIN" \
+            --host "$MONGO_DOMAIN" \
             -u "$MONGO_INITDB_ROOT_USERNAME" \
             -p "$MONGO_INITDB_ROOT_PASSWORD" \
             --eval "db.getSiblingDB('admin').createUser({
@@ -567,7 +567,7 @@ create_mongo_management_user() {
             --tls \
             --tlsAllowInvalidCertificates \
             --tlsCAFile=/etc/ssl/mongo/chain.pem \
-            --host "$DOMAIN" \
+            --host "$MONGO_DOMAIN" \
             -u "$MONGO_INITDB_ROOT_USERNAME" \
             -p "$MONGO_INITDB_ROOT_PASSWORD" \
             --eval "db.getSiblingDB('admin').updateUser('$MONGO_MANAGER_USERNAME', {
@@ -602,7 +602,7 @@ create_mongo_management_user() {
         --tls \
         --tlsAllowInvalidCertificates \
         --tlsCAFile=/etc/ssl/mongo/chain.pem \
-        --host "$DOMAIN" \
+        --host "$MONGO_DOMAIN" \
         -u "$MONGO_MANAGER_USERNAME" \
         -p "$MONGO_MANAGER_PASSWORD" \
         --eval "db.adminCommand('ping')"; then
@@ -657,7 +657,7 @@ configure_env() {
         --tls \
         --tlsAllowInvalidCertificates \
         --tlsCAFile=/etc/ssl/mongo/chain.pem \
-        --host "$DOMAIN" \
+        --host "$MONGO_DOMAIN" \
         -u "${MONGO_MANAGER_USERNAME}" \
         -p "${MONGO_MANAGER_PASSWORD}" \
         --eval "db.adminCommand('ping')" &>/dev/null; then
@@ -674,7 +674,7 @@ AGENT_API_TOKEN="${AGENT_TOKEN}"
 SERVER_ID="${SERVER_ID}"
 MONGO_MANAGER_USERNAME="${MONGO_MANAGER_USERNAME}"
 MONGO_MANAGER_PASSWORD="${MONGO_MANAGER_PASSWORD}"
-MONGO_HOST="$DOMAIN"
+MONGO_HOST="$MONGO_DOMAIN"
 MONGO_PORT=27017
 MONGO_CA_FILE=/etc/ssl/mongo/chain.pem
 MONGODB_CA_FILE=/etc/ssl/mongo/chain.pem
@@ -742,7 +742,7 @@ configure_environment() {
 verify_ca_file() {
     log "Verifying MongoDB CA file setup..."
     local CA_FILE="/etc/ssl/mongo/chain.pem"
-    local CERT_DIR="/etc/letsencrypt/live/$DOMAIN"
+    local CERT_DIR="/etc/letsencrypt/live/$MONGO_DOMAIN"
 
     # Ensure CA file exists and has correct content
     if [ ! -f "$CA_FILE" ] || [ ! -s "$CA_FILE" ]; then
@@ -776,7 +776,7 @@ display_mongodb_credentials() {
     log "----------------------------------------"
     echo "Management Username: $MONGO_MANAGER_USERNAME"
     echo "Management Password: $MONGO_MANAGER_PASSWORD"
-    echo "MongoDB Host: $DOMAIN"
+    echo "MongoDB Host: $MONGO_DOMAIN"
     echo "MongoDB Port: 27017"
     log "----------------------------------------"
     log "These credentials are stored securely in $MONGO_ENV_FILE"
@@ -788,7 +788,7 @@ setup_certificate_renewal() {
     RENEWAL_SCRIPT="/usr/local/bin/renew_certificates.sh"
     cat <<EOF > "$RENEWAL_SCRIPT"
 #!/bin/bash
-certbot renew --deploy-hook "cat /etc/letsencrypt/live/$DOMAIN/privkey.pem /etc/letsencrypt/live/$DOMAIN/fullchain.pem > /etc/ssl/mongo/combined.pem"
+certbot renew --deploy-hook "cat /etc/letsencrypt/live/$MONGO_DOMAIN/privkey.pem /etc/letsencrypt/live/$MONGO_DOMAIN/fullchain.pem > /etc/ssl/mongo/combined.pem"
 chown 999:999 /etc/ssl/mongo/combined.pem
 chmod 600 /etc/ssl/mongo/combined.pem
 docker-compose -f $MONGODB_DIR/docker-compose.mongodb.yml restart mongodb
@@ -1229,8 +1229,7 @@ main() {
     AGENT_TOKEN="$1"
     SERVER_ID="$2"
     EMAIL="$3"
-    DOMAIN="$4"
-    BACKEND_BASE_URL="${5:-https://api.cloudlunacy.uk}"
+    BACKEND_BASE_URL="${4:-https://api.cloudlunacy.uk}"
     
     verify_port_availability 80 "Traefik"
     verify_port_availability 443 "Traefik"
