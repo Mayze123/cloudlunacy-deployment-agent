@@ -306,58 +306,40 @@ install_mongosh() {
     log "MongoDB Shell Docker image pulled."
 }
 
+setup_ssl_certificate() {
+    obtain_ssl_certificate
+    create_combined_certificate
+    verify_ca_file
+}
+
 obtain_ssl_certificate() {
-    log "Obtaining SSL/TLS certificate for MongoDB domain $MONGO_DOMAIN..."
+    log "Obtaining SSL/TLS certificate for domain $MONGO_DOMAIN..."
     
-    # Ensure port 80 is free
+    # Port check remains the same
     if lsof -i :80 | grep LISTEN; then
-        log "Port 80 is currently in use. Attempting to stop services using port 80..."
+        log "Port 80 is currently in use. Attempting to stop services..."
         systemctl stop nginx || true
         systemctl stop apache2 || true
         systemctl stop httpd || true
         systemctl stop traefik || true
-        if lsof -i :80 | grep LISTEN; then
-            log_error "Port 80 is still in use. Cannot proceed."
-            exit 1
-        fi
     fi
 
-    certbot certonly --standalone --non-interactive --agree-tos --email "$EMAIL" -d "$MONGO_DOMAIN" || true
-    if [ ! -f "/etc/letsencrypt/live/$MONGO_DOMAIN/fullchain.pem" ]; then
-        certbot renew --dry-run || true
-        if [ ! -f "/etc/letsencrypt/live/$MONGO_DOMAIN/fullchain.pem" ]; then
-            log_error "Failed to obtain SSL/TLS certificate for $MONGO_DOMAIN."
-            exit 1
-        fi
-    fi
-
-    log "SSL/TLS certificate obtained for $MONGO_DOMAIN."
+    certbot certonly --standalone --non-interactive --agree-tos --email "$EMAIL" -d "$MONGO_DOMAIN"
+    log "SSL certificate obtained for $MONGO_DOMAIN."
 }
 
 create_combined_certificate() {
-    log "Creating combined certificate file for MongoDB..."
-    SSL_DIR="/etc/ssl/mongo"
-    mkdir -p "$SSL_DIR"
+    log "Creating combined certificate file..."
     CERT_DIR="/etc/letsencrypt/live/$MONGO_DOMAIN"
-
-    # Combine private key and full chain into single .pem
+    
+    mkdir -p "$SSL_DIR"
     cat "$CERT_DIR/privkey.pem" "$CERT_DIR/fullchain.pem" > "$SSL_DIR/combined.pem"
-
-    # Copy the default chain (intermediate only)
     cp "$CERT_DIR/chain.pem" "$SSL_DIR/chain.pem"
-
-    # ADDED: Download Let’s Encrypt root cert and append it to chain.pem
-    curl -s https://letsencrypt.org/certs/isrgrootx1.pem > "$SSL_DIR/isrgrootx1.pem"
-    cat "$SSL_DIR/chain.pem" "$SSL_DIR/isrgrootx1.pem" > "$SSL_DIR/chain-with-root.pem"
-    mv "$SSL_DIR/chain-with-root.pem" "$SSL_DIR/chain.pem"
-    rm -f "$SSL_DIR/isrgrootx1.pem"
-
-    # Adjust file ownership/permissions
-    chown "$USERNAME:docker" "$SSL_DIR"
+    
+    # Set permissions
+    chown -R "$USERNAME:docker" "$SSL_DIR"
     chmod 750 "$SSL_DIR"
-    chown "$USERNAME:docker" "$SSL_DIR"/*.pem
     chmod 644 "$SSL_DIR"/*.pem
-
     log "Certificate files created at $SSL_DIR"
 }
 
@@ -1242,7 +1224,7 @@ main() {
     setup_user_directories
 
     # Security setup
-    setup_ssl_certificate
+    setup_ssl_certificate 
     generate_secure_credentials
     configure_firewall
 
