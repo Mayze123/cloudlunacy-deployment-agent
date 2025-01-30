@@ -483,11 +483,13 @@ setup_mongodb() {
     log "Setting up MongoDB with authentication sequence..."
     
     mkdir -p "$MONGODB_DIR"
-    chown "$USERNAME":"$USERNAME" "$MONGODB_DIR"
+    chown -R "$USERNAME":"$USERNAME" "$MONGODB_DIR"
 
-    # Phase 1: Initial setup with built-in authentication
+    # Phase 1: Initial setup
     log "Phase 1: Initial MongoDB setup with root user..."
-    cat <<COMPOSE > "$MONGODB_DIR/docker-compose.mongodb.yml"
+    
+    # Create docker-compose file with proper permissions
+    sudo -u "$USERNAME" tee "$MONGODB_DIR/docker-compose.mongodb.yml" > /dev/null <<COMPOSE
 version: '3.8'
 
 services:
@@ -502,15 +504,14 @@ services:
     volumes:
       - mongo_data:/data/db
     healthcheck:
-      test: |
-        mongosh --quiet \\
-        --eval "db.adminCommand('ping')" \\
-        -u \$MONGO_INITDB_ROOT_USERNAME \\
+      test: >
+        mongosh --quiet
+        --eval "db.adminCommand('ping')"
+        -u \$MONGO_INITDB_ROOT_USERNAME
         -p \$MONGO_INITDB_ROOT_PASSWORD
       interval: 5s
       timeout: 5s
       retries: 10
-      start_period: 20s
     networks:
       - internal
 
@@ -522,26 +523,29 @@ networks:
     external: true
 COMPOSE
 
-    # Generate secure credentials
+    # Generate and persist credentials
     export MONGO_INITDB_ROOT_USERNAME="admin_$(openssl rand -hex 8)"
     export MONGO_INITDB_ROOT_PASSWORD="$(openssl rand -hex 32)"
     
-    # Persist credentials
-    echo "MONGO_INITDB_ROOT_USERNAME=$MONGO_INITDB_ROOT_USERNAME" > "$MONGO_ENV_FILE"
-    echo "MONGO_INITDB_ROOT_PASSWORD=$MONGO_INITDB_ROOT_PASSWORD" >> "$MONGO_ENV_FILE"
-    chmod 600 "$MONGO_ENV_FILE"
+    sudo -u "$USERNAME" tee "$MONGO_ENV_FILE" > /dev/null <<ENV
+MONGO_INITDB_ROOT_USERNAME=$MONGO_INITDB_ROOT_USERNAME
+MONGO_INITDB_ROOT_PASSWORD=$MONGO_INITDB_ROOT_PASSWORD
+ENV
 
     log "Starting initial MongoDB setup..."
     cd "$MONGODB_DIR"
-    sudo -u "$USERNAME" docker-compose --env-file "$MONGO_ENV_FILE" up -d
+    
+    # Explicitly specify compose file and env file
+    sudo -u "$USERNAME" docker-compose \
+        -f docker-compose.mongodb.yml \
+        --env-file "$MONGO_ENV_FILE" \
+        up -d
 
-    # Wait for healthy status
-    local timeout=120
+    # Wait for container to become healthy
+    local timeout=180
     local start_time=$(date +%s)
-    while true; do
-        if [ "$(docker inspect -f '{{.State.Health.Status}}' mongodb)" == "healthy" ]; then
-            break
-        fi
+    
+    while ! docker inspect -f '{{.State.Health.Status}}' mongodb 2>/dev/null | grep -q "healthy"; do
         if [ $(($(date +%s) - start_time)) -gt $timeout ]; then
             log_error "MongoDB initialization timed out"
             docker logs mongodb
