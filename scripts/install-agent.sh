@@ -409,7 +409,7 @@ networks:
 COMPOSE
 
     cd "$MONGODB_DIR"
-    sudo -u "$USERNAME" docker-compose -f docker-compose.mongodb.yml down
+    sudo -u "$USERNAME" docker-compose -f docker-compose.mongodb.yml down -v
     sudo -u "$USERNAME" docker-compose -f docker-compose.mongodb.yml up -d
 
     # Wait for initial MongoDB to be healthy
@@ -513,7 +513,7 @@ networks:
     external: true
 COMPOSE
 
-    sudo -u "$USERNAME" docker-compose --env-file "$MONGO_ENV_FILE" -f docker-compose.mongodb.yml down
+    sudo -u "$USERNAME" docker-compose --env-file "$MONGO_ENV_FILE" -f docker-compose.mongodb.yml down -v
     sudo -u "$USERNAME" docker-compose --env-file "$MONGO_ENV_FILE" -f docker-compose.mongodb.yml up -d
 
     # Wait for secure MongoDB to be healthy with increased timeout
@@ -1237,6 +1237,12 @@ main() {
     stop_conflicting_containers
     obtain_ssl_certificate
     create_combined_certificate
+
+    # Add this near the beginning of main() function before setup_mongodb()
+    log "Cleaning up any existing MongoDB containers..."
+    docker rm -f mongodb 2>/dev/null || true
+    docker volume rm -f $(docker volume ls -q --filter name=mongo_data) 2>/dev/null || true
+
     setup_mongodb
     create_mongo_management_user
     adjust_firewall_settings
