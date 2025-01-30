@@ -117,16 +117,15 @@ mongo_healthcheck() {
     local max_attempts=20
     
     while [ $attempts -lt $max_attempts ]; do
-        health_status=$(docker inspect --format='{{.State.Health.Status}}' "$container")
-        if [ "$health_status" == "healthy" ]; then
-            log "MongoDB container healthy after $((attempts*2)) seconds"
+        if docker exec "$container" mongosh --eval "db.adminCommand('ping')" &>/dev/null; then
+            log "MongoDB responsive after $((attempts*2)) seconds"
             return 0
         fi
         sleep 2
         ((attempts++))
     done
     
-    log_error "MongoDB health check timed out after $((max_attempts*2)) seconds"
+    log_error "MongoDB connection check timed out after $((max_attempts*2)) seconds"
     docker logs "$container"
     return 1
 }
@@ -416,15 +415,15 @@ setup_mongodb() {
 
     # Phase 2: Secure production setup
     docker run -d --name mongodb \
-        -v "$MONGODB_DIR/data:/data/db" \
-        -v "$SSL_DIR:/etc/ssl/mongo:ro" \
-        -p 27017:27017 \
-        -e MONGO_INITDB_ROOT_USERNAME="$MONGO_ROOT_USER" \
-        -e MONGO_INITDB_ROOT_PASSWORD="$MONGO_ROOT_PASS" \
-        mongo:6.0 --auth --tlsMode=requireTLS \
-        --tlsCertificateKeyFile=/etc/ssl/mongo/combined.pem \
-        --tlsCAFile=/etc/ssl/mongo/chain.pem \
-        --bind_ip_all
+    -v "$MONGODB_DIR/data:/data/db" \
+    -v "$SSL_DIR:/etc/ssl/mongo:ro" \
+    -p 27017:27017 \
+    -e MONGO_INITDB_ROOT_USERNAME="$MONGO_ROOT_USER" \
+    -e MONGO_INITDB_ROOT_PASSWORD="$MONGO_ROOT_PASS" \
+    mongo:6.0 --auth --tlsMode=requireTLS \
+    --tlsCertificateKeyFile=/etc/ssl/mongo/combined.pem \
+    --tlsCAFile=/etc/ssl/mongo/chain.pem \
+    --bind_ip_all
 
     mongo_healthcheck "mongodb" || exit 1
 }
