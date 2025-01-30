@@ -386,11 +386,13 @@ EOF
 
 setup_mongodb() {
     log "Configuring MongoDB with generated credentials..."
-    
-    # Source the credentials
     source "$MONGO_ENV_FILE"
 
+    # Cleanup previous containers
+    docker rm -f mongo_init mongodb 2>/dev/null || true
+
     # Phase 1: Initial setup
+    log "Starting initialization container..."
     docker run -d --name mongo_init \
         -v "$MONGODB_DIR/data:/data/db" \
         -v "$SSL_DIR:/etc/ssl/mongo:ro" \
@@ -398,34 +400,36 @@ setup_mongodb() {
 
     mongo_healthcheck "mongo_init" || exit 1
 
-    # Create admin user using generated credentials
+    # Create admin user
+    log "Creating administrative user..."
     docker exec mongo_init mongosh --eval "
         db.getSiblingDB('admin').createUser({
-            user: '$MONGO_MANAGER_USER',
-            pwd: '$MONGO_MANAGER_PASS',
+            user: '$MONGO_MANAGER_USERNAME',
+            pwd: '$MONGO_MANAGER_PASSWORD',
             roles: [
                 { role: 'userAdminAnyDatabase', db: 'admin' },
                 { role: 'clusterAdmin', db: 'admin' },
                 { role: 'readWriteAnyDatabase', db: 'admin' }
             ]
         })"
+
+    # Phase 2: Production setup
+    log "Starting production MongoDB instance..."
+    docker run -d --name mongodb \
+        -v "$MONGODB_DIR/data:/data/db" \
+        -v "$SSL_DIR:/etc/ssl/mongo:ro" \
+        -p 27017:27017 \
+        -e MONGO_INITDB_ROOT_USERNAME="$MONGO_INITDB_ROOT_USERNAME" \
+        -e MONGO_INITDB_ROOT_PASSWORD="$MONGO_INITDB_ROOT_PASSWORD" \
+        mongo:6.0 --auth --tlsMode=requireTLS \
+        --tlsCertificateKeyFile=/etc/ssl/mongo/combined.pem \
+        --tlsCAFile=/etc/ssl/mongo/chain.pem \
+        --bind_ip_all
+
+    mongo_healthcheck "mongodb" || exit 1
     
     # Cleanup initialization container
     docker stop mongo_init && docker rm mongo_init
-
-    # Phase 2: Secure production setup
-    docker run -d --name mongodb \
-    -v "$MONGODB_DIR/data:/data/db" \
-    -v "$SSL_DIR:/etc/ssl/mongo:ro" \
-    -p 27017:27017 \
-    -e MONGO_INITDB_ROOT_USERNAME="$MONGO_ROOT_USER" \
-    -e MONGO_INITDB_ROOT_PASSWORD="$MONGO_ROOT_PASS" \
-    mongo:6.0 --auth --tlsMode=requireTLS \
-    --tlsCertificateKeyFile=/etc/ssl/mongo/combined.pem \
-    --tlsCAFile=/etc/ssl/mongo/chain.pem \
-    --bind_ip_all
-
-    mongo_healthcheck "mongodb" || exit 1
 }
 
 create_mongo_management_user() {
