@@ -1182,6 +1182,78 @@ atomic_mongodb_update() {
     fi
 }
 
+configure_firewall() {
+    log "Configuring firewall settings..."
+    
+    # Allow SSH
+    ufw allow 22/tcp || iptables -A INPUT -p tcp --dport 22 -j ACCEPT
+    
+    # Allow MongoDB port
+    ufw allow 27017/tcp || iptables -A INPUT -p tcp --dport 27017 -j ACCEPT
+    
+    # Allow HTTP/HTTPS
+    ufw allow 80/tcp || iptables -A INPUT -p tcp --dport 80 -j ACCEPT
+    ufw allow 443/tcp || iptables -A INPUT -p tcp --dport 443 -j ACCEPT
+    
+    # Enable firewall if using ufw
+    if command -v ufw >/dev/null; then
+        ufw --force enable
+    fi
+    
+    log "Firewall configuration completed."
+}
+
+setup_docker_infrastructure() {
+    log "Setting up Docker infrastructure..."
+    
+    # Create required networks
+    if ! docker network ls | grep -q traefik-network; then
+        docker network create traefik-network
+    fi
+    
+    if ! docker network ls | grep -q internal; then
+        docker network create internal
+    fi
+    
+    # Create persistent volumes
+    docker volume create --name=mongo_data 2>/dev/null || true
+    
+    log "Docker networks and volumes ready."
+}
+
+setup_application_service() {
+    log "Configuring systemd service..."
+    
+    SERVICE_FILE="/etc/systemd/system/cloudlunacy.service"
+    
+    cat > "$SERVICE_FILE" << EOF
+[Unit]
+Description=CloudLunacy Deployment Agent
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=$USERNAME
+Group=docker
+WorkingDirectory=$BASE_DIR
+EnvironmentFile=$BASE_DIR/.env
+ExecStart=/usr/bin/node $BASE_DIR/agent.js
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    # Reload systemd and enable service
+    systemctl daemon-reload
+    systemctl enable cloudlunacy
+    systemctl start cloudlunacy
+    
+    log "Application service configured and started."
+}
+
 generate_secure_credentials() {
     log "Generating secure MongoDB credentials..."
     
