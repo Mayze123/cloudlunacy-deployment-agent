@@ -485,76 +485,8 @@ setup_mongodb() {
     mkdir -p "$MONGODB_DIR"
     chown "$USERNAME":"$USERNAME" "$MONGODB_DIR"
 
-    # Step 1: Start MongoDB without auth for initial setup
-    log "Step 1: Starting MongoDB without auth..."
-    cat <<COMPOSE > "$MONGODB_DIR/docker-compose.mongodb.yml"
-version: '3.8'
-
-services:
-  mongodb:
-    image: mongo:6.0
-    container_name: mongodb
-    restart: unless-stopped
-    command: >
-      mongod
-      --bind_ip_all
-    volumes:
-      - mongo_data:/data/db
-      - /etc/ssl/mongo:/etc/ssl/mongo:ro
-    networks:
-      internal:
-        aliases:
-          - $DOMAIN
-    healthcheck:
-      test: mongosh --eval "db.adminCommand('ping')"
-      interval: 10s
-      timeout: 5s
-      retries: 3
-      start_period: 20s
-
-volumes:
-  mongo_data:
-
-networks:
-  internal:
-    external: true
-COMPOSE
-
-    cd "$MONGODB_DIR"
-    sudo -u "$USERNAME" docker-compose -f docker-compose.mongodb.yml down
-    sudo -u "$USERNAME" docker-compose -f docker-compose.mongodb.yml up -d
-
-    # Wait for initial MongoDB to be healthy
-    sleep 30
-
-    # Step 2: Create root user
-    log "Step 2: Creating root user..."
-    MONGO_INITDB_ROOT_USERNAME=$(openssl rand -hex 12)
-    MONGO_INITDB_ROOT_PASSWORD=$(openssl rand -hex 24)
-
-    # Create root user without auth
-    if ! docker exec mongodb mongosh --eval "
-        db.getSiblingDB('admin').createUser({
-            user: '$MONGO_INITDB_ROOT_USERNAME',
-            pwd: '$MONGO_INITDB_ROOT_PASSWORD',
-            roles: ['root']
-        })
-    "; then
-        log_error "Failed to create root user"
-        return 1
-    fi
-
-    # Save credentials
-    cat <<EOF > "$MONGO_ENV_FILE"
-MONGO_INITDB_ROOT_USERNAME=$MONGO_INITDB_ROOT_USERNAME
-MONGO_INITDB_ROOT_PASSWORD=$MONGO_INITDB_ROOT_PASSWORD
-EOF
-
-    chown "$USERNAME":"$USERNAME" "$MONGO_ENV_FILE"
-    chmod 600 "$MONGO_ENV_FILE"
-
-    # Step 3: Restart with auth and TLS
-    log "Step 3: Restarting MongoDB with auth and TLS..."
+    # Phase 1: Initial setup with built-in authentication
+    log "Phase 1: Initial MongoDB setup with root user..."
     cat <<COMPOSE > "$MONGODB_DIR/docker-compose.mongodb.yml"
 version: '3.8'
 
@@ -564,37 +496,23 @@ services:
     container_name: mongodb
     restart: unless-stopped
     environment:
-      MONGO_INITDB_ROOT_USERNAME: \${MONGO_INITDB_ROOT_USERNAME}
-      MONGO_INITDB_ROOT_PASSWORD: \${MONGO_INITDB_ROOT_PASSWORD}
-    command: >
-      mongod
-      --auth
-      --tlsMode=requireTLS
-      --tlsCertificateKeyFile=/etc/ssl/mongo/combined.pem
-      --tlsCAFile=/etc/ssl/mongo/chain.pem
-      --tlsAllowConnectionsWithoutCertificates
-      --bind_ip_all
+      MONGO_INITDB_ROOT_USERNAME: \$MONGO_INITDB_ROOT_USERNAME
+      MONGO_INITDB_ROOT_PASSWORD: \$MONGO_INITDB_ROOT_PASSWORD
+    command: mongod --bind_ip_all
     volumes:
       - mongo_data:/data/db
-      - /etc/ssl/mongo:/etc/ssl/mongo:ro
-    networks:
-      internal:
-        aliases:
-          - $DOMAIN
     healthcheck:
-      test: >
-        mongosh 
-        --tls 
-        --tlsAllowInvalidCertificates
-        --tlsCAFile=/etc/ssl/mongo/chain.pem
-        --host $DOMAIN
-        -u \$\${MONGO_INITDB_ROOT_USERNAME}
-        -p \$\${MONGO_INITDB_ROOT_PASSWORD}
-        --eval "db.adminCommand('ping')"
-      interval: 10s
+      test: |
+        mongosh --quiet \\
+        --eval "db.adminCommand('ping')" \\
+        -u \$MONGO_INITDB_ROOT_USERNAME \\
+        -p \$MONGO_INITDB_ROOT_PASSWORD
+      interval: 5s
       timeout: 5s
-      retries: 3
+      retries: 10
       start_period: 20s
+    networks:
+      - internal
 
 volumes:
   mongo_data:
@@ -604,30 +522,99 @@ networks:
     external: true
 COMPOSE
 
-    sudo -u "$USERNAME" docker-compose --env-file "$MONGO_ENV_FILE" -f docker-compose.mongodb.yml down
-    sudo -u "$USERNAME" docker-compose --env-file "$MONGO_ENV_FILE" -f docker-compose.mongodb.yml up -d
+    # Generate secure credentials
+    export MONGO_INITDB_ROOT_USERNAME="admin_$(openssl rand -hex 8)"
+    export MONGO_INITDB_ROOT_PASSWORD="$(openssl rand -hex 32)"
+    
+    # Persist credentials
+    echo "MONGO_INITDB_ROOT_USERNAME=$MONGO_INITDB_ROOT_USERNAME" > "$MONGO_ENV_FILE"
+    echo "MONGO_INITDB_ROOT_PASSWORD=$MONGO_INITDB_ROOT_PASSWORD" >> "$MONGO_ENV_FILE"
+    chmod 600 "$MONGO_ENV_FILE"
 
-    # Wait for secure MongoDB to be healthy
-    sleep 30
+    log "Starting initial MongoDB setup..."
+    cd "$MONGODB_DIR"
+    sudo -u "$USERNAME" docker-compose --env-file "$MONGO_ENV_FILE" up -d
 
-    # Verify secure connection
-    log "Verifying secure connection..."
-    docker exec mongodb mongosh \
-        --tls \
-        --tlsAllowInvalidCertificates \
-        --tlsCAFile=/etc/ssl/mongo/chain.pem \
-        --host "$DOMAIN" \
-        -u "$MONGO_INITDB_ROOT_USERNAME" \
-        -p "$MONGO_INITDB_ROOT_PASSWORD" \
-        --eval "db.adminCommand('ping')"
+    # Wait for healthy status
+    local timeout=120
+    local start_time=$(date +%s)
+    while true; do
+        if [ "$(docker inspect -f '{{.State.Health.Status}}' mongodb)" == "healthy" ]; then
+            break
+        fi
+        if [ $(($(date +%s) - start_time)) -gt $timeout ]; then
+            log_error "MongoDB initialization timed out"
+            docker logs mongodb
+            return 1
+        fi
+        sleep 5
+    done
 
-    if [ $? -eq 0 ]; then
-        log "MongoDB setup completed successfully"
-    else
-        log_error "Failed to verify secure MongoDB connection"
+    # Phase 2: Enable TLS and secure configuration
+    log "Phase 2: Securing MongoDB with TLS..."
+    cat <<COMPOSE > "$MONGODB_DIR/docker-compose.mongodb.yml"
+version: '3.8'
+
+services:
+  mongodb:
+    image: mongo:6.0
+    container_name: mongodb
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: \$MONGO_INITDB_ROOT_USERNAME
+      MONGO_INITDB_ROOT_PASSWORD: \$MONGO_INITDB_ROOT_PASSWORD
+    command: |
+      mongod \\
+      --auth \\
+      --tlsMode=requireTLS \\
+      --tlsCertificateKeyFile=/etc/ssl/mongo/combined.pem \\
+      --tlsCAFile=/etc/ssl/mongo/chain.pem \\
+      --bind_ip_all
+    volumes:
+      - mongo_data:/data/db
+      - /etc/ssl/mongo:/etc/ssl/mongo:ro
+    healthcheck:
+      test: |
+        mongosh --quiet \\
+        --tls \\
+        --tlsCAFile=/etc/ssl/mongo/chain.pem \\
+        --eval "db.adminCommand('ping')" \\
+        -u \$MONGO_INITDB_ROOT_USERNAME \\
+        -p \$MONGO_INITDB_ROOT_PASSWORD
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - internal
+
+volumes:
+  mongo_data:
+
+networks:
+  internal:
+    external: true
+COMPOSE
+
+    log "Restarting MongoDB with TLS..."
+    sudo -u "$USERNAME" docker-compose --env-file "$MONGO_ENV_FILE" down
+    sudo -u "$USERNAME" docker-compose --env-file "$MONGO_ENV_FILE" up -d
+
+    # Verify TLS connection
+    local verify_cmd="docker exec mongodb mongosh --tls \\
+        --tlsCAFile=/etc/ssl/mongo/chain.pem \\
+        -u $MONGO_INITDB_ROOT_USERNAME \\
+        -p $MONGO_INITDB_ROOT_PASSWORD \\
+        --eval 'db.adminCommand({ping: 1})'"
+    
+    if ! eval "$verify_cmd"; then
+        log_error "TLS connection verification failed"
         docker logs mongodb
         return 1
     fi
+
+    log "MongoDB secured with TLS successfully"
+    return 0
 }
 
 create_mongo_management_user() {
