@@ -1220,16 +1220,22 @@ main() {
     BACKEND_BASE_URL="${4:-https://your-default-backend-url}"
     BACKEND_URL="${BACKEND_BASE_URL}"
 
-    setup_user_directories
-    configure_environment
+    # 1) Basic environment detection & updates first
     detect_os
-    log "Detected OS: $OS_TYPE $OS_VERSION"
-
     update_system
     install_dependencies
+    
+    # 2) Now install Docker before we call any 'docker' commands
+    install_docker
+
+    # 3) Then set up your user
+    setup_user_directories
+
+    # 4) Then do environment config
+    configure_environment
+
     install_certbot
     install_mongosh
-    install_docker
     install_node
     setup_docker_permissions
     download_agent
