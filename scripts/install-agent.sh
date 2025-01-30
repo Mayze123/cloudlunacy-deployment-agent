@@ -1,17 +1,27 @@
 #!/bin/bash
 # ------------------------------------------------------------------------------
 # Installation Script for CloudLunacy Deployment Agent with Traefik and MongoDB
-# Version: 3.0.0
+# Version: 2.5.2 (Modified for two-phase MongoDB setup)
 # Author: Mahamadou Taibou
-# Date: 2024-03-01
-# 
-# Key Improvements:
-# - Configurable domain via command line
-# - Enhanced security practices
-# - Improved error handling and rollbacks
-# - Better input validation
-# - Idempotent operations
-# - Comprehensive logging
+# Date: 2024-11-24
+#
+# Description:
+# This script installs and configures the CloudLunacy Deployment Agent on a VPS.
+# It performs the following tasks:
+#   - Detects the operating system and version
+#   - Updates system packages
+#   - Installs necessary dependencies (Docker, Node.js, Git, jq, Certbot)
+#   - Sets up Traefik as a reverse proxy
+#   - Sets up MongoDB in two phases:
+#       Phase 1: No auth/TLS -> root user is created by official entrypoint
+#       Phase 2: Enable auth & TLS -> health check passes with credentials
+#   - Creates a dedicated user with correct permissions
+#   - Downloads the latest version of the Deployment Agent from GitHub
+#   - Installs Node.js dependencies
+#   - Configures environment variables
+#   - Sets up the Deployment Agent as a systemd service
+#   - Automates SSL certificate renewal
+#   - Provides post-installation verification and feedback
 #
 # Usage:
 #   sudo ./install-agent.sh <AGENT_TOKEN> <SERVER_ID> <EMAIL> [BACKEND_BASE_URL]
@@ -25,21 +35,18 @@
 
 set -euo pipefail
 # Uncomment the following line to enable debugging
-# set -x
+set -x
 IFS=$'\n\t'
 
 # ----------------------------
 # Configuration Variables
 # ----------------------------
-CURRENT_VERSION="3.0.0"
-MONGO_DOMAIN="mongodb.cloudlunacy.uk"
-VERSION_FILE="/opt/cloudlunacy/.version"
+DOMAIN="mongodb.cloudlunacy.uk"
 USERNAME="cloudlunacy"
 BASE_DIR="/opt/cloudlunacy"
 MONGODB_DIR="$BASE_DIR/mongodb"
 MONGO_ENV_FILE="$MONGODB_DIR/.env"
-LOG_DIR="/var/log/cloudlunacy"
-SSL_DIR="/etc/ssl/mongo"
+AGENT_ENV_FILE="$BASE_DIR/.env"
 
 # ----------------------------
 # Function Definitions
@@ -48,18 +55,131 @@ SSL_DIR="/etc/ssl/mongo"
 display_info() {
     echo "-------------------------------------------------"
     echo "CloudLunacy Deployment Agent Installation Script"
-    echo "Version: $CURRENT_VERSION"
+    echo "Version: 2.5.2"
     echo "Author: Mahamadou Taibou"
-    echo "Date: 2024-03-01"
+    echo "Date: 2024-11-24"
     echo "-------------------------------------------------"
 }
 
-validate_domain() {
-    local domain=$1
-    if [[ ! $domain =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
-        log_error "Invalid domain format: $domain"
-        exit 1
+check_installation_status() {
+    if [ -f "$AGENT_ENV_FILE" ] && [ -f "$MONGO_ENV_FILE" ]; then
+        log "Existing installation detected. Performing update..."
+        source "$AGENT_ENV_FILE"
+        source "$MONGO_ENV_FILE"
+        return 0
     fi
+    return 1
+}
+
+safe_download_agent() {
+    log "Updating agent codebase..."
+    if [ -d "$BASE_DIR/.git" ]; then
+        cd "$BASE_DIR"
+        sudo -u "$USERNAME" git fetch origin
+        sudo -u "$USERNAME" git reset --hard origin/main
+        log "Codebase updated to latest version."
+    else
+        log "Performing fresh clone..."
+        sudo -u "$USERNAME" git clone https://github.com/Mayze123/cloudlunacy-deployment-agent.git "$BASE_DIR"
+    fi
+    chown -R "$USERNAME":"$USERNAME" "$BASE_DIR"
+}
+
+preserve_configuration() {
+    if check_installation_status; then
+        log "Preserving existing configurations..."
+        # Backup current config
+        TEMP_DIR=$(mktemp -d)
+        cp "$AGENT_ENV_FILE" "$TEMP_DIR/agent.env.bak"
+        cp "$MONGO_ENV_FILE" "$TEMP_DIR/mongo.env.bak"
+        
+        # Restore after update
+        trap 'restore_configs "$TEMP_DIR"' EXIT
+    fi
+}
+
+restore_configs() {
+    local temp_dir="$1"
+    log "Restoring configurations..."
+    cp "$temp_dir/agent.env.bak" "$AGENT_ENV_FILE"
+    cp "$temp_dir/mongo.env.bak" "$MONGO_ENV_FILE"
+    rm -rf "$temp_dir"
+}
+
+secure_update_mongodb() {
+    log "Performing secure MongoDB update..."
+    cd "$MONGODB_DIR"
+    
+    # Stop with preservation
+    sudo -u "$USERNAME" docker-compose -f docker-compose.mongodb.yml down --timeout 30
+    
+    # Pull new image
+    sudo -u "$USERNAME" docker-compose -f docker-compose.mongodb.yml pull
+    
+    # Start with existing data
+    sudo -u "$USERNAME" docker-compose -f docker-compose.mongodb.yml up -d
+    
+    log "MongoDB updated successfully."
+}
+
+update_systemd_service() {
+    log "Updating systemd service configuration..."
+    local SERVICE_FILE="/etc/systemd/system/cloudlunacy.service"
+    
+    # Create new service file
+    cat > "$SERVICE_FILE" << EOF
+[Unit]
+Description=CloudLunacy Deployment Agent (Updated)
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+Type=exec
+User=$USERNAME
+Group=docker
+EnvironmentFile=$AGENT_ENV_FILE
+WorkingDirectory=$BASE_DIR
+ExecStartPre=/usr/bin/docker-compose -f $MONGODB_DIR/docker-compose.mongodb.yml pull
+ExecStart=/usr/bin/node $BASE_DIR/agent.js
+Restart=always
+RestartSec=10s
+TimeoutStopSec=30
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    systemctl restart cloudlunacy
+    log "Systemd service updated and restarted."
+}
+
+enhanced_configure_env() {
+    log "Configuring environment with preservation..."
+    if [ -f "$AGENT_ENV_FILE" ]; then
+        log "Merging existing environment variables..."
+        # Preserve existing values
+        source "$AGENT_ENV_FILE"
+        export MONGO_MANAGER_USERNAME
+        export MONGO_MANAGER_PASSWORD
+    fi
+
+    # Create/update environment file
+    cat > "$AGENT_ENV_FILE" << EOL
+BACKEND_URL="${BACKEND_URL:-https://your-default-backend-url}"
+AGENT_API_TOKEN="${AGENT_TOKEN}"
+SERVER_ID="${SERVER_ID}"
+MONGO_MANAGER_USERNAME="${MONGO_MANAGER_USERNAME}"
+MONGO_MANAGER_PASSWORD="${MONGO_MANAGER_PASSWORD}"
+MONGO_HOST="${DOMAIN}"
+MONGO_PORT=27017
+MONGO_CA_FILE=/etc/ssl/mongo/chain.pem
+NODE_ENV=production
+EOL
+
+    chown "$USERNAME:$USERNAME" "$AGENT_ENV_FILE"
+    chmod 640 "$AGENT_ENV_FILE"
 }
 
 log() {
@@ -75,59 +195,11 @@ log_error() {
 }
 
 check_args() {
-    if [ "$#" -lt 3 ] || [ "$#" -gt 4 ]; then  # Reduced argument count
+    if [ "$#" -lt 3 ] || [ "$#" -gt 5 ]; then
         log_error "Invalid number of arguments."
         echo "Usage: $0 <AGENT_TOKEN> <SERVER_ID> <EMAIL> [BACKEND_BASE_URL]"
         exit 1
     fi
-}
-
-initialize_logging() {
-    mkdir -p "$LOG_DIR"
-    chown -R "$USERNAME:$USERNAME" "$LOG_DIR"
-    exec > >(tee -a "${LOG_DIR}/install.log") 2>&1
-}
-
-verify_port_availability() {
-    local port=$1
-    local service=$2
-    if lsof -i :$port | grep LISTEN; then
-        log_error "Port $port is required for $service but is already in use"
-        exit 1
-    fi
-}
-
-secure_environment_file() {
-    local env_file=$1
-    chown "$USERNAME:$USERNAME" "$env_file"
-    chmod 600 "$env_file"
-    if [ -x /usr/bin/setfacl ]; then
-        setfacl -m u:docker:r "$env_file"
-    fi
-}
-
-docker_prune() {
-    log "Cleaning up Docker resources..."
-    docker system prune -af --volumes --filter "label=cloudlunacy=temporary"
-}
-
-mongo_healthcheck() {
-    local container=$1
-    local attempts=0
-    local max_attempts=20
-    
-    while [ $attempts -lt $max_attempts ]; do
-        if docker exec "$container" mongosh --eval "db.adminCommand('ping')" &>/dev/null; then
-            log "MongoDB responsive after $((attempts*2)) seconds"
-            return 0
-        fi
-        sleep 2
-        ((attempts++))
-    done
-    
-    log_error "MongoDB connection check timed out after $((max_attempts*2)) seconds"
-    docker logs "$container"
-    return 1
 }
 
 check_root() {
@@ -305,56 +377,79 @@ install_mongosh() {
     log "MongoDB Shell Docker image pulled."
 }
 
-setup_ssl_certificate() {
-    obtain_ssl_certificate
-    create_combined_certificate
-    verify_ca_file
-}
-
 obtain_ssl_certificate() {
-    log "Obtaining SSL/TLS certificate for domain $MONGO_DOMAIN..."
+    log "Obtaining SSL/TLS certificate for domain $DOMAIN..."
     
-    # Port check remains the same
+    # Ensure port 80 is free
     if lsof -i :80 | grep LISTEN; then
-        log "Port 80 is currently in use. Attempting to stop services..."
+        log "Port 80 is currently in use. Attempting to stop services using port 80..."
         systemctl stop nginx || true
         systemctl stop apache2 || true
         systemctl stop httpd || true
         systemctl stop traefik || true
+        if lsof -i :80 | grep LISTEN; then
+            log_error "Port 80 is still in use. Cannot proceed."
+            exit 1
+        fi
     fi
 
-    certbot certonly --standalone --non-interactive --agree-tos --email "$EMAIL" -d "$MONGO_DOMAIN"
-    log "SSL certificate obtained for $MONGO_DOMAIN."
+    certbot certonly --standalone --non-interactive --agree-tos --email "$EMAIL" -d "$DOMAIN" || true
+    if [ ! -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]; then
+        certbot renew --dry-run || true
+        if [ ! -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]; then
+            log_error "Failed to obtain SSL/TLS certificate for $DOMAIN."
+            exit 1
+        fi
+    fi
+
+    log "SSL/TLS certificate obtained for $DOMAIN."
 }
 
 create_combined_certificate() {
-    log "Creating combined certificate file..."
-    CERT_DIR="/etc/letsencrypt/live/$MONGO_DOMAIN"
-    
+    log "Creating combined certificate file for MongoDB..."
+    SSL_DIR="/etc/ssl/mongo"
     mkdir -p "$SSL_DIR"
+    CERT_DIR="/etc/letsencrypt/live/$DOMAIN"
+
+    # Combine private key and full chain
     cat "$CERT_DIR/privkey.pem" "$CERT_DIR/fullchain.pem" > "$SSL_DIR/combined.pem"
     cp "$CERT_DIR/chain.pem" "$SSL_DIR/chain.pem"
-    
-    # Set permissions
+
+    # Instead of 999:999 with chmod 600, do:
     chown -R "$USERNAME:docker" "$SSL_DIR"
-    chmod 750 "$SSL_DIR"
-    chmod 644 "$SSL_DIR"/*.pem
+    chmod 640 "$SSL_DIR"/*.pem
+
     log "Certificate files created at $SSL_DIR"
 }
 
 wait_for_mongodb_health() {
-    local max_attempts=${1:-10}
-    log "Waiting for MongoDB health (max $max_attempts attempts)..."
+    log "Waiting for MongoDB container to be healthy..."
+    local max_attempts=10
+    local attempt=1
     
-    for ((i=1; i<=max_attempts; i++)); do
+    while [ $attempt -le $max_attempts ]; do
         if docker ps --filter "name=mongodb" --format "{{.Status}}" | grep -q "healthy"; then
-            log "MongoDB healthy after $i attempts"
+            log "MongoDB container is healthy"
             return 0
         fi
-        sleep $((i * 2))
+        
+        # Get current health check status
+        local status=$(docker ps --filter "name=mongodb" --format "{{.Status}}")
+        log "Attempt $attempt/$max_attempts: Current status: $status"
+        
+        # If container is unhealthy, get the last health check output
+        if echo "$status" | grep -q "unhealthy"; then
+            log "Last health check output:"
+            docker inspect --format "{{json .State.Health.Log}}" mongodb | jq -r '.[-1].Output'
+        fi
+        
+        sleep 30
+        attempt=$((attempt + 1))
     done
     
-    log_error "MongoDB health check timed out"
+    log_error "MongoDB failed to become healthy after $max_attempts attempts"
+    log_error "Container logs:"
+    docker logs mongodb
     return 1
 }
 
@@ -385,197 +480,236 @@ EOF
 }
 
 setup_mongodb() {
-    log "Configuring MongoDB with generated credentials..."
-    source "$MONGO_ENV_FILE"
+    log "Setting up MongoDB with authentication sequence..."
+    
+    mkdir -p "$MONGODB_DIR"
+    chown "$USERNAME":"$USERNAME" "$MONGODB_DIR"
 
-    # Cleanup previous containers
-    docker rm -f mongo_init mongodb 2>/dev/null || true
+    # Step 1: Start MongoDB without auth for initial setup
+    log "Step 1: Starting MongoDB without auth..."
+    cat <<COMPOSE > "$MONGODB_DIR/docker-compose.mongodb.yml"
+version: '3.8'
 
-    # Phase 1: Initial setup
-    log "Starting initialization container..."
-    docker run -d --name mongo_init \
-        -v "$MONGODB_DIR/data:/data/db" \
-        -v "$SSL_DIR:/etc/ssl/mongo:ro" \
-        mongo:6.0 --bind_ip_all
+services:
+  mongodb:
+    image: mongo:6.0
+    container_name: mongodb
+    restart: unless-stopped
+    command: >
+      mongod
+      --bind_ip_all
+    volumes:
+      - mongo_data:/data/db
+      - /etc/ssl/mongo:/etc/ssl/mongo:ro
+    networks:
+      internal:
+        aliases:
+          - $DOMAIN
+    healthcheck:
+      test: mongosh --eval "db.adminCommand('ping')"
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
-    mongo_healthcheck "mongo_init" || exit 1
+volumes:
+  mongo_data:
 
-    # Create admin user
-    log "Creating administrative user..."
-    docker exec mongo_init mongosh --eval "
+networks:
+  internal:
+    external: true
+COMPOSE
+
+    cd "$MONGODB_DIR"
+    sudo -u "$USERNAME" docker-compose -f docker-compose.mongodb.yml down
+    sudo -u "$USERNAME" docker-compose -f docker-compose.mongodb.yml up -d
+
+    # Wait for initial MongoDB to be healthy
+    sleep 30
+
+    # Step 2: Create root user
+    log "Step 2: Creating root user..."
+    MONGO_INITDB_ROOT_USERNAME=$(openssl rand -hex 12)
+    MONGO_INITDB_ROOT_PASSWORD=$(openssl rand -hex 24)
+
+    # Create root user without auth
+    if ! docker exec mongodb mongosh --eval "
         db.getSiblingDB('admin').createUser({
-            user: '$MONGO_MANAGER_USERNAME',
-            pwd: '$MONGO_MANAGER_PASSWORD',
-            roles: [
-                { role: 'userAdminAnyDatabase', db: 'admin' },
-                { role: 'clusterAdmin', db: 'admin' },
-                { role: 'readWriteAnyDatabase', db: 'admin' }
-            ]
-        })"
-
-    # Phase 2: Production setup
-    log "Starting production MongoDB instance..."
-    docker run -d --name mongodb \
-        -v "$MONGODB_DIR/data:/data/db" \
-        -v "$SSL_DIR:/etc/ssl/mongo:ro" \
-        -p 27017:27017 \
-        -e MONGO_INITDB_ROOT_USERNAME="$MONGO_INITDB_ROOT_USERNAME" \
-        -e MONGO_INITDB_ROOT_PASSWORD="$MONGO_INITDB_ROOT_PASSWORD" \
-        mongo:6.0 --auth --tlsMode=requireTLS \
-        --tlsCertificateKeyFile=/etc/ssl/mongo/combined.pem \
-        --tlsCAFile=/etc/ssl/mongo/chain.pem \
-        --bind_ip_all
-
-    mongo_healthcheck "mongodb" || exit 1
-    
-    # Cleanup initialization container
-    docker stop mongo_init && docker rm mongo_init
-}
-
-create_mongo_management_user() {
-    log "Creating/updating MongoDB management user..."
-    
-    # Ensure environment file exists and can be read
-    if [ ! -f "$MONGO_ENV_FILE" ]; then
-        log_error "MongoDB environment file not found at $MONGO_ENV_FILE"
+            user: '$MONGO_INITDB_ROOT_USERNAME',
+            pwd: '$MONGO_INITDB_ROOT_PASSWORD',
+            roles: ['root']
+        })
+    "; then
+        log_error "Failed to create root user"
         return 1
     fi
 
-    # Source MongoDB environment variables
-    set +u  # Temporarily disable errors for unbound variables
-    source "$MONGO_ENV_FILE"
-    set -u
+    # Save credentials
+    cat <<EOF > "$MONGO_ENV_FILE"
+MONGO_INITDB_ROOT_USERNAME=$MONGO_INITDB_ROOT_USERNAME
+MONGO_INITDB_ROOT_PASSWORD=$MONGO_INITDB_ROOT_PASSWORD
+EOF
 
-    # Verify required variables are set
-    if [ -z "${MONGO_INITDB_ROOT_USERNAME:-}" ] || [ -z "${MONGO_INITDB_ROOT_PASSWORD:-}" ]; then
-        log_error "Root credentials not found in environment file"
-        return 1
-    fi
+    chown "$USERNAME":"$USERNAME" "$MONGO_ENV_FILE"
+    chmod 600 "$MONGO_ENV_FILE"
 
-    # Set management user constants
-    MONGO_MANAGER_USERNAME="manager"
-    local max_retries=3
-    local retry_count=0
-    local success=false
+    # Step 3: Restart with auth and TLS
+    log "Step 3: Restarting MongoDB with auth and TLS..."
+    cat <<COMPOSE > "$MONGODB_DIR/docker-compose.mongodb.yml"
+version: '3.8'
 
-    # Function to verify MongoDB connection
-    verify_mongodb_connection() {
-        docker exec mongodb mongosh \
-            --tls \
-            --tlsAllowInvalidCertificates \
-            --tlsCAFile=/etc/ssl/mongo/chain.pem \
-            --host "$MONGO_DOMAIN" \
-            -u "$MONGO_INITDB_ROOT_USERNAME" \
-            -p "$MONGO_INITDB_ROOT_PASSWORD" \
-            --eval "db.adminCommand('ping')" &>/dev/null
-    }
+services:
+  mongodb:
+    image: mongo:6.0
+    container_name: mongodb
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: \${MONGO_INITDB_ROOT_USERNAME}
+      MONGO_INITDB_ROOT_PASSWORD: \${MONGO_INITDB_ROOT_PASSWORD}
+    command: >
+      mongod
+      --auth
+      --tlsMode=requireTLS
+      --tlsCertificateKeyFile=/etc/ssl/mongo/combined.pem
+      --tlsCAFile=/etc/ssl/mongo/chain.pem
+      --tlsAllowConnectionsWithoutCertificates
+      --bind_ip_all
+    volumes:
+      - mongo_data:/data/db
+      - /etc/ssl/mongo:/etc/ssl/mongo:ro
+    networks:
+      internal:
+        aliases:
+          - $DOMAIN
+    healthcheck:
+      test: >
+        mongosh 
+        --tls 
+        --tlsAllowInvalidCertificates
+        --tlsCAFile=/etc/ssl/mongo/chain.pem
+        --host $DOMAIN
+        -u \$\${MONGO_INITDB_ROOT_USERNAME}
+        -p \$\${MONGO_INITDB_ROOT_PASSWORD}
+        --eval "db.adminCommand('ping')"
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
-    # Wait for MongoDB to be fully operational
-    log "Waiting for MongoDB to be ready..."
-    while [ $retry_count -lt $max_retries ]; do
-        if verify_mongodb_connection; then
-            success=true
-            break
-        fi
-        log "Attempt $((retry_count + 1))/$max_retries: MongoDB not ready yet, waiting..."
-        sleep 10
-        retry_count=$((retry_count + 1))
-    done
+volumes:
+  mongo_data:
 
-    if [ "$success" != "true" ]; then
-        log_error "Failed to connect to MongoDB after $max_retries attempts"
-        return 1
-    fi
+networks:
+  internal:
+    external: true
+COMPOSE
 
-    # Check if management user exists
-    log "Checking for existing management user..."
-    local user_exists
-    user_exists=$(docker exec mongodb mongosh \
+    sudo -u "$USERNAME" docker-compose --env-file "$MONGO_ENV_FILE" -f docker-compose.mongodb.yml down
+    sudo -u "$USERNAME" docker-compose --env-file "$MONGO_ENV_FILE" -f docker-compose.mongodb.yml up -d
+
+    # Wait for secure MongoDB to be healthy
+    sleep 30
+
+    # Verify secure connection
+    log "Verifying secure connection..."
+    docker exec mongodb mongosh \
         --tls \
         --tlsAllowInvalidCertificates \
         --tlsCAFile=/etc/ssl/mongo/chain.pem \
-        --host "$MONGO_DOMAIN" \
+        --host "$DOMAIN" \
+        -u "$MONGO_INITDB_ROOT_USERNAME" \
+        -p "$MONGO_INITDB_ROOT_PASSWORD" \
+        --eval "db.adminCommand('ping')"
+
+    if [ $? -eq 0 ]; then
+        log "MongoDB setup completed successfully"
+    else
+        log_error "Failed to verify secure MongoDB connection"
+        docker logs mongodb
+        return 1
+    fi
+}
+
+create_mongo_management_user() {
+    log "Creating MongoDB management user..."
+    source "$MONGO_ENV_FILE"
+
+    MONGO_MANAGER_USERNAME="manager"
+    
+    # Check if user exists
+    USER_EXISTS=$(docker exec mongodb mongosh \
+        --tls \
+        --tlsAllowInvalidCertificates \
+        --tlsCAFile=/etc/ssl/mongo/chain.pem \
+        --host "$DOMAIN" \
         -u "$MONGO_INITDB_ROOT_USERNAME" \
         -p "$MONGO_INITDB_ROOT_PASSWORD" \
         --eval "db.getSiblingDB('admin').getUser('$MONGO_MANAGER_USERNAME')" \
         --quiet)
 
-    # Generate new password regardless of whether we're creating or updating
-    MONGO_MANAGER_PASSWORD=$(openssl rand -hex 24)
-
-    if [ "$user_exists" = "null" ] || [ -z "$user_exists" ]; then
-        log "Creating new management user..."
-        # Create new management user
-        if ! docker exec mongodb mongosh \
-            --tls \
-            --tlsAllowInvalidCertificates \
-            --tlsCAFile=/etc/ssl/mongo/chain.pem \
-            --host "$MONGO_DOMAIN" \
-            -u "$MONGO_INITDB_ROOT_USERNAME" \
-            -p "$MONGO_INITDB_ROOT_PASSWORD" \
-            --eval "db.getSiblingDB('admin').createUser({
-                user: '$MONGO_MANAGER_USERNAME',
-                pwd: '$MONGO_MANAGER_PASSWORD',
-                roles: [
-                    {role: 'userAdminAnyDatabase', db: 'admin'},
-                    {role: 'readWriteAnyDatabase', db: 'admin'},
-                    {role: 'clusterMonitor', db: 'admin'}
-                ]
-            })"; then
-            log_error "Failed to create management user"
-            return 1
+    if [ -n "$USER_EXISTS" ]; then
+        log "Management user exists, retrieving existing credentials"
+        # Get existing password from previous env file
+        if grep -q "MONGO_MANAGER_PASSWORD" "$MONGO_ENV_FILE"; then
+            MONGO_MANAGER_PASSWORD=$(grep "MONGO_MANAGER_PASSWORD" "$MONGO_ENV_FILE" | cut -d= -f2)
+        else
+            # If we can't find the existing password, we need to generate a new one and update the user
+            MONGO_MANAGER_PASSWORD=$(openssl rand -hex 24)
+            log "Updating existing management user password..."
+            docker exec mongodb mongosh \
+                --tls \
+                --tlsAllowInvalidCertificates \
+                --tlsCAFile=/etc/ssl/mongo/chain.pem \
+                --host "$DOMAIN" \
+                -u "$MONGO_INITDB_ROOT_USERNAME" \
+                -p "$MONGO_INITDB_ROOT_PASSWORD" \
+                --eval "db.getSiblingDB('admin').updateUser('$MONGO_MANAGER_USERNAME', { pwd: '$MONGO_MANAGER_PASSWORD' })"
         fi
     else
-        log "Updating existing management user password..."
-        # Update existing management user
-        if ! docker exec mongodb mongosh \
+        # Generate new password for new user
+        MONGO_MANAGER_PASSWORD=$(openssl rand -hex 24)
+        
+        # Create management user with proper authentication
+        docker exec mongodb mongosh \
             --tls \
             --tlsAllowInvalidCertificates \
             --tlsCAFile=/etc/ssl/mongo/chain.pem \
-            --host "$MONGO_DOMAIN" \
+            --host "$DOMAIN" \
             -u "$MONGO_INITDB_ROOT_USERNAME" \
             -p "$MONGO_INITDB_ROOT_PASSWORD" \
-            --eval "db.getSiblingDB('admin').updateUser('$MONGO_MANAGER_USERNAME', {
-                pwd: '$MONGO_MANAGER_PASSWORD',
-                roles: [
-                    {role: 'userAdminAnyDatabase', db: 'admin'},
-                    {role: 'readWriteAnyDatabase', db: 'admin'},
-                    {role: 'clusterMonitor', db: 'admin'}
-                ]
-            })"; then
-            log_error "Failed to update management user"
-            return 1
-        fi
+            --eval "
+                db.getSiblingDB('admin').createUser({
+                    user: '$MONGO_MANAGER_USERNAME',
+                    pwd: '$MONGO_MANAGER_PASSWORD',
+                    roles: [
+                        {role: 'userAdminAnyDatabase', db: 'admin'},
+                        {role: 'readWriteAnyDatabase', db: 'admin'}
+                    ]
+                })
+            "
     fi
 
-    # Update environment file with all credentials
-    log "Updating environment file with credentials..."
+    # Update env file with current credentials
     {
         echo "MONGO_INITDB_ROOT_USERNAME=$MONGO_INITDB_ROOT_USERNAME"
         echo "MONGO_INITDB_ROOT_PASSWORD=$MONGO_INITDB_ROOT_PASSWORD"
         echo "MONGO_MANAGER_USERNAME=$MONGO_MANAGER_USERNAME"
         echo "MONGO_MANAGER_PASSWORD=$MONGO_MANAGER_PASSWORD"
     } > "$MONGO_ENV_FILE"
-
-    # Secure the environment file
     chmod 600 "$MONGO_ENV_FILE"
-    chown "$USERNAME:$USERNAME" "$MONGO_ENV_FILE"
 
     # Verify management user access
     log "Verifying management user access..."
-    if ! docker exec mongodb mongosh \
+    docker exec mongodb mongosh \
         --tls \
         --tlsAllowInvalidCertificates \
         --tlsCAFile=/etc/ssl/mongo/chain.pem \
-        --host "$MONGO_DOMAIN" \
+        --host "$DOMAIN" \
         -u "$MONGO_MANAGER_USERNAME" \
         -p "$MONGO_MANAGER_PASSWORD" \
-        --eval "db.adminCommand('ping')"; then
-        log_error "Failed to verify management user access"
-        return 1
-    fi
+        --eval "db.adminCommand('ping')"
 
-    log "Management user setup completed successfully"
+    log "Management user setup completed"
     return 0
 }
 
@@ -599,38 +733,8 @@ configure_env() {
     # First ensure directory exists
     mkdir -p "$BASE_DIR"
     
-    # Source MongoDB environment and verify credentials exist
-    if [ ! -f "$MONGO_ENV_FILE" ]; then
-        log_error "MongoDB environment file not found at $MONGO_ENV_FILE"
-        return 1
-    fi
-    
-    # Source the MongoDB environment file
-    set +u  # Temporarily disable errors for unbound variables
+    # Source MongoDB environment
     source "$MONGO_ENV_FILE"
-    set -u
-
-    # Verify required MongoDB variables are set
-    if [ -z "${MONGO_MANAGER_USERNAME:-}" ] || [ -z "${MONGO_MANAGER_PASSWORD:-}" ]; then
-        log_error "MongoDB manager credentials not found in environment file"
-        return 1
-    fi
-
-    # Log verification of credentials (without exposing them)
-    log "Verifying MongoDB manager credentials..."
-    if ! docker exec mongodb mongosh \
-        --tls \
-        --tlsAllowInvalidCertificates \
-        --tlsCAFile=/etc/ssl/mongo/chain.pem \
-        --host "$MONGO_DOMAIN" \
-        -u "${MONGO_MANAGER_USERNAME}" \
-        -p "${MONGO_MANAGER_PASSWORD}" \
-        --eval "db.adminCommand('ping')" &>/dev/null; then
-        log_error "Failed to verify MongoDB manager credentials"
-        return 1
-    fi
-
-    log "MongoDB manager credentials verified successfully"
     
     # Create environment file with explicit values
     cat > "$ENV_FILE" << EOL
@@ -639,7 +743,7 @@ AGENT_API_TOKEN="${AGENT_TOKEN}"
 SERVER_ID="${SERVER_ID}"
 MONGO_MANAGER_USERNAME="${MONGO_MANAGER_USERNAME}"
 MONGO_MANAGER_PASSWORD="${MONGO_MANAGER_PASSWORD}"
-MONGO_HOST="$MONGO_DOMAIN"
+MONGO_HOST="mongodb.cloudlunacy.uk"
 MONGO_PORT=27017
 MONGO_CA_FILE=/etc/ssl/mongo/chain.pem
 MONGODB_CA_FILE=/etc/ssl/mongo/chain.pem
@@ -649,28 +753,12 @@ EOL
     chown "$USERNAME:$USERNAME" "$ENV_FILE"
     chmod 600 "$ENV_FILE"
     
-    # Verify file contents
+    # Verify file
     if [ ! -s "$ENV_FILE" ]; then
         log_error "Environment file is empty or not created properly"
         return 1
     fi
-
-    # Verify required variables are present
-    local required_vars=(
-        "MONGO_MANAGER_USERNAME"
-        "MONGO_MANAGER_PASSWORD"
-        "MONGO_HOST"
-        "MONGODB_CA_FILE"
-    )
-
-    for var in "${required_vars[@]}"; do
-        if ! grep -q "^${var}=" "$ENV_FILE"; then
-            log_error "Missing required variable ${var} in environment file"
-            return 1
-        fi
-    done
     
-    log "Environment configuration completed successfully"
     return 0
 }
 
@@ -696,18 +784,18 @@ configure_environment() {
     log "MONGO_ENV_FILE = $MONGO_ENV_FILE"
 
     # Create Docker network if it doesn't exist
-    if ! docker network ls --format '{{.Name}}' | grep -qx 'internal'; then
+    if ! docker network ls --format '{{.Name}}' | grep -qw "internal"; then
         log "Creating internal Docker network..."
         docker network create internal
     else
-       log "Docker network 'internal' already exists."
+        log "Docker network 'internal' already exists. Skipping creation."
     fi
 }
 
 verify_ca_file() {
     log "Verifying MongoDB CA file setup..."
     local CA_FILE="/etc/ssl/mongo/chain.pem"
-    local CERT_DIR="/etc/letsencrypt/live/$MONGO_DOMAIN"
+    local CERT_DIR="/etc/letsencrypt/live/$DOMAIN"
 
     # Ensure CA file exists and has correct content
     if [ ! -f "$CA_FILE" ] || [ ! -s "$CA_FILE" ]; then
@@ -741,7 +829,7 @@ display_mongodb_credentials() {
     log "----------------------------------------"
     echo "Management Username: $MONGO_MANAGER_USERNAME"
     echo "Management Password: $MONGO_MANAGER_PASSWORD"
-    echo "MongoDB Host: $MONGO_DOMAIN"
+    echo "MongoDB Host: $DOMAIN"
     echo "MongoDB Port: 27017"
     log "----------------------------------------"
     log "These credentials are stored securely in $MONGO_ENV_FILE"
@@ -753,7 +841,7 @@ setup_certificate_renewal() {
     RENEWAL_SCRIPT="/usr/local/bin/renew_certificates.sh"
     cat <<EOF > "$RENEWAL_SCRIPT"
 #!/bin/bash
-certbot renew --deploy-hook "cat /etc/letsencrypt/live/$MONGO_DOMAIN/privkey.pem /etc/letsencrypt/live/$MONGO_DOMAIN/fullchain.pem > /etc/ssl/mongo/combined.pem"
+certbot renew --deploy-hook "cat /etc/letsencrypt/live/$DOMAIN/privkey.pem /etc/letsencrypt/live/$DOMAIN/fullchain.pem > /etc/ssl/mongo/combined.pem"
 chown 999:999 /etc/ssl/mongo/combined.pem
 chmod 600 /etc/ssl/mongo/combined.pem
 docker-compose -f $MONGODB_DIR/docker-compose.mongodb.yml restart mongodb
@@ -869,37 +957,14 @@ EOF
 setup_service() {
     log "Setting up CloudLunacy Deployment Agent as a systemd service..."
     SERVICE_FILE="/etc/systemd/system/cloudlunacy.service"
-    SERVICE_BACKUP="${SERVICE_FILE}.bak"
-    WAS_ACTIVE=$(systemctl is-active cloudlunacy 2>/dev/null && echo true || echo false)
 
-    # Backup existing service file if present
-    if [ -f "$SERVICE_FILE" ]; then
-        log "Creating service file backup..."
-        cp "$SERVICE_FILE" "$SERVICE_BACKUP"
-    fi
-
-    # Set up logging directory with proper permissions
-    LOG_DIR="/var/log/cloudlunacy"
-    mkdir -p "$LOG_DIR"
-    chown -R "$USERNAME:$USERNAME" "$LOG_DIR"
-    chmod 750 "$LOG_DIR"
-
-    # Create log files
-    touch "$LOG_DIR/app.log" "$LOG_DIR/error.log"
-    chown "$USERNAME:$USERNAME" "$LOG_DIR/app.log" "$LOG_DIR/error.log"
-    chmod 640 "$LOG_DIR/app.log" "$LOG_DIR/error.log"
-
-    # Verify Node.js application
-    log "Verifying Node.js application..."
-    if ! sudo -u "$USERNAME" bash -c "cd $BASE_DIR && NODE_ENV=production node -e 'require(\"./agent.js\")'" 2>"$LOG_DIR/verify.log"; then
-        log_error "Node.js application verification failed. Check $LOG_DIR/verify.log"
-        cat "$LOG_DIR/verify.log"
-        [ -f "$SERVICE_BACKUP" ] && mv "$SERVICE_BACKUP" "$SERVICE_FILE"
+    # Verify that the user cloudlunacy can read chain.pem
+    if ! sudo -u "$USERNAME" test -r "/etc/ssl/mongo/chain.pem"; then
+        log_error "CA file not readable by $USERNAME"
+        ls -l /etc/ssl/mongo/chain.pem
         return 1
     fi
 
-    # Create new service file
-    log "Generating new service configuration..."
     cat > "$SERVICE_FILE" << EOF
 [Unit]
 Description=CloudLunacy Deployment Agent
@@ -910,118 +975,41 @@ Requires=docker.service
 Type=simple
 User=$USERNAME
 Group=docker
-WorkingDirectory=$BASE_DIR
-RuntimeDirectory=cloudlunacy
-RuntimeDirectoryMode=0750
-
-# Environment setup
-Environment="HOME=$BASE_DIR"
-Environment="NODE_ENV=production"
-Environment="DEBUG=*"
-Environment="NODE_DEBUG=*"
-Environment="MONGODB_CA_FILE=/etc/ssl/mongo/chain.pem"
-Environment="NODE_EXTRA_CA_CERTS=/etc/ssl/mongo/chain.pem"
-EnvironmentFile=$BASE_DIR/.env
-
-# Execution
-ExecStart=/usr/bin/node --trace-warnings $BASE_DIR/agent.js
-ExecStartPre=/usr/bin/node -c $BASE_DIR/agent.js
-
-# Logging
-StandardOutput=append:$LOG_DIR/app.log
-StandardError=append:$LOG_DIR/error.log
-
-# Restart configuration
-Restart=always
+Environment=HOME=/opt/cloudlunacy
+Environment=NODE_ENV=production
+Environment=SSL_CERT_DIR=/etc/ssl/mongo
+Environment=SSL_CERT_FILE=/etc/ssl/mongo/chain.pem
+Environment=NODE_EXTRA_CA_CERTS=/etc/ssl/mongo/chain.pem
+EnvironmentFile=/opt/cloudlunacy/.env
+WorkingDirectory=/opt/cloudlunacy
+ExecStart=/usr/bin/node /opt/cloudlunacy/agent.js
+Restart=on-failure
 RestartSec=10
-StartLimitInterval=200
-StartLimitBurst=5
 
-# Security
 ProtectSystem=full
-ReadOnlyDirectories=/etc/ssl/mongo
-ReadWriteDirectories=$BASE_DIR $LOG_DIR
-PrivateTmp=true
-NoNewPrivileges=true
+ReadOnlyPaths=/etc/ssl/mongo
+ReadWritePaths=/opt/cloudlunacy
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-    # Set permissions
     chmod 644 "$SERVICE_FILE"
-
-    # Validate environment variables
-    REQUIRED_VARS=(
-        "BACKEND_URL"
-        "AGENT_API_TOKEN"
-        "SERVER_ID"
-        "MONGO_MANAGER_USERNAME"
-        "MONGO_MANAGER_PASSWORD"
-        "MONGO_HOST"
-        "MONGODB_CA_FILE"
-    )
-    
-    log "Verifying environment variables..."
-    for var in "${REQUIRED_VARS[@]}"; do
-        if ! grep -q "^${var}=" "$BASE_DIR/.env"; then
-            log_error "Missing required environment variable: $var"
-            [ -f "$SERVICE_BACKUP" ] && mv "$SERVICE_BACKUP" "$SERVICE_FILE"
-            return 1
-        fi
-    done
-
-    # Reload systemd configuration
     systemctl daemon-reload
 
-    # Service control with rollback
-    if $WAS_ACTIVE; then
-        log "Performing hot update..."
-        systemctl restart cloudlunacy
-        sleep 5
-        
-        if ! systemctl is-active --quiet cloudlunacy; then
-            log_error "Service update failed, rolling back..."
-            [ -f "$SERVICE_BACKUP" ] && mv "$SERVICE_BACKUP" "$SERVICE_FILE"
-            systemctl daemon-reload
-            systemctl restart cloudlunacy
-            sleep 2
-            
-            if systemctl is-active --quiet cloudlunacy; then
-                log "Successfully rolled back to previous service configuration"
-            else
-                log_error "Rollback failed! Manual intervention required."
-                return 1
-            fi
-        fi
-    else
-        log "Starting new service instance..."
-        systemctl start cloudlunacy
-        sleep 3
-        
-        if ! systemctl is-active --quiet cloudlunacy; then
-            log_error "Service failed to start"
-            [ -f "$SERVICE_BACKUP" ] && mv "$SERVICE_BACKUP" "$SERVICE_FILE"
-            systemctl daemon-reload
-            return 1
-        fi
-    fi
-
-    # Enable for future boots
+    # Enable for autostart
     systemctl enable cloudlunacy
 
-    # Cleanup backup if successful
-    [ -f "$SERVICE_BACKUP" ] && rm -f "$SERVICE_BACKUP"
+    systemctl stop cloudlunacy || true
+    sleep 2
+    systemctl start cloudlunacy
 
-    # Final health check
-    log "Performing final health check..."
-    if ! curl -sSf http://localhost:8080/health >/dev/null 2>&1; then
-        log_error "Health check failed after service update"
+    # Check service status
+    if ! systemctl is-active --quiet cloudlunacy; then
+        log_error "Service failed to start. Checking logs..."
+        journalctl -u cloudlunacy --no-pager -n 50
         return 1
     fi
-
-    log "Service update completed successfully"
-    return 0
 }
 
 verify_installation() {
@@ -1078,7 +1066,7 @@ completion_message() {
     echo -e "\033[0;35m
    ____                            _         _       _   _                 _
   / ___|___  _ __   __ _ _ __ __ _| |_ _   _| | __ _| |_(_) ___  _ __  ___| |
- | |   / _ \\| '_ \\ / _\ | '__/ _\ | __| | | | |/ _\` | __| |/ _ \\| '_ \\/ __| |
+ | |   / _ \\| '_ \\ / _\` | '__/ _\` | __| | | | |/ _\` | __| |/ _ \\| '_ \\/ __| |
  | |__| (_) | | | | (_| | | | (_| | |_| |_| | | (_| | |_| | (_) | | | \\__ \\_|
   \\____\\___/|_| |_|\\__, |_|  \\__,_|\\__|\\__,_|_|\\__,_|\\__|_|\\___/|_| |_|___(_)
                        |___/
@@ -1097,239 +1085,65 @@ completion_message() {
     echo -e "cp $BASE_DIR/.env $BASE_DIR/.env.backup"
 }
 
-
-
-create_backup() {
-    local BACKUP_DIR="/tmp/cl_backup_$(date +%Y%m%d%H%M%S)"
-    mkdir -p "$BACKUP_DIR"
-    
-    log "Creating system backup..."
-    
-    # Backup MongoDB
-    if docker ps | grep -q mongodb; then
-        log "Backing up MongoDB data..."
-        docker exec mongodb mongodump --archive="$BACKUP_DIR/mongo_backup.gz" --gzip \
-            --uri="mongodb://${MONGO_MANAGER_USERNAME}:${MONGO_MANAGER_PASSWORD}@${DOMAIN}:27017/?tls=true&tlsCAFile=/etc/ssl/mongo/chain.pem" || true
-    fi
-
-    # Backup critical files
-    log "Backing up configuration files..."
-    cp -a "$BASE_DIR/.env" "$BACKUP_DIR" 2>/dev/null || true
-    cp -a "/etc/ssl/mongo" "$BACKUP_DIR" 2>/dev/null || true
-    cp -a "$MONGODB_DIR" "$BACKUP_DIR" 2>/dev/null || true
-    cp -a "$BASE_DIR/traefik" "$BACKUP_DIR" 2>/dev/null || true
-
-    echo "$BACKUP_DIR"
+cleanup_on_error() {
+    log_error "Installation encountered an error. Cleaning up..."
+    rm -rf "$BASE_DIR"
+    exit 1
 }
 
-rollback() {
-    local BACKUP_DIR="$1"
-    log_error "Initiating rollback from backup: $BACKUP_DIR"
-    
-    # Restore MongoDB
-    if [ -f "$BACKUP_DIR/mongo_backup.gz" ]; then
-        log "Restoring MongoDB data..."
-        docker-compose -f "$MONGODB_DIR/docker-compose.mongodb.yml" down || true
-        cp -a "$BACKUP_DIR/mongodb"/* "$MONGODB_DIR"
-        docker-compose -f "$MONGODB_DIR/docker-compose.mongodb.yml" up -d
-        wait_for_mongodb_health 30
-        docker exec mongodb mongorestore --archive="$BACKUP_DIR/mongo_backup.gz" --gzip --drop \
-            --uri="mongodb://${MONGO_MANAGER_USERNAME}:${MONGO_MANAGER_PASSWORD}@${DOMAIN}:27017/?tls=true&tlsCAFile=/etc/ssl/mongo/chain.pem" || true
-    fi
-
-    # Restore configurations
-    log "Restoring system files..."
-    cp -a "$BACKUP_DIR/.env" "$BASE_DIR" 2>/dev/null || true
-    cp -a "$BACKUP_DIR/mongo" "/etc/ssl" 2>/dev/null || true
-    cp -a "$BACKUP_DIR/traefik" "$BASE_DIR" 2>/dev/null || true
-
-    # Restart services
-    log "Restarting services..."
-    systemctl restart cloudlunacy || true
-    docker-compose -f "$MONGODB_DIR/docker-compose.mongodb.yml" restart || true
-    docker-compose -f "$BASE_DIR/traefik/docker-compose.traefik.yml" restart || true
-
-    log "Rollback completed successfully"
-}
-
-atomic_mongodb_update() {
-    local BACKUP_DIR="$1"
-    log "Performing atomic MongoDB update..."
-    
-    # Create temporary update container
-    docker run -d --name mongodb-update \
-        --network internal \
-        -v mongo_data:/data/db \
-        -v /etc/ssl/mongo:/etc/ssl/mongo:ro \
-        mongo:6.0 \
-        mongod --auth --tlsMode=requireTLS \
-        --tlsCertificateKeyFile=/etc/ssl/mongo/combined.pem \
-        --tlsCAFile=/etc/ssl/mongo/chain.pem
-
-    # Wait for update container
-    if ! wait_for_mongodb_health 15; then
-        log_error "MongoDB update container failed health check"
-        docker rm -f mongodb-update
-        return 1
-    fi
-    
-    # Switch containers
-    docker stop mongodb
-    docker rm mongodb
-    docker rename mongodb-update mongodb
-    
-    # Verify final health
-    if ! wait_for_mongodb_health 10; then
-        log_error "MongoDB update failed final verification"
-        return 1
-    fi
-}
-
-configure_firewall() {
-    log "Configuring firewall settings..."
-    
-    # Allow SSH
-    ufw allow 22/tcp || iptables -A INPUT -p tcp --dport 22 -j ACCEPT
-    
-    # Allow MongoDB port
-    ufw allow 27017/tcp || iptables -A INPUT -p tcp --dport 27017 -j ACCEPT
-    
-    # Allow HTTP/HTTPS
-    ufw allow 80/tcp || iptables -A INPUT -p tcp --dport 80 -j ACCEPT
-    ufw allow 443/tcp || iptables -A INPUT -p tcp --dport 443 -j ACCEPT
-    
-    # Enable firewall if using ufw
-    if command -v ufw >/dev/null; then
-        ufw --force enable
-    fi
-    
-    log "Firewall configuration completed."
-}
-
-setup_docker_infrastructure() {
-    log "Setting up Docker infrastructure..."
-    
-    # Create required networks
-    if ! docker network ls | grep -q traefik-network; then
-        docker network create traefik-network
-    fi
-    
-    if ! docker network ls | grep -q internal; then
-        docker network create internal
-    fi
-    
-    # Create persistent volumes
-    docker volume create --name=mongo_data 2>/dev/null || true
-    
-    log "Docker networks and volumes ready."
-}
-
-setup_application_service() {
-    log "Configuring systemd service..."
-    
-    SERVICE_FILE="/etc/systemd/system/cloudlunacy.service"
-    
-    cat > "$SERVICE_FILE" << EOF
-[Unit]
-Description=CloudLunacy Deployment Agent
-After=network.target docker.service
-Requires=docker.service
-
-[Service]
-Type=simple
-User=$USERNAME
-Group=docker
-WorkingDirectory=$BASE_DIR
-EnvironmentFile=$BASE_DIR/.env
-ExecStart=/usr/bin/node $BASE_DIR/agent.js
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    # Reload systemd and enable service
-    systemctl daemon-reload
-    systemctl enable cloudlunacy
-    systemctl start cloudlunacy
-    
-    log "Application service configured and started."
-}
-
-generate_secure_credentials() {
-    log "Generating secure MongoDB credentials..."
-    
-    # Generate cryptographically secure credentials
-    MONGO_ROOT_USER=$(uuidgen | tr -d '-' | cut -c 1-16)
-    MONGO_ROOT_PASS=$(openssl rand -base64 32 | tr -dc 'a-zA-Z0-9!@#$%^&*()_+' | fold -w 32 | head -n 1)
-    MONGO_MANAGER_USER=$(uuidgen | tr -d '-' | cut -c 1-16)
-    MONGO_MANAGER_PASS=$(openssl rand -base64 32 | tr -dc 'a-zA-Z0-9!@#$%^&*()_+' | fold -w 32 | head -n 1)
-
-    # Store credentials in environment file
-    cat <<EOF > "$MONGO_ENV_FILE"
-MONGO_ROOT_USER=$MONGO_ROOT_USER
-MONGO_ROOT_PASS=$MONGO_ROOT_PASS
-MONGO_MANAGER_USER=$MONGO_MANAGER_USER
-MONGO_MANAGER_PASS=$MONGO_MANAGER_PASS
-EOF
-
-    # Set strict permissions
-    chown "$USERNAME":"$USERNAME" "$MONGO_ENV_FILE"
-    chmod 600 "$MONGO_ENV_FILE"
-    log "Credentials stored securely in $MONGO_ENV_FILE"
-}
+trap cleanup_on_error ERR
 
 main() {
     check_root
-    initialize_logging
     display_info
     check_args "$@"
 
     AGENT_TOKEN="$1"
     SERVER_ID="$2"
     EMAIL="$3"
-    BACKEND_BASE_URL="${4:-https://api.cloudlunacy.uk}"
-    
-    verify_port_availability 80 "Traefik"
-    verify_port_availability 443 "Traefik"
-    verify_port_availability 27017 "MongoDB"
+    BACKEND_BASE_URL="${4:-https://your-default-backend-url}"
+    BACKEND_URL="${BACKEND_BASE_URL}"
 
-    # System setup
+    preserve_configuration
     detect_os
     update_system
     install_dependencies
-    setup_user_directories
+    install_docker
+    install_node
+    
+    if ! check_installation_status; then
+        # First-time installation
+        perform_initial_setup
+    else
+        # Update existing installation
+        stop_conflicting_containers
+        obtain_ssl_certificate
+        create_combined_certificate
+        secure_update_mongodb
+        adjust_firewall_settings
+    fi
 
-    # Security setup
-    setup_ssl_certificate 
-    generate_secure_credentials
-    configure_firewall
-
-    # Service setup
-    setup_docker_infrastructure
-    setup_mongodb
-    setup_traefik
-    setup_application_service
-
-    # Finalization
+    safe_download_agent
+    install_agent_dependencies
+    enhanced_configure_env
+    update_systemd_service
     setup_certificate_renewal
     verify_installation
     completion_message
 }
 
-trap 'error_handler $? $LINENO' ERR
-error_handler() {
-    local exit_code=$1
-    local line_no=$2
-    log_error "Installation failed with code $exit_code at line $line_no"
-    
-    # Emergency cleanup
-    docker_prune
-    systemctl stop cloudlunacy.service || true
-    rm -rf "$BASE_DIR"/{data,config,temp}
-    
-    exit $exit_code
+perform_initial_setup() {
+    log "Performing initial installation..."
+    setup_user_directories
+    setup_docker_permissions
+    stop_conflicting_containers
+    obtain_ssl_certificate
+    create_combined_certificate
+    setup_mongodb
+    create_mongo_management_user
+    adjust_firewall_settings
+    setup_traefik
 }
+
 
 main "$@"
