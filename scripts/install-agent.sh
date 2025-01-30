@@ -1220,6 +1220,7 @@ main() {
     BACKEND_BASE_URL="${4:-https://your-default-backend-url}"
     BACKEND_URL="${BACKEND_BASE_URL}"
 
+    setup_user_directories
     configure_environment
     detect_os
     log "Detected OS: $OS_TYPE $OS_VERSION"
@@ -1230,7 +1231,6 @@ main() {
     install_mongosh
     install_docker
     install_node
-    setup_user_directories
     setup_docker_permissions
     download_agent
     install_agent_dependencies
