@@ -386,32 +386,24 @@ EOF
 }
 
 setup_mongodb() {
-    log "Configuring MongoDB with TLS authentication..."
+    log "Configuring MongoDB with generated credentials..."
     
-    mkdir -p "$MONGODB_DIR"/{data,config}
-    chown -R "$USERNAME":"$USERNAME" "$MONGODB_DIR"
+    # Source the credentials
+    source "$MONGO_ENV_FILE"
 
-    # Phase 1: Initial setup without authentication
-    log "Starting initialization phase..."
+    # Phase 1: Initial setup
     docker run -d --name mongo_init \
         -v "$MONGODB_DIR/data:/data/db" \
         -v "$SSL_DIR:/etc/ssl/mongo:ro" \
-        mongo:6.0 \
-        --bind_ip_all
+        mongo:6.0 --bind_ip_all
 
     mongo_healthcheck "mongo_init" || exit 1
 
-    # Generate secure credentials
-    MONGO_ROOT_USER=$(uuidgen | tr -d '-' | cut -c 1-16)
-    MONGO_ROOT_PASS=$(openssl rand -base64 32 | tr -dc 'a-zA-Z0-9!@#$%^&*()_+' | fold -w 32 | head -n 1)
-    MONGO_ADMIN_USER=$(uuidgen | tr -d '-' | cut -c 1-16)
-    MONGO_ADMIN_PASS=$(openssl rand -base64 32 | tr -dc 'a-zA-Z0-9!@#$%^&*()_+' | fold -w 32 | head -n 1)
-
-    # Create admin user
+    # Create admin user using generated credentials
     docker exec mongo_init mongosh --eval "
         db.getSiblingDB('admin').createUser({
-            user: '$MONGO_ADMIN_USER',
-            pwd: '$MONGO_ADMIN_PASS',
+            user: '$MONGO_MANAGER_USER',
+            pwd: '$MONGO_MANAGER_PASS',
             roles: [
                 { role: 'userAdminAnyDatabase', db: 'admin' },
                 { role: 'clusterAdmin', db: 'admin' },
@@ -419,34 +411,22 @@ setup_mongodb() {
             ]
         })"
     
-    # Stop initialization container
+    # Cleanup initialization container
     docker stop mongo_init && docker rm mongo_init
 
     # Phase 2: Secure production setup
-    log "Starting secured MongoDB instance..."
     docker run -d --name mongodb \
         -v "$MONGODB_DIR/data:/data/db" \
         -v "$SSL_DIR:/etc/ssl/mongo:ro" \
         -p 27017:27017 \
         -e MONGO_INITDB_ROOT_USERNAME="$MONGO_ROOT_USER" \
         -e MONGO_INITDB_ROOT_PASSWORD="$MONGO_ROOT_PASS" \
-        mongo:6.0 \
-        --auth \
-        --tlsMode=requireTLS \
+        mongo:6.0 --auth --tlsMode=requireTLS \
         --tlsCertificateKeyFile=/etc/ssl/mongo/combined.pem \
         --tlsCAFile=/etc/ssl/mongo/chain.pem \
         --bind_ip_all
 
     mongo_healthcheck "mongodb" || exit 1
-
-    # Store credentials securely
-    cat <<EOF > "$MONGO_ENV_FILE"
-MONGO_ROOT_USER=$MONGO_ROOT_USER
-MONGO_ROOT_PASS=$MONGO_ROOT_PASS
-MONGO_ADMIN_USER=$MONGO_ADMIN_USER
-MONGO_ADMIN_PASS=$MONGO_ADMIN_PASS
-EOF
-    secure_environment_file "$MONGO_ENV_FILE"
 }
 
 create_mongo_management_user() {
@@ -1200,6 +1180,29 @@ atomic_mongodb_update() {
         log_error "MongoDB update failed final verification"
         return 1
     fi
+}
+
+generate_secure_credentials() {
+    log "Generating secure MongoDB credentials..."
+    
+    # Generate cryptographically secure credentials
+    MONGO_ROOT_USER=$(uuidgen | tr -d '-' | cut -c 1-16)
+    MONGO_ROOT_PASS=$(openssl rand -base64 32 | tr -dc 'a-zA-Z0-9!@#$%^&*()_+' | fold -w 32 | head -n 1)
+    MONGO_MANAGER_USER=$(uuidgen | tr -d '-' | cut -c 1-16)
+    MONGO_MANAGER_PASS=$(openssl rand -base64 32 | tr -dc 'a-zA-Z0-9!@#$%^&*()_+' | fold -w 32 | head -n 1)
+
+    # Store credentials in environment file
+    cat <<EOF > "$MONGO_ENV_FILE"
+MONGO_ROOT_USER=$MONGO_ROOT_USER
+MONGO_ROOT_PASS=$MONGO_ROOT_PASS
+MONGO_MANAGER_USER=$MONGO_MANAGER_USER
+MONGO_MANAGER_PASS=$MONGO_MANAGER_PASS
+EOF
+
+    # Set strict permissions
+    chown "$USERNAME":"$USERNAME" "$MONGO_ENV_FILE"
+    chmod 600 "$MONGO_ENV_FILE"
+    log "Credentials stored securely in $MONGO_ENV_FILE"
 }
 
 main() {
