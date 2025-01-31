@@ -310,16 +310,26 @@ services:
     image: mongo:6.0
     container_name: mongodb
     restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: "${MONGO_INITDB_ROOT_USERNAME}"
+      MONGO_INITDB_ROOT_PASSWORD: "${MONGO_INITDB_ROOT_PASSWORD}"
     command: >
       mongod
+      --auth
       --bind_ip_all
+    ports:
+      - "27017:27017"
     volumes:
       - mongo_data:/data/db
-      - /etc/ssl/mongo:/etc/ssl/mongo:ro
     networks:
-      internal:
+      - internal
     healthcheck:
-      test: mongosh --eval "db.adminCommand('ping')"
+      test: >
+        mongosh 
+        --host localhost
+        -u "${MONGO_INITDB_ROOT_USERNAME}"
+        -p "${MONGO_INITDB_ROOT_PASSWORD}"
+        --eval "db.adminCommand('ping')"
       interval: 10s
       timeout: 5s
       retries: 3
