@@ -1,6 +1,6 @@
 #!/bin/bash
 # ------------------------------------------------------------------------------
-# Installation Script for CloudLunacy Deployment Agent with Traefik and MongoDB
+# Installation Script for CloudLunacy Deployment Agent with MongoDB
 # Version: 2.5.2 (Modified for two-phase MongoDB setup)
 # Author: Mahamadou Taibou
 # Date: 2024-11-24
@@ -11,10 +11,9 @@
 #   - Detects the operating system and version
 #   - Updates system packages
 #   - Installs necessary dependencies (Docker, Node.js, Git, jq, Certbot)
-#   - Sets up Traefik as a reverse proxy
 #   - Sets up MongoDB in two phases:
-#       Phase 1: No auth/TLS -> root user is created by official entrypoint
-#       Phase 2: Enable auth & TLS -> health check passes with credentials
+#       Phase 1: No auth -> root user is created by official entrypoint
+#       Phase 2: Enable auth -> health check passes with credentials
 #   - Creates a dedicated user with correct permissions
 #   - Downloads the latest version of the Deployment Agent from GitHub
 #   - Installs Node.js dependencies
@@ -24,12 +23,11 @@
 #   - Provides post-installation verification and feedback
 #
 # Usage:
-#   sudo ./install-agent.sh <AGENT_TOKEN> <SERVER_ID> <EMAIL> [BACKEND_BASE_URL]
+#   sudo ./install-agent.sh <AGENT_TOKEN> <SERVER_ID> [BACKEND_BASE_URL]
 #
 # Arguments:
 #   AGENT_TOKEN      - Unique token for agent authentication
 #   SERVER_ID        - Unique identifier for the server
-#   EMAIL            - Email address for Let's Encrypt notifications
 #   BACKEND_BASE_URL - (Optional) Backend base URL; defaults to https://your-default-backend-url
 # ------------------------------------------------------------------------------
 
@@ -41,11 +39,13 @@ IFS=$'\n\t'
 # ----------------------------
 # Configuration Variables
 # ----------------------------
-DOMAIN="mongodb.cloudlunacy.uk"
 USERNAME="cloudlunacy"
 BASE_DIR="/opt/cloudlunacy"
 MONGODB_DIR="$BASE_DIR/mongodb"
 MONGO_ENV_FILE="$MONGODB_DIR/.env"
+FRONT_API_TOKEN="your-secret-token"
+FRONTDOOR_SUBDOMAIN_BASE="mongodb.cloudlunacy.uk"
+FRONTDOOR_CONFIG="/etc/cloudlunacy/frontdoor.conf"
 
 # ----------------------------
 # Function Definitions
@@ -75,7 +75,7 @@ log_error() {
 check_args() {
     if [ "$#" -lt 3 ] || [ "$#" -gt 5 ]; then
         log_error "Invalid number of arguments."
-        echo "Usage: $0 <AGENT_TOKEN> <SERVER_ID> <EMAIL> [BACKEND_BASE_URL]"
+        echo "Usage: $0 <AGENT_TOKEN> <SERVER_ID> [BACKEND_BASE_URL]"
         exit 1
     fi
 }
@@ -231,83 +231,10 @@ install_node() {
     log "Node.js installed successfully."
 }
 
-install_certbot() {
-    log "Installing Certbot for SSL certificate management..."
-    case "$OS_TYPE" in
-        ubuntu | debian | raspbian)
-            apt-get update
-            apt-get install -y certbot
-            ;;
-        centos | fedora | rhel | ol | rocky | almalinux | amzn)
-            yum install -y certbot
-            ;;
-        *)
-            log_error "Unsupported OS for Certbot installation: $OS_TYPE $OS_VERSION"
-            exit 1
-            ;;
-    esac
-    log "Certbot installed."
-}
-
 install_mongosh() {
     log "Pulling MongoDB Shell Docker image..."
     docker pull mongodb/mongodb-community-server:6.0-ubi8
     log "MongoDB Shell Docker image pulled."
-}
-
-obtain_ssl_certificate() {
-    log "Obtaining SSL/TLS certificate for domain $DOMAIN..."
-    
-    # Ensure port 80 is free
-    if lsof -i :80 | grep LISTEN; then
-        log "Port 80 is currently in use. Attempting to stop services using port 80..."
-        systemctl stop nginx || true
-        systemctl stop apache2 || true
-        systemctl stop httpd || true
-        systemctl stop traefik || true
-        if lsof -i :80 | grep LISTEN; then
-            log_error "Port 80 is still in use. Cannot proceed."
-            exit 1
-        fi
-    fi
-
-    certbot certonly --standalone --non-interactive --agree-tos --email "$EMAIL" -d "$DOMAIN" || true
-    if [ ! -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]; then
-        certbot renew --dry-run || true
-        if [ ! -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]; then
-            log_error "Failed to obtain SSL/TLS certificate for $DOMAIN."
-            exit 1
-        fi
-    fi
-
-    log "SSL/TLS certificate obtained for $DOMAIN."
-}
-
-create_combined_certificate() {
-    log "Creating combined certificate file for MongoDB..."
-    SSL_DIR="/etc/ssl/mongo"
-    mkdir -p "$SSL_DIR"
-    CERT_DIR="/etc/letsencrypt/live/$DOMAIN"
-
-    # Combine private key and full chain into single .pem
-    cat "$CERT_DIR/privkey.pem" "$CERT_DIR/fullchain.pem" > "$SSL_DIR/combined.pem"
-
-    # Copy the default chain (intermediate only)
-    cp "$CERT_DIR/chain.pem" "$SSL_DIR/chain.pem"
-
-    # ADDED: Download Let’s Encrypt root cert and append it to chain.pem
-    curl -s https://letsencrypt.org/certs/isrgrootx1.pem > "$SSL_DIR/isrgrootx1.pem"
-    cat "$SSL_DIR/chain.pem" "$SSL_DIR/isrgrootx1.pem" > "$SSL_DIR/chain-with-root.pem"
-    mv "$SSL_DIR/chain-with-root.pem" "$SSL_DIR/chain.pem"
-    rm -f "$SSL_DIR/isrgrootx1.pem"
-
-    # Adjust file ownership/permissions
-    chown "$USERNAME:docker" "$SSL_DIR"
-    chmod 750 "$SSL_DIR"
-    chown "$USERNAME:docker" "$SSL_DIR"/*.pem
-    chmod 644 "$SSL_DIR"/*.pem
-
-    log "Certificate files created at $SSL_DIR"
 }
 
 wait_for_mongodb_health() {
@@ -391,8 +318,6 @@ services:
       - /etc/ssl/mongo:/etc/ssl/mongo:ro
     networks:
       internal:
-        aliases:
-          - $DOMAIN
     healthcheck:
       test: mongosh --eval "db.adminCommand('ping')"
       interval: 10s
@@ -460,8 +385,8 @@ EOF
     chown "$USERNAME":"$USERNAME" "$MONGO_ENV_FILE"
     chmod 600 "$MONGO_ENV_FILE"
 
-    # Step 3: Restart with auth and TLS
-    log "Step 3: Restarting MongoDB with auth and TLS..."
+    # Step 3: Restart with auth
+    log "Step 3: Restarting MongoDB with auth."
     cat <<COMPOSE > "$MONGODB_DIR/docker-compose.mongodb.yml"
 version: '3.8'
 
@@ -476,34 +401,20 @@ services:
     command: >
       mongod
       --auth
-      --tlsMode=requireTLS
-      --tlsCertificateKeyFile=/etc/ssl/mongo/combined.pem
-      --tlsCAFile=/etc/ssl/mongo/chain.pem
-      --tlsAllowConnectionsWithoutCertificates
       --bind_ip_all
     ports:
       - "27017:27017"  
     volumes:
       - mongo_data:/data/db
-      - /etc/ssl/mongo:/etc/ssl/mongo:ro
     networks:
       internal:
-        aliases:
-          - $DOMAIN
     healthcheck:
-      test: >
-        mongosh 
-        --tls 
-        --tlsAllowInvalidCertificates
-        --tlsCAFile=/etc/ssl/mongo/chain.pem
-        --host $DOMAIN
-        -u \$\${MONGO_INITDB_ROOT_USERNAME}
-        -p \$\${MONGO_INITDB_ROOT_PASSWORD}
-        --eval "db.adminCommand('ping')"
-      interval: 5s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
+  test: >
+    mongosh 
+    --host localhost
+    -u \$\${MONGO_INITDB_ROOT_USERNAME}
+    -p \$\${MONGO_INITDB_ROOT_PASSWORD}
+    --eval "db.adminCommand('ping')"
 
 volumes:
   mongo_data:
@@ -543,10 +454,6 @@ COMPOSE
     log "Verifying secure connection..."
     for i in {1..5}; do
         if docker exec mongodb mongosh \
-            --tls \
-            --tlsAllowInvalidCertificates \
-            --tlsCAFile=/etc/ssl/mongo/chain.pem \
-            --host "$DOMAIN" \
             -u "$MONGO_INITDB_ROOT_USERNAME" \
             -p "$MONGO_INITDB_ROOT_PASSWORD" \
             --eval "db.adminCommand('ping')"; then
@@ -590,11 +497,8 @@ create_mongo_management_user() {
 
     # Function to verify MongoDB connection
     verify_mongodb_connection() {
-        docker exec mongodb mongosh \
-            --tls \
-            --tlsAllowInvalidCertificates \
-            --tlsCAFile=/etc/ssl/mongo/chain.pem \
-            --host "$DOMAIN" \
+            docker exec mongodb mongosh \
+            --host localhost \
             -u "$MONGO_INITDB_ROOT_USERNAME" \
             -p "$MONGO_INITDB_ROOT_PASSWORD" \
             --eval "db.adminCommand('ping')" &>/dev/null
@@ -621,10 +525,6 @@ create_mongo_management_user() {
     log "Checking for existing management user..."
     local user_exists
     user_exists=$(docker exec mongodb mongosh \
-        --tls \
-        --tlsAllowInvalidCertificates \
-        --tlsCAFile=/etc/ssl/mongo/chain.pem \
-        --host "$DOMAIN" \
         -u "$MONGO_INITDB_ROOT_USERNAME" \
         -p "$MONGO_INITDB_ROOT_PASSWORD" \
         --eval "db.getSiblingDB('admin').getUser('$MONGO_MANAGER_USERNAME')" \
@@ -637,10 +537,6 @@ create_mongo_management_user() {
         log "Creating new management user..."
         # Create new management user
         if ! docker exec mongodb mongosh \
-            --tls \
-            --tlsAllowInvalidCertificates \
-            --tlsCAFile=/etc/ssl/mongo/chain.pem \
-            --host "$DOMAIN" \
             -u "$MONGO_INITDB_ROOT_USERNAME" \
             -p "$MONGO_INITDB_ROOT_PASSWORD" \
             --eval "db.getSiblingDB('admin').createUser({
@@ -659,10 +555,6 @@ create_mongo_management_user() {
         log "Updating existing management user password..."
         # Update existing management user
         if ! docker exec mongodb mongosh \
-            --tls \
-            --tlsAllowInvalidCertificates \
-            --tlsCAFile=/etc/ssl/mongo/chain.pem \
-            --host "$DOMAIN" \
             -u "$MONGO_INITDB_ROOT_USERNAME" \
             -p "$MONGO_INITDB_ROOT_PASSWORD" \
             --eval "db.getSiblingDB('admin').updateUser('$MONGO_MANAGER_USERNAME', {
@@ -694,10 +586,6 @@ create_mongo_management_user() {
     # Verify management user access
     log "Verifying management user access..."
     if ! docker exec mongodb mongosh \
-        --tls \
-        --tlsAllowInvalidCertificates \
-        --tlsCAFile=/etc/ssl/mongo/chain.pem \
-        --host "$DOMAIN" \
         -u "$MONGO_MANAGER_USERNAME" \
         -p "$MONGO_MANAGER_PASSWORD" \
         --eval "db.adminCommand('ping')"; then
@@ -711,7 +599,7 @@ create_mongo_management_user() {
 
 adjust_firewall_settings() {
     log "Adjusting firewall settings..."
-    TRUSTED_IP="128.140.53.203" 
+    TRUSTED_IP="138.199.165.36" 
     if command -v ufw >/dev/null 2>&1; then
         ufw allow from $TRUSTED_IP to any port 27017 proto tcp
         log "Allowed port 27017 for trusted IP $TRUSTED_IP."
@@ -749,10 +637,6 @@ configure_env() {
     # Log verification of credentials (without exposing them)
     log "Verifying MongoDB manager credentials..."
     if ! docker exec mongodb mongosh \
-        --tls \
-        --tlsAllowInvalidCertificates \
-        --tlsCAFile=/etc/ssl/mongo/chain.pem \
-        --host "$DOMAIN" \
         -u "${MONGO_MANAGER_USERNAME}" \
         -p "${MONGO_MANAGER_PASSWORD}" \
         --eval "db.adminCommand('ping')" &>/dev/null; then
@@ -769,11 +653,15 @@ AGENT_API_TOKEN="${AGENT_TOKEN}"
 SERVER_ID="${SERVER_ID}"
 MONGO_MANAGER_USERNAME="${MONGO_MANAGER_USERNAME}"
 MONGO_MANAGER_PASSWORD="${MONGO_MANAGER_PASSWORD}"
-MONGO_HOST="$DOMAIN"
+MONGO_HOST="localhost"
 MONGO_PORT=27017
-MONGO_CA_FILE=/etc/ssl/mongo/chain.pem
-MONGODB_CA_FILE=/etc/ssl/mongo/chain.pem
 NODE_ENV=production
+# FRONTDOOR_API_URL="http://138.199.165.36:3000"  
+# FRONTDOOR_API_TOKEN="your-secret-token"               
+# FRONTDOOR_SUBDOMAIN_BASE="mongodb.cloudlunacy.uk"
+FRONTDOOR_API_URL="$FRONTDOOR_API_URL"
+FRONTDOOR_API_TOKEN="$FRONTDOOR_API_TOKEN"
+PUBLIC_IP="$PUBLIC_IP"
 EOL
 
     chown "$USERNAME:$USERNAME" "$ENV_FILE"
@@ -790,7 +678,6 @@ EOL
         "MONGO_MANAGER_USERNAME"
         "MONGO_MANAGER_PASSWORD"
         "MONGO_HOST"
-        "MONGODB_CA_FILE"
     )
 
     for var in "${required_vars[@]}"; do
@@ -802,6 +689,161 @@ EOL
     
     log "Environment configuration completed successfully"
     return 0
+}
+
+configure_network() {
+    log "Configuring network access to front server..."
+    
+    # Allow front server IP to access MongoDB
+    FRONT_SERVER_IP="138.199.165.36"
+    ufw allow from "$FRONT_SERVER_IP" to any port 27017 proto tcp
+    
+    # Allow agent to reach frontdoor API
+    ufw allow out to "$FRONT_SERVER_IP" port 3000 proto tcp
+    
+    log "Network rules configured for front server access"
+}
+
+register_with_frontdoor() {
+    log "Registering agent with frontdoor service..."
+    
+    local PUBLIC_IP=$(curl -s https://api.ipify.org)
+    local API_URL="$FRONTDOOR_API_URL/api/frontdoor/add-subdomain"
+    
+    curl -X POST "$API_URL" \
+         -H "Authorization: Bearer $FRONTDOOR_API_TOKEN" \
+         -H "Content-Type: application/json" \
+         -d @- <<EOF
+{
+    "subdomain": "$SERVER_ID.$FRONTDOOR_SUBDOMAIN_BASE",
+    "targetIp": "$PUBLIC_IP"
+}
+EOF
+
+    log "Registration complete. Subdomain: $SERVER_ID.$FRONTDOOR_SUBDOMAIN_BASE"
+}
+
+verify_frontdoor_connection() {
+    log "Verifying frontdoor service connection..."
+    
+    response=$(curl -s -o /dev/null -w "%{http_code}" \
+        -H "Authorization: Bearer $FRONTDOOR_API_TOKEN" \
+        "$FRONTDOOR_API_URL/api/frontdoor/add-subdomain")
+        
+    if [ "$response" -eq 401 ]; then
+        log_error "Invalid API token"
+        exit 1
+    elif [ "$response" -ne 200 ]; then
+        log_error "Connection failed (HTTP $response)"
+        exit 1
+    fi
+    
+    log "Frontdoor service connection verified"
+}
+
+get_public_ip() {
+    log "Obtaining public IP address..."
+    local max_retries=3
+    local retry_delay=5
+    
+    for ((i=1; i<=max_retries; i++)); do
+        PUBLIC_IP=$(curl -s --fail https://api.ipify.org)
+        if [ -n "$PUBLIC_IP" ]; then
+            log "Public IP obtained: $PUBLIC_IP"
+            return 0
+        fi
+        log_warn "Failed to get public IP (attempt $i/$max_retries)"
+        sleep $retry_delay
+    done
+    
+    log_error "Could not determine public IP"
+    return 1
+}
+
+generate_subdomain() {
+    # Create short hash from SERVER_ID (12 characters)
+    local hash=$(echo -n "$SERVER_ID" | sha256sum | cut -c1-12)
+    local prefix="cl-${hash}"
+    
+    # Ensure valid DNS format
+    prefix=${prefix//[^a-z0-9]/-}  # Replace invalid chars with dashes
+    prefix=${prefix:0:24}          # Trim to max 24 characters
+    
+    echo "$prefix"
+}
+
+validate_subdomain() {
+    local subdomain="$1"
+    
+    # Basic DNS validation
+    if [[ ! "$subdomain" =~ ^[a-z0-9-]{1,24}$ ]]; then
+        log_error "Invalid subdomain format: $subdomain"
+        return 1
+    fi
+    
+    # Check against DNS restrictions
+    if [[ "$subdomain" == -* || "$subdomain" == *- ]]; then
+        log_error "Subdomain cannot start/end with dash: $subdomain"
+        return 1
+    fi
+    
+    return 0
+}
+
+register_subdomain() {
+    log "Registering subdomain with front server..."
+    
+    local api_url="${FRONTDOOR_API_URL}/api/frontdoor/add-subdomain"
+    local subdomain="$(generate_subdomain)"
+    
+    local response=$(curl -s -o /dev/null -w "%{http_code}" \
+        -X POST "$api_url" \
+        -H "Authorization: Bearer ${FRONTDOOR_API_TOKEN}" \
+        -H "Content-Type: application/json" \
+        -d @- <<EOF
+{
+    "subdomain": "$subdomain",
+    "targetIp": "$PUBLIC_IP"
+}
+EOF
+    )
+
+    case "$response" in
+        200|201)
+            log "Subdomain registered: $subdomain → $PUBLIC_IP"
+            return 0
+            ;;
+        401)
+            log_error "Invalid API token"
+            return 1
+            ;;
+        409)
+            log_error "Subdomain already exists"
+            return 1
+            ;;
+        *)
+            log_error "Registration failed (HTTP $response)"
+            return 1
+            ;;
+    esac
+}
+
+load_frontdoor_config() {
+    local config_file="/etc/cloudlunacy/frontdoor.conf"
+    
+    if [ ! -f "$config_file" ]; then
+        log_error "Missing frontdoor configuration: $config_file"
+        exit 1
+    fi
+
+    # File format: FRONTDOOR_API_URL="http://api.mongodb.cloudlunacy.uk" 
+    #             FRONTDOOR_API_TOKEN="your-secret-token"
+    source "$config_file"
+    
+    if [ -z "$FRONTDOOR_API_URL" ] || [ -z "$FRONTDOOR_API_TOKEN" ]; then
+        log_error "Invalid frontdoor configuration"
+        exit 1
+    fi
 }
 
 configure_environment() {
@@ -834,38 +876,6 @@ configure_environment() {
     fi
 }
 
-verify_ca_file() {
-    log "Verifying MongoDB CA file setup..."
-    local CA_FILE="/etc/ssl/mongo/chain.pem"
-    local CERT_DIR="/etc/letsencrypt/live/$DOMAIN"
-
-    # Ensure CA file exists and has correct content
-    if [ ! -f "$CA_FILE" ] || [ ! -s "$CA_FILE" ]; then
-        log "Recreating CA file from Let's Encrypt certificate..."
-        mkdir -p "/etc/ssl/mongo"
-        cp "$CERT_DIR/chain.pem" "$CA_FILE"
-    fi
-
-    # Set correct ownership and permissions
-    chown "$USERNAME":"$USERNAME" "$CA_FILE"
-    chmod 644 "$CA_FILE"
-
-    # Verify the file is readable by service user
-    if ! sudo -u "$USERNAME" test -r "$CA_FILE"; then
-        log_error "CA file is not readable by $USERNAME"
-        return 1
-    fi
-
-    # Verify file content
-    if ! openssl x509 -in "$CA_FILE" -text -noout >/dev/null 2>&1; then
-        log_error "Invalid CA file content"
-        return 1
-    fi
-
-    log "CA file verified successfully"
-    return 0
-}
-
 display_mongodb_credentials() {
     log "MongoDB Management User Credentials:"
     log "----------------------------------------"
@@ -876,21 +886,6 @@ display_mongodb_credentials() {
     log "----------------------------------------"
     log "These credentials are stored securely in $MONGO_ENV_FILE"
     log "Do not share them publicly."
-}
-
-setup_certificate_renewal() {
-    log "Setting up SSL certificate renewal with Certbot..."
-    RENEWAL_SCRIPT="/usr/local/bin/renew_certificates.sh"
-    cat <<EOF > "$RENEWAL_SCRIPT"
-#!/bin/bash
-certbot renew --deploy-hook "cat /etc/letsencrypt/live/$DOMAIN/privkey.pem /etc/letsencrypt/live/$DOMAIN/fullchain.pem > /etc/ssl/mongo/combined.pem"
-chown 999:999 /etc/ssl/mongo/combined.pem
-chmod 600 /etc/ssl/mongo/combined.pem
-docker-compose -f $MONGODB_DIR/docker-compose.mongodb.yml restart mongodb
-EOF
-    chmod +x "$RENEWAL_SCRIPT"
-    (crontab -l 2>/dev/null; echo "0 2 * * * $RENEWAL_SCRIPT >> /var/log/letsencrypt/renewal.log 2>&1") | crontab -
-    log "SSL certificate renewal setup complete."
 }
 
 setup_user_directories() {
@@ -907,8 +902,8 @@ setup_user_directories() {
     chown -R "$USERNAME":"$USERNAME" "$BASE_DIR"
     chmod -R 750 "$BASE_DIR"
 
-    mkdir -p "$BASE_DIR"/{logs,ssh,config,bin,deployments,traefik}
-    chown -R "$USERNAME":"$USERNAME" "$BASE_DIR"/{logs,ssh,config,bin,deployments,traefik}
+    mkdir -p "$BASE_DIR"/{logs,ssh,config,bin,deployments}
+    chown -R "$USERNAME":"$USERNAME" "$BASE_DIR"/{logs,ssh,config,bin,deployments}
 
     log "Directories created at $BASE_DIR."
 }
@@ -949,51 +944,6 @@ setup_docker_permissions() {
     chmod -R 775 "$BASE_DIR/deployments"
     chmod 666 /var/run/docker.sock
     log "Docker permissions configured successfully."
-}
-
-setup_traefik() {
-    log "Setting up Traefik as a reverse proxy..."
-    TRAEFIK_DIR="$BASE_DIR/traefik"
-    mkdir -p "$TRAEFIK_DIR"
-    chown "$USERNAME":"$USERNAME" "$TRAEFIK_DIR"
-
-cat <<EOF > "$TRAEFIK_DIR/docker-compose.traefik.yml"
-version: '3.8'
-
-services:
-  traefik:
-    image: traefik:v2.9
-    container_name: traefik
-    command:
-      - "--api.insecure=true"
-      - "--providers.docker=true"
-      - "--providers.docker.exposedbydefault=false"
-      - "--entrypoints.web.address=:80"
-    ports:
-      - "80:80"
-      - "8080:8080"
-    volumes:
-      - "/var/run/docker.sock:/var/run/docker.sock:ro"
-    networks:
-      - traefik-network
-
-networks:
-  traefik-network:
-    external: true
-EOF
-
-    chown "$USERNAME":"$USERNAME" "$TRAEFIK_DIR/docker-compose.traefik.yml"
-
-    if ! docker network ls | grep -q "traefik-network"; then
-        docker network create traefik-network
-        log "Created traefik-network."
-    else
-        log "traefik-network already exists."
-    fi
-
-    cd "$TRAEFIK_DIR"
-    sudo -u "$USERNAME" docker-compose -f docker-compose.traefik.yml up -d
-    log "Traefik set up and running."
 }
 
 setup_service() {
@@ -1039,8 +989,6 @@ Environment="HOME=$BASE_DIR"
 Environment="NODE_ENV=production"
 Environment="DEBUG=*"
 Environment="NODE_DEBUG=*"
-Environment="MONGODB_CA_FILE=/etc/ssl/mongo/chain.pem"
-Environment="NODE_EXTRA_CA_CERTS=/etc/ssl/mongo/chain.pem"
 EnvironmentFile=$BASE_DIR/.env
 
 # Execution
@@ -1059,7 +1007,6 @@ StartLimitBurst=5
 
 # Security
 ProtectSystem=full
-ReadOnlyDirectories=/etc/ssl/mongo
 ReadWriteDirectories=$BASE_DIR $LOG_DIR
 PrivateTmp=true
 NoNewPrivileges=true
@@ -1079,7 +1026,6 @@ EOF
         "MONGO_MANAGER_USERNAME"
         "MONGO_MANAGER_PASSWORD"
         "MONGO_HOST"
-        "MONGODB_CA_FILE"
     )
 
     log "Verifying environment variables..."
@@ -1169,13 +1115,6 @@ verify_installation() {
     fi
     
     log "CloudLunacy Deployment Agent is running successfully."
-    
-    log "Verifying Traefik installation..."
-    if ! docker ps | grep -q "traefik"; then
-        log_error "Traefik failed to start. Check Docker logs for details."
-        return 1
-    fi
-    log "Traefik is running successfully."
 }
 
 completion_message() {
@@ -1195,7 +1134,6 @@ completion_message() {
         echo -e "Could not retrieve public IP address. Please replace 'your_server_ip' with your actual IP."
     fi
 
-    echo -e "Traefik is running and will route traffic to your deployed applications automatically."
     echo -e "Logs are located at: $BASE_DIR/logs/agent.log"
     echo -e "It's recommended to back up your environment file:"
     echo -e "cp $BASE_DIR/.env $BASE_DIR/.env.backup"
@@ -1216,8 +1154,7 @@ main() {
 
     AGENT_TOKEN="$1"
     SERVER_ID="$2"
-    EMAIL="$3"
-    BACKEND_BASE_URL="${4:-https://your-default-backend-url}"
+    BACKEND_BASE_URL="${3:-https://your-default-backend-url}"
     BACKEND_URL="${BACKEND_BASE_URL}"
 
     # 1) Basic environment detection & updates first
@@ -1234,15 +1171,12 @@ main() {
     # 4) Then do environment config
     configure_environment
 
-    install_certbot
     install_mongosh
     install_node
     setup_docker_permissions
     download_agent
     install_agent_dependencies
     stop_conflicting_containers
-    obtain_ssl_certificate
-    create_combined_certificate
 
     # Add this near the beginning of main() function before setup_mongodb()
     log "Cleaning up any existing MongoDB containers..."
@@ -1251,14 +1185,27 @@ main() {
 
     setup_mongodb
     create_mongo_management_user
+
+    if ! get_public_ip; then
+    log_error "Could not determine public IP. Aborting."
+    exit 1
+    fi
+
+    # 2) Register subdomain via the front door
+    if ! register_subdomain; then
+    log_error "Failed to register hashed subdomain on the front door."
+    exit 1
+    fi
+
     adjust_firewall_settings
     configure_env
-    setup_traefik
+    configure_network
+    register_with_frontdoor
     setup_service
-    setup_certificate_renewal
     verify_installation
     completion_message
     display_mongodb_credentials
+    verify_frontdoor_connection
 }
 
 main "$@"

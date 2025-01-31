@@ -8,53 +8,11 @@ class MongoManager {
     this.managerUsername = process.env.MONGO_MANAGER_USERNAME;
     this.managerPassword = process.env.MONGO_MANAGER_PASSWORD;
 
-    // Connection settings
-    this.mongoHost = process.env.MONGO_HOST || "mongodb.cloudlunacy.uk";
+    this.mongoHost = process.env.MONGO_HOST || "localhost";
     this.mongoPort = process.env.MONGO_PORT || "27017";
-
-    // Certificate paths
-    this.caFile = process.env.MONGODB_CA_FILE || "/etc/ssl/mongo/chain.pem";
 
     this.client = null;
     this.isInitialized = false;
-  }
-
-  async checkCertificates() {
-    logger.info("Checking MongoDB certificates...");
-
-    try {
-      // Check if CA file exists
-      const stats = await fs.stat(this.caFile);
-      logger.info(`Found CA file: ${this.caFile} (size: ${stats.size} bytes)`);
-
-      if (stats.size === 0) {
-        throw new Error(`CA file ${this.caFile} is empty`);
-      }
-
-      // Read certificate file as text
-      const certContent = await fs.readFile(this.caFile, "utf8");
-
-      // Basic certificate format validation
-      if (!certContent.includes("-----BEGIN CERTIFICATE-----")) {
-        throw new Error("Missing BEGIN CERTIFICATE marker");
-      }
-
-      if (!certContent.includes("-----END CERTIFICATE-----")) {
-        throw new Error("Missing END CERTIFICATE marker");
-      }
-
-      // Count certificates in chain
-      const certCount = (
-        certContent.match(/-----BEGIN CERTIFICATE-----/g) || []
-      ).length;
-      logger.info(`Certificate chain contains ${certCount} certificate(s)`);
-
-      return true;
-    } catch (error) {
-      const errorMessage = `Certificate check failed: ${error.message}`;
-      logger.error(errorMessage);
-      throw new Error(errorMessage);
-    }
   }
 
   async waitForMongoDB() {
@@ -68,9 +26,6 @@ class MongoManager {
         const uri = `mongodb://${this.managerUsername}:${this.managerPassword}@${this.mongoHost}:${this.mongoPort}/admin`;
 
         const client = new MongoClient(uri, {
-          tls: true,
-          tlsCAFile: this.caFile,
-          tlsAllowInvalidCertificates: false,
           authSource: "admin",
           authMechanism: "SCRAM-SHA-256",
           directConnection: true,
@@ -105,9 +60,6 @@ class MongoManager {
     }
 
     try {
-      // Check certificates first
-      await this.checkCertificates();
-
       // Test connection with the provided credentials
       const client = new MongoClient(
         `mongodb://${this.mongoHost}:${this.mongoPort}/admin`,
@@ -116,8 +68,6 @@ class MongoManager {
             username: this.managerUsername,
             password: this.managerPassword,
           },
-          tls: true,
-          tlsCAFile: this.caFile,
           authSource: "admin",
           authMechanism: "SCRAM-SHA-256",
           directConnection: true,
@@ -144,16 +94,11 @@ class MongoManager {
       }
 
       if (!this.client) {
-        // Build connection string with proper escaping
         const username = encodeURIComponent(this.managerUsername);
         const password = encodeURIComponent(this.managerPassword);
         const uri = `mongodb://${username}:${password}@${this.mongoHost}:${this.mongoPort}/admin`;
 
-        // Create client with updated options
         this.client = new MongoClient(uri, {
-          tls: true,
-          tlsCAFile: this.caFile,
-          tlsAllowInvalidCertificates: false,
           authSource: "admin",
           authMechanism: "SCRAM-SHA-256",
           directConnection: true,
