@@ -310,26 +310,16 @@ services:
     image: mongo:6.0
     container_name: mongodb
     restart: unless-stopped
-    environment:
-      MONGO_INITDB_ROOT_USERNAME: "${MONGO_INITDB_ROOT_USERNAME}"
-      MONGO_INITDB_ROOT_PASSWORD: "${MONGO_INITDB_ROOT_PASSWORD}"
     command: >
       mongod
-      --auth
       --bind_ip_all
-    ports:
-      - "27017:27017"
     volumes:
       - mongo_data:/data/db
     networks:
       - internal
     healthcheck:
       test: >
-        mongosh 
-        --host localhost
-        -u "${MONGO_INITDB_ROOT_USERNAME}"
-        -p "${MONGO_INITDB_ROOT_PASSWORD}"
-        --eval "db.adminCommand('ping')"
+        mongosh --eval "db.adminCommand('ping')"
       interval: 10s
       timeout: 5s
       retries: 3
@@ -343,6 +333,7 @@ networks:
     external: true
 COMPOSE
 
+    # Bring up MongoDB
     cd "$MONGODB_DIR"
     sudo -u "$USERNAME" docker-compose -f docker-compose.mongodb.yml down -v
     sudo -u "$USERNAME" docker-compose -f docker-compose.mongodb.yml up -d
@@ -377,8 +368,8 @@ COMPOSE
     # Create root user without auth
     if ! docker exec mongodb mongosh --eval "
         db.getSiblingDB('admin').createUser({
-            user: '$MONGO_INITDB_ROOT_USERNAME',
-            pwd: '$MONGO_INITDB_ROOT_PASSWORD',
+            user: '${MONGO_INITDB_ROOT_USERNAME}',
+            pwd: '${MONGO_INITDB_ROOT_PASSWORD}',
             roles: ['root']
         })
     "; then
@@ -395,7 +386,7 @@ EOF
     chown "$USERNAME":"$USERNAME" "$MONGO_ENV_FILE"
     chmod 600 "$MONGO_ENV_FILE"
 
-    # Step 3: Restart with auth
+    # Step 3: Restart MongoDB with auth
     log "Step 3: Restarting MongoDB with auth."
     cat <<COMPOSE > "$MONGODB_DIR/docker-compose.mongodb.yml"
 version: '3.8'
@@ -406,25 +397,29 @@ services:
     container_name: mongodb
     restart: unless-stopped
     environment:
-      MONGO_INITDB_ROOT_USERNAME: \${MONGO_INITDB_ROOT_USERNAME}
-      MONGO_INITDB_ROOT_PASSWORD: \${MONGO_INITDB_ROOT_PASSWORD}
+      MONGO_INITDB_ROOT_USERNAME: "${MONGO_INITDB_ROOT_USERNAME}"
+      MONGO_INITDB_ROOT_PASSWORD: "${MONGO_INITDB_ROOT_PASSWORD}"
     command: >
       mongod
       --auth
       --bind_ip_all
     ports:
-      - "27017:27017"  
+      - "27017:27017"
     volumes:
       - mongo_data:/data/db
     networks:
-      internal:
+      - internal
     healthcheck:
-  test: >
-    mongosh 
-    --host localhost
-    -u \$\${MONGO_INITDB_ROOT_USERNAME}
-    -p \$\${MONGO_INITDB_ROOT_PASSWORD}
-    --eval "db.adminCommand('ping')"
+      test: >
+        mongosh 
+        --host localhost
+        -u "${MONGO_INITDB_ROOT_USERNAME}"
+        -p "${MONGO_INITDB_ROOT_PASSWORD}"
+        --eval "db.adminCommand('ping')"
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
 volumes:
   mongo_data:
@@ -434,6 +429,7 @@ networks:
     external: true
 COMPOSE
 
+    # Bring down the old MongoDB container and bring up the new one with auth
     sudo -u "$USERNAME" docker-compose --env-file "$MONGO_ENV_FILE" -f docker-compose.mongodb.yml down -v
     sudo -u "$USERNAME" docker-compose --env-file "$MONGO_ENV_FILE" -f docker-compose.mongodb.yml up -d
 
@@ -620,87 +616,6 @@ adjust_firewall_settings() {
     log "Firewall settings adjusted."
 }
 
-configure_env() {
-    log "Configuring environment variables..."
-    ENV_FILE="$BASE_DIR/.env"
-    
-    # First ensure directory exists
-    mkdir -p "$BASE_DIR"
-    
-    # Source MongoDB environment and verify credentials exist
-    if [ ! -f "$MONGO_ENV_FILE" ]; then
-        log_error "MongoDB environment file not found at $MONGO_ENV_FILE"
-        return 1
-    fi
-    
-    # Source the MongoDB environment file
-    set +u  # Temporarily disable errors for unbound variables
-    source "$MONGO_ENV_FILE"
-    set -u
-
-    # Verify required MongoDB variables are set
-    if [ -z "${MONGO_MANAGER_USERNAME:-}" ] || [ -z "${MONGO_MANAGER_PASSWORD:-}" ]; then
-        log_error "MongoDB manager credentials not found in environment file"
-        return 1
-    fi
-
-    # Log verification of credentials (without exposing them)
-    log "Verifying MongoDB manager credentials..."
-    if ! docker exec mongodb mongosh \
-        -u "${MONGO_MANAGER_USERNAME}" \
-        -p "${MONGO_MANAGER_PASSWORD}" \
-        --eval "db.adminCommand('ping')" &>/dev/null; then
-        log_error "Failed to verify MongoDB manager credentials"
-        return 1
-    fi
-
-    log "MongoDB manager credentials verified successfully"
-    
-    # Create environment file with explicit values
-    cat > "$ENV_FILE" << EOL
-BACKEND_URL="${BACKEND_URL:-https://your-default-backend-url}"
-AGENT_API_TOKEN="${AGENT_TOKEN}"
-SERVER_ID="${SERVER_ID}"
-MONGO_MANAGER_USERNAME="${MONGO_MANAGER_USERNAME}"
-MONGO_MANAGER_PASSWORD="${MONGO_MANAGER_PASSWORD}"
-MONGO_HOST="localhost"
-MONGO_PORT=27017
-NODE_ENV=production
-# FRONTDOOR_API_URL="http://138.199.165.36:3000"  
-# FRONTDOOR_API_TOKEN="your-secret-token"               
-# FRONTDOOR_SUBDOMAIN_BASE="mongodb.cloudlunacy.uk"
-FRONTDOOR_API_URL="$FRONTDOOR_API_URL"
-FRONTDOOR_API_TOKEN="$FRONTDOOR_API_TOKEN"
-PUBLIC_IP="$PUBLIC_IP"
-EOL
-
-    chown "$USERNAME:$USERNAME" "$ENV_FILE"
-    chmod 600 "$ENV_FILE"
-    
-    # Verify file contents
-    if [ ! -s "$ENV_FILE" ]; then
-        log_error "Environment file is empty or not created properly"
-        return 1
-    fi
-
-    # Verify required variables are present
-    local required_vars=(
-        "MONGO_MANAGER_USERNAME"
-        "MONGO_MANAGER_PASSWORD"
-        "MONGO_HOST"
-    )
-
-    for var in "${required_vars[@]}"; do
-        if ! grep -q "^${var}=" "$ENV_FILE"; then
-            log_error "Missing required variable ${var} in environment file"
-            return 1
-        fi
-    done
-    
-    log "Environment configuration completed successfully"
-    return 0
-}
-
 configure_network() {
     log "Configuring network access to front server..."
     
@@ -857,33 +772,78 @@ load_frontdoor_config() {
 }
 
 configure_environment() {
-    # Base configuration
-    export BASE_DIR="/opt/cloudlunacy"
-    export USERNAME="cloudlunacy"
-    export MONGODB_DIR="$BASE_DIR/mongodb"
-    export MONGO_ENV_FILE="$MONGODB_DIR/.env"
-
-    # Create necessary directories
-    mkdir -p "$MONGODB_DIR"
+    log "Configuring environment variables..."
+    ENV_FILE="$BASE_DIR/.env"
     
-    # Set ownership
-    chown -R "$USERNAME":"$USERNAME" "$MONGODB_DIR"
-    chmod 750 "$MONGODB_DIR"
-
-    # Verify environment
-    log "Environment Configuration:"
-    log "BASE_DIR = $BASE_DIR"
-    log "USERNAME = $USERNAME"
-    log "MONGODB_DIR = $MONGODB_DIR"
-    log "MONGO_ENV_FILE = $MONGO_ENV_FILE"
-
-    # Create Docker network if it doesn't exist
-    if ! docker network ls --format '{{.Name}}' | grep -qx 'internal'; then
-        log "Creating internal Docker network..."
-        docker network create internal
-    else
-       log "Docker network 'internal' already exists."
+    # Ensure MongoDB environment file exists
+    if [ ! -f "$MONGO_ENV_FILE" ]; then
+        log_error "MongoDB environment file not found at $MONGO_ENV_FILE"
+        return 1
     fi
+    
+    # Source the MongoDB environment file
+    set +u  # Temporarily disable errors for unbound variables
+    source "$MONGO_ENV_FILE"
+    set -u
+
+    # Verify required MongoDB variables are set
+    if [ -z "${MONGO_MANAGER_USERNAME:-}" ] || [ -z "${MONGO_MANAGER_PASSWORD:-}" ]; then
+        log_error "MongoDB manager credentials not found in environment file"
+        return 1
+    fi
+
+    # Log verification of credentials (without exposing them)
+    log "Verifying MongoDB manager credentials..."
+    if ! docker exec mongodb mongosh \
+        -u "${MONGO_MANAGER_USERNAME}" \
+        -p "${MONGO_MANAGER_PASSWORD}" \
+        --eval "db.adminCommand('ping')" &>/dev/null; then
+        log_error "Failed to verify MongoDB manager credentials"
+        return 1
+    fi
+
+    log "MongoDB manager credentials verified successfully"
+    
+    # Create environment file with explicit values
+    cat > "$ENV_FILE" << EOL
+BACKEND_URL="${BACKEND_URL:-https://your-default-backend-url}"
+AGENT_API_TOKEN="${AGENT_TOKEN}"
+SERVER_ID="${SERVER_ID}"
+MONGO_MANAGER_USERNAME="${MONGO_MANAGER_USERNAME}"
+MONGO_MANAGER_PASSWORD="${MONGO_MANAGER_PASSWORD}"
+MONGO_HOST="localhost"
+MONGO_PORT=27017
+NODE_ENV=production
+FRONTDOOR_API_URL="$FRONTDOOR_API_URL"
+FRONTDOOR_API_TOKEN="$FRONTDOOR_API_TOKEN"
+PUBLIC_IP="$PUBLIC_IP"
+EOL
+
+    chown "$USERNAME:$USERNAME" "$ENV_FILE"
+    chmod 600 "$ENV_FILE"
+    
+    # Verify file contents
+    if [ ! -s "$ENV_FILE" ]; then
+        log_error "Environment file is empty or not created properly"
+        return 1
+    fi
+
+    # Verify required variables are present
+    local required_vars=(
+        "MONGO_MANAGER_USERNAME"
+        "MONGO_MANAGER_PASSWORD"
+        "MONGO_HOST"
+    )
+
+    for var in "${required_vars[@]}"; do
+        if ! grep -q "^${var}=" "$ENV_FILE"; then
+            log_error "Missing required variable ${var} in environment file"
+            return 1
+        fi
+    done
+    
+    log "Environment configuration completed successfully"
+    return 0
 }
 
 display_mongodb_credentials() {
@@ -1171,16 +1131,14 @@ main() {
     detect_os
     update_system
     install_dependencies
-    
+
     # 2) Now install Docker before we call any 'docker' commands
     install_docker
 
     # 3) Then set up your user
     setup_user_directories
 
-    # 4) Then do environment config
-    configure_environment
-
+    # 4) Install MongoDB Shell, Node.js, Docker permissions, etc.
     install_mongosh
     install_node
     setup_docker_permissions
@@ -1188,33 +1146,47 @@ main() {
     install_agent_dependencies
     stop_conflicting_containers
 
-    # Add this near the beginning of main() function before setup_mongodb()
+    # Clean up any existing MongoDB containers
     log "Cleaning up any existing MongoDB containers..."
     docker rm -f mongodb 2>/dev/null || true
     docker volume rm -f $(docker volume ls -q --filter name=mongo_data) 2>/dev/null || true
 
+    # 5) Set up MongoDB
     setup_mongodb
     create_mongo_management_user
 
+    # 6) Obtain public IP
     if ! get_public_ip; then
-    log_error "Could not determine public IP. Aborting."
-    exit 1
+        log_error "Cannot proceed without public IP"
+        exit 1
     fi
 
-    # 2) Register subdomain via the front door
+    # 7) Register subdomain with the front door
     if ! register_subdomain; then
-    log_error "Failed to register hashed subdomain on the front door."
-    exit 1
+        log_error "Subdomain registration failed - check front server status"
+        exit 1
     fi
 
+    # 8) Adjust firewall settings
     adjust_firewall_settings
-    configure_env
+
+    # 9) Configure environment variables **after** MongoDB setup
+    configure_environment
+
+    # 10) Configure network
     configure_network
-    register_with_frontdoor
+
+    # 11) Set up systemd service
     setup_service
+
+    # 12) Verify installation
     verify_installation
+
+    # 13) Completion message and credentials display
     completion_message
     display_mongodb_credentials
+
+    # 14) Verify frontdoor connection
     verify_frontdoor_connection
 }
 
