@@ -44,6 +44,9 @@ BASE_DIR="/opt/cloudlunacy"
 MONGODB_DIR="$BASE_DIR/mongodb"
 MONGO_ENV_FILE="$MONGODB_DIR/.env"
 FRONT_API_TOKEN="your-secret-token"
+
+FRONTDOOR_API_URL="http://138.199.165.36:3000"  
+FRONTDOOR_API_TOKEN="your-secret-token"   
 FRONTDOOR_SUBDOMAIN_BASE="mongodb.cloudlunacy.uk"
 FRONTDOOR_CONFIG="/etc/cloudlunacy/frontdoor.conf"
 
@@ -666,6 +669,26 @@ verify_frontdoor_connection() {
     log "Frontdoor service connection verified"
 }
 
+create_frontdoor_config() {
+    log "Creating frontdoor API configuration..."
+    mkdir -p /etc/cloudlunacy
+    
+    cat <<EOF > "$FRONTDOOR_CONFIG"
+# CloudLunacy Frontdoor Configuration
+FRONTDOOR_API_URL="${FRONTDOOR_API_URL}"
+FRONTDOOR_API_TOKEN="${FRONTDOOR_API_TOKEN}"
+FRONTDOOR_SUBDOMAIN_BASE="${FRONTDOOR_SUBDOMAIN_BASE}"
+EOF
+
+    chmod 600 "$FRONTDOOR_CONFIG"
+    log "Frontdoor configuration created at $FRONTDOOR_CONFIG"
+    
+    # Security validation
+    if ! curl -sI "${FRONTDOOR_API_URL}/health" | grep -q "200 OK"; then
+        log_warn "Could not verify frontdoor API connectivity"
+    fi
+}
+
 get_public_ip() {
     log "Obtaining public IP address..."
     local max_retries=3
@@ -754,19 +777,12 @@ EOF
 }
 
 load_frontdoor_config() {
-    local config_file="/etc/cloudlunacy/frontdoor.conf"
+    # No need for existence check - we create it earlier
+    source "$FRONTDOOR_CONFIG"
     
-    if [ ! -f "$config_file" ]; then
-        log_error "Missing frontdoor configuration: $config_file"
-        exit 1
-    fi
-
-    # File format: FRONTDOOR_API_URL="http://api.mongodb.cloudlunacy.uk" 
-    #             FRONTDOOR_API_TOKEN="your-secret-token"
-    source "$config_file"
-    
+    # Add validation for good measure
     if [ -z "$FRONTDOOR_API_URL" ] || [ -z "$FRONTDOOR_API_TOKEN" ]; then
-        log_error "Invalid frontdoor configuration"
+        log_error "Frontdoor configuration invalid"
         exit 1
     fi
 }
@@ -1137,6 +1153,9 @@ main() {
 
     # 3) Then set up your user
     setup_user_directories
+
+    create_frontdoor_config
+    load_frontdoor_config
 
     # 4) Install MongoDB Shell, Node.js, Docker permissions, etc.
     install_mongosh
