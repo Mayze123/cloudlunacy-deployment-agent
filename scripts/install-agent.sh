@@ -43,10 +43,10 @@ USERNAME="cloudlunacy"
 BASE_DIR="/opt/cloudlunacy"
 MONGODB_DIR="$BASE_DIR/mongodb"
 MONGO_ENV_FILE="$MONGODB_DIR/.env"
-FRONT_API_TOKEN="your-secret-token"
+FRONT_API_TOKEN="your_secret_token"
 
 FRONTDOOR_API_URL="http://138.199.165.36:3000"  
-FRONTDOOR_API_TOKEN="your-secret-token"   
+FRONTDOOR_API_TOKEN="your_secret_token"   
 FRONTDOOR_SUBDOMAIN_BASE="mongodb.cloudlunacy.uk"
 FRONTDOOR_CONFIG="/etc/cloudlunacy/frontdoor.conf"
 
