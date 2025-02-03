@@ -406,12 +406,10 @@ services:
       mongod
       --auth
       --bind_ip_all
-    ports:
-      - "127.0.0.1:27018:27017"
     volumes:
       - mongo_data:/data/db
     networks:
-      - internal
+      - traefik_network  
     healthcheck:
       test: >
         mongosh 
@@ -428,8 +426,9 @@ volumes:
   mongo_data:
 
 networks:
-  internal:
-    external: true
+  traefik_network:  
+    external: true 
+    name: traefik_network  
 COMPOSE
 
     # Bring down the old MongoDB container and bring up the new one with auth
@@ -830,8 +829,8 @@ AGENT_API_TOKEN="${AGENT_TOKEN}"
 SERVER_ID="${SERVER_ID}"
 MONGO_MANAGER_USERNAME="${MONGO_MANAGER_USERNAME}"
 MONGO_MANAGER_PASSWORD="${MONGO_MANAGER_PASSWORD}"
-MONGO_HOST="127.0.0.1"
-MONGO_PORT=27018
+MONGO_HOST="mongodb"
+MONGO_PORT=27017
 NODE_ENV=production
 FRONTDOOR_API_URL="$FRONTDOOR_API_URL"
 FRONTDOOR_API_TOKEN="$FRONTDOOR_API_TOKEN"

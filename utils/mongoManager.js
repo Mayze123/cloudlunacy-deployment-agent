@@ -8,7 +8,7 @@ class MongoManager {
     this.managerUsername = process.env.MONGO_MANAGER_USERNAME;
     this.managerPassword = process.env.MONGO_MANAGER_PASSWORD;
 
-    this.mongoHost = process.env.MONGO_HOST || "localhost";
+    this.mongoHost = process.env.MONGO_HOST || "mongodb";
     this.mongoPort = process.env.MONGO_PORT || "27017";
 
     this.client = null;
@@ -26,6 +26,8 @@ class MongoManager {
         const uri = `mongodb://${this.managerUsername}:${this.managerPassword}@${this.mongoHost}:${this.mongoPort}/admin`;
 
         const client = new MongoClient(uri, {
+          tls: true,
+          tlsAllowInvalidCertificates: true,
           authSource: "admin",
           authMechanism: "SCRAM-SHA-256",
           directConnection: true,
@@ -62,8 +64,10 @@ class MongoManager {
     try {
       // Test connection with the provided credentials
       const client = new MongoClient(
-        `mongodb://${this.mongoHost}:${this.mongoPort}/admin`,
+        `mongodb://${this.managerUsername}:${this.managerPassword}@${this.mongoHost}:${this.mongoPort}/admin`,
         {
+          tls: true,
+          tlsAllowInvalidCertificates: true,
           auth: {
             username: this.managerUsername,
             password: this.managerPassword,
@@ -71,7 +75,7 @@ class MongoManager {
           authSource: "admin",
           authMechanism: "SCRAM-SHA-256",
           directConnection: true,
-          serverSelectionTimeoutMS: 5000,
+          serverSelectionTimeoutMS: 10000,
         }
       );
 
