@@ -315,14 +315,22 @@ services:
     restart: unless-stopped
     command: >
       mongod
+      --auth
       --bind_ip_all
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: "${MONGO_INITDB_ROOT_USERNAME}"
+      MONGO_INITDB_ROOT_PASSWORD: "${MONGO_INITDB_ROOT_PASSWORD}"
     volumes:
       - mongo_data:/data/db
     networks:
-      - internal
+      - traefik_network  # Same network as Traefik
     healthcheck:
       test: >
-        mongosh --eval "db.adminCommand('ping')"
+        mongosh 
+        --host localhost
+        -u "$${MONGO_INITDB_ROOT_USERNAME}"
+        -p "$${MONGO_INITDB_ROOT_PASSWORD}"
+        --eval "db.adminCommand('ping')"
       interval: 10s
       timeout: 5s
       retries: 3
@@ -332,9 +340,9 @@ volumes:
   mongo_data:
 
 networks:
-  internal:
+  traefik_network:
     external: true
-COMPOSE
+    name: traefik_network 
 
     # Bring up MongoDB
     cd "$MONGODB_DIR"
@@ -829,7 +837,7 @@ AGENT_API_TOKEN="${AGENT_TOKEN}"
 SERVER_ID="${SERVER_ID}"
 MONGO_MANAGER_USERNAME="${MONGO_MANAGER_USERNAME}"
 MONGO_MANAGER_PASSWORD="${MONGO_MANAGER_PASSWORD}"
-MONGO_HOST="mongodb"
+MONGO_HOST="localhost"
 MONGO_PORT=27017
 NODE_ENV=production
 FRONTDOOR_API_URL="$FRONTDOOR_API_URL"
