@@ -406,6 +406,8 @@ services:
       mongod
       --auth
       --bind_ip_all
+    ports:
+      - "127.0.0.1:27018:27017"
     volumes:
       - mongo_data:/data/db
     networks:
@@ -828,8 +830,8 @@ AGENT_API_TOKEN="${AGENT_TOKEN}"
 SERVER_ID="${SERVER_ID}"
 MONGO_MANAGER_USERNAME="${MONGO_MANAGER_USERNAME}"
 MONGO_MANAGER_PASSWORD="${MONGO_MANAGER_PASSWORD}"
-MONGO_HOST="localhost"
-MONGO_PORT=27017
+MONGO_HOST="127.0.0.1"
+MONGO_PORT=27018
 NODE_ENV=production
 FRONTDOOR_API_URL="$FRONTDOOR_API_URL"
 FRONTDOOR_API_TOKEN="$FRONTDOOR_API_TOKEN"
