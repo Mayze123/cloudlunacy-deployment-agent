@@ -1,13 +1,16 @@
 /**
  * CloudLunacy Deployment Agent
- * Version: 1.0.1
- * Author: Mahamadou Taibou
- * Date: 2024-04-27
+ * Version: 1.2.0
+ * Author: Mahamadou Taibou (modified by You)
+ * Date: 2025-02-03
  *
  * Description:
- * This script serves as the core of the CloudLunacy Deployment Agent installed on a user's VPS.
+ * This script is the core of the CloudLunacy Deployment Agent installed on a user's VPS.
  * It handles secure communication with the SaaS backend, authenticates the agent,
  * receives commands, and delegates tasks to specific deployment modules.
+ *
+ * NOTE: TLS termination for MongoDB is now handled by the front server.
+ * The agent no longer performs TLS CA verification.
  */
 
 const axios = require("axios");
@@ -17,7 +20,6 @@ const logger = require("./utils/logger");
 const { ensureDeploymentPermissions } = require("./utils/permissionCheck");
 const ZeroDowntimeDeployer = require("./modules/zeroDowntimeDeployer");
 const fs = require("fs");
-const path = require("path");
 const os = require("os");
 const { execSync } = require("child_process");
 
@@ -36,82 +38,21 @@ const METRICS_INTERVAL = 60000;
 let ws;
 
 /**
- * Verify and get the TLS CA file path
- * @returns {string|null} Valid CA file path or null if not found
- */
-const getTlsCaFilePath = () => {
-  const possiblePaths = [
-    process.env.MONGO_TLS_CA_FILE,
-    process.env.MONGODB_CA_FILE,
-    process.env.NODE_EXTRA_CA_CERTS,
-    "/etc/ssl/mongo/chain.pem", // Default fallback path
-  ];
-
-  for (const filePath of possiblePaths) {
-    if (filePath && fs.existsSync(filePath)) {
-      logger.info(`Using TLS CA file from: ${filePath}`);
-      return filePath;
-    }
-  }
-  return null;
-};
-
-/**
- * Verify MongoDB configuration
- * @returns {boolean} True if configuration is valid
- */
-const verifyMongoConfig = () => {
-  // Verify required environment variables
-  const requiredEnvVars = {
-    "MongoDB Manager Username": process.env.MONGO_MANAGER_USERNAME,
-    "MongoDB Manager Password": process.env.MONGO_MANAGER_PASSWORD,
-    "MongoDB Host": process.env.MONGO_HOST,
-    "MongoDB Port": process.env.MONGO_PORT,
-  };
-
-  const missingVars = Object.entries(requiredEnvVars)
-    .filter(([_, value]) => !value)
-    .map(([name]) => name);
-
-  if (missingVars.length > 0) {
-    logger.error(
-      `Missing required environment variables: ${missingVars.join(", ")}`
-    );
-    return false;
-  }
-
-  // Verify TLS CA file
-  const tlsCaFile = getTlsCaFilePath();
-  if (!tlsCaFile) {
-    logger.error(
-      "Could not find valid TLS CA file in any of the expected locations"
-    );
-    return false;
-  }
-
-  // Set the verified CA file path to all relevant environment variables
-  process.env.MONGO_TLS_CA_FILE = tlsCaFile;
-  process.env.MONGODB_CA_FILE = tlsCaFile;
-  process.env.NODE_EXTRA_CA_CERTS = tlsCaFile;
-
-  return true;
-};
-
-/**
- * Initialize MongoDB configuration
- * @returns {boolean} True if initialization successful
+ * In the new architecture, MongoDB TLS termination is handled by the front server.
+ * Thus, we no longer verify or require a TLS CA file for MongoDB in the agent.
  */
 const initializeMongoDB = () => {
-  if (!verifyMongoConfig()) {
-    throw new Error("MongoDB configuration verification failed");
-  }
-
-  logger.info("MongoDB configuration verified successfully");
+  // If your agent still needs to perform some MongoDB operations directly,
+  // ensure that the environment variables (like MONGO_MANAGER_USERNAME, etc.)
+  // are set properly. Otherwise, simply log that initialization is complete.
+  logger.info(
+    "MongoDB initialization: TLS verification is handled by the front server."
+  );
   return true;
 };
 
 /**
- * Authenticate with backend and establish WebSocket connection
+ * Authenticate with the backend and establish a WebSocket connection.
  */
 async function authenticateAndConnect() {
   try {
@@ -143,8 +84,8 @@ async function authenticateAndConnect() {
 }
 
 /**
- * Establish WebSocket connection with retry mechanism
- * @param {string} wsUrl WebSocket URL
+ * Establish a WebSocket connection with retry mechanism.
+ * @param {string} wsUrl WebSocket URL.
  */
 function establishWebSocketConnection(wsUrl) {
   ws = new WebSocket(wsUrl, {
@@ -152,20 +93,19 @@ function establishWebSocketConnection(wsUrl) {
       Authorization: `Bearer ${AGENT_API_TOKEN}`,
     },
   });
-
   setupWebSocketEventHandlers();
 }
 
 /**
- * Set up WebSocket event handlers
+ * Set up WebSocket event handlers.
  */
 function setupWebSocketEventHandlers() {
   let retryCount = 0;
   let retryDelay = WS_INITIAL_RETRY_DELAY;
   let pingInterval;
   let pingTimeout;
-  const PING_INTERVAL = 30000; // Send ping every 30 seconds
-  const PING_TIMEOUT = 5000; // Wait 5 seconds for pong response
+  const PING_INTERVAL = 30000; // 30 seconds
+  const PING_TIMEOUT = 5000; // 5 seconds
 
   ws.on("message", (data) => {
     try {
@@ -180,10 +120,8 @@ function setupWebSocketEventHandlers() {
     logger.info("WebSocket connection established.");
     ws.send(JSON.stringify({ type: "register", serverId: SERVER_ID }));
 
-    // Start ping interval
     pingInterval = setInterval(() => {
       ws.ping();
-      // Set timeout for pong response
       pingTimeout = setTimeout(() => {
         logger.warn("No pong received - closing connection");
         ws.terminate();
@@ -191,13 +129,9 @@ function setupWebSocketEventHandlers() {
     }, PING_INTERVAL);
   });
 
-  ws.on("pong", () => {
-    // Clear the timeout when pong is received
-    clearTimeout(pingTimeout);
-  });
+  ws.on("pong", () => clearTimeout(pingTimeout));
 
   ws.on("close", () => {
-    // Clean up intervals on close
     clearInterval(pingInterval);
     clearTimeout(pingTimeout);
     handleWebSocketClose(retryCount, retryDelay);
@@ -212,28 +146,28 @@ function setupWebSocketEventHandlers() {
 }
 
 /**
- * Handle WebSocket connection close
- * @param {number} retryCount Current retry attempt
- * @param {number} retryDelay Current delay between retries
+ * Handle WebSocket connection close.
+ * @param {number} retryCount Current retry attempt.
+ * @param {number} retryDelay Current delay between retries.
  */
 function handleWebSocketClose(retryCount, retryDelay) {
   if (retryCount < WS_RECONNECT_MAX_RETRIES) {
     logger.warn(
-      `WebSocket connection closed. Attempting to reconnect in ${
+      `WebSocket connection closed. Reconnecting in ${
         retryDelay / 1000
       } seconds...`
     );
     setTimeout(authenticateAndConnect, retryDelay);
   } else {
     logger.error(
-      "Maximum retry attempts reached. Please check the connection."
+      "Maximum reconnect attempts reached. Please check the connection."
     );
   }
 }
 
 /**
- * Handle authentication errors
- * @param {Error} error Authentication error
+ * Handle authentication errors.
+ * @param {Error} error Authentication error.
  */
 function handleAuthenticationError(error) {
   if (error.response) {
@@ -250,31 +184,28 @@ function handleAuthenticationError(error) {
 }
 
 /**
- * Handle incoming messages from backend
- * @param {Object} message The message object received
+ * Handle incoming messages from the backend.
+ * @param {Object} message The message object.
  */
 function handleMessage(message) {
   switch (message.type) {
     case "deploy_app":
       handleDeployApp(message);
       break;
-
     case "create_database":
       createDatabase(message.payload);
       break;
-
     case "check_repository":
       checkRepositoryAccess(message.payload, ws);
       break;
-
     default:
       logger.warn("Unknown message type:", message.type);
   }
 }
 
 /**
- * Handle deploy app message
- * @param {Object} message Deploy app message
+ * Handle deploy app message.
+ * @param {Object} message Deploy app message.
  */
 function handleDeployApp(message) {
   if (message.payload.githubToken) {
@@ -283,15 +214,13 @@ function handleDeployApp(message) {
   }
 
   ZeroDowntimeDeployer.deploy(message.payload, ws).finally(() => {
-    if (process.env.GITHUB_TOKEN) {
-      delete process.env.GITHUB_TOKEN;
-    }
+    if (process.env.GITHUB_TOKEN) delete process.env.GITHUB_TOKEN;
   });
 }
 
 /**
- * Handle database creation requests
- * @param {Object} payload The payload containing database details
+ * Handle database creation requests.
+ * @param {Object} payload Payload containing database details.
  */
 async function createDatabase(payload) {
   const { databaseId, dbName, username, password } = payload;
@@ -302,18 +231,12 @@ async function createDatabase(payload) {
     }
 
     logger.info(`Creating database ${dbName} with user ${username}`);
-
     const mongoManager = require("./utils/mongoManager");
-    const result = await mongoManager.createDatabaseAndUser(
-      dbName,
-      username,
-      password
-    );
+    await mongoManager.createDatabaseAndUser(dbName, username, password);
 
     logger.info(
       `Database ${dbName} and user ${username} created successfully.`
     );
-
     sendWebSocketMessage("database_created", {
       databaseId,
       status: "success",
@@ -330,21 +253,20 @@ async function createDatabase(payload) {
 }
 
 /**
- * Send message through WebSocket
- * @param {string} type Message type
- * @param {Object} payload Message payload
+ * Send a message via the WebSocket connection.
+ * @param {string} type Message type.
+ * @param {Object} payload Message payload.
  */
 function sendWebSocketMessage(type, payload) {
   if (!ws || ws.readyState !== WebSocket.OPEN) {
     logger.warn(`WebSocket is not open. Cannot send ${type} message.`);
     return;
   }
-
   ws.send(JSON.stringify({ type, payload }));
 }
 
 /**
- * Collect and send system metrics
+ * Collect and send system metrics.
  */
 function collectMetrics() {
   try {
@@ -353,7 +275,6 @@ function collectMetrics() {
       memoryUsage: getMemoryUsage(),
       diskUsage: getDiskUsage(),
     };
-
     sendWebSocketMessage("metrics", metrics);
   } catch (error) {
     logger.error("Error collecting metrics:", error);
@@ -361,32 +282,28 @@ function collectMetrics() {
 }
 
 /**
- * Get CPU usage percentage
- * @returns {string} CPU usage percentage
+ * Get CPU usage percentage.
+ * @returns {string} CPU usage percentage.
  */
 function getCPUUsage() {
   const cpus = os.cpus();
-  let user = 0,
-    nice = 0,
-    sys = 0,
-    idle = 0,
-    irq = 0;
-
+  let totalIdle = 0,
+    totalTick = 0;
   for (const cpu of cpus) {
-    user += cpu.times.user;
-    nice += cpu.times.nice;
-    sys += cpu.times.sys;
-    idle += cpu.times.idle;
-    irq += cpu.times.irq;
+    totalIdle += cpu.times.idle;
+    totalTick +=
+      cpu.times.user +
+      cpu.times.nice +
+      cpu.times.sys +
+      cpu.times.idle +
+      cpu.times.irq;
   }
-
-  const total = user + nice + sys + idle + irq;
-  return (((total - idle) / total) * 100).toFixed(2);
+  return (((totalTick - totalIdle) / totalTick) * 100).toFixed(2);
 }
 
 /**
- * Get memory usage percentage
- * @returns {string} Memory usage percentage
+ * Get memory usage percentage.
+ * @returns {string} Memory usage percentage.
  */
 function getMemoryUsage() {
   const totalMem = os.totalmem();
@@ -395,8 +312,8 @@ function getMemoryUsage() {
 }
 
 /**
- * Get disk usage percentage
- * @returns {number|null} Disk usage percentage or null if error
+ * Get disk usage percentage.
+ * @returns {number|null} Disk usage percentage or null if error.
  */
 function getDiskUsage() {
   try {
@@ -409,26 +326,26 @@ function getDiskUsage() {
 }
 
 /**
- * Initialize agent operations
+ * Initialize agent operations.
  */
 async function init() {
   try {
-    // Verify MongoDB configuration first
+    // MongoDB initialization: No TLS CA verification needed on the agent side anymore.
     if (!initializeMongoDB()) {
       throw new Error("MongoDB initialization failed");
     }
 
-    // Initialize MongoDB manager
+    // Initialize MongoDB manager (if used for administrative tasks).
     const mongoManager = require("./utils/mongoManager");
     await mongoManager.initializeManagerUser();
 
-    // Check permissions
+    // Check deployment permissions.
     const permissionsOk = await ensureDeploymentPermissions();
     if (!permissionsOk) {
       throw new Error("Critical: Permission check failed");
     }
 
-    // Connect to backend
+    // Connect to the backend.
     await authenticateAndConnect();
     setInterval(collectMetrics, METRICS_INTERVAL);
 
@@ -439,5 +356,5 @@ async function init() {
   }
 }
 
-// Start the agent
+// Start the agent.
 init();
