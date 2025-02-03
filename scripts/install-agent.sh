@@ -406,8 +406,6 @@ services:
       mongod
       --auth
       --bind_ip_all
-    ports:
-      - "27017:27017"
     volumes:
       - mongo_data:/data/db
     networks:
