@@ -64,7 +64,7 @@ class MongoManager {
     try {
       // Test connection with the provided credentials
       const client = new MongoClient(
-        `mongodb://${this.managerUsername}:${this.managerPassword}@${this.mongoHost}:${this.mongoPort}/admin`,
+        `mongodb://${this.mongoHost}:${this.mongoPort}/admin`,
         {
           tls: true,
           tlsAllowInvalidCertificates: true,
