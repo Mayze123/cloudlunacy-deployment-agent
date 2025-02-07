@@ -403,11 +403,7 @@ services:
     networks:
       - traefik_network
     healthcheck:
-      test: >
-        mongosh --host localhost
-        -u "\${MONGO_INITDB_ROOT_USERNAME}"
-        -p "\${MONGO_INITDB_ROOT_PASSWORD}"
-        --eval "db.adminCommand('ping')"
+      test: ["CMD", "mongosh", "--host", "localhost", "-u", "${MONGO_INITDB_ROOT_USERNAME}", "-p", "${MONGO_INITDB_ROOT_PASSWORD}", "--eval", "db.adminCommand('ping')"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -423,7 +419,7 @@ COMPOSE
 
     # Restart with authentication
     log "Restarting MongoDB with authentication..."
-    sudo -u "$USERNAME" docker-compose -f docker-compose.phase1.yml down -v
+    sudo -u "$USERNAME" docker-compose -f docker-compose.phase1.yml down
     sudo -u "$USERNAME" docker-compose -f docker-compose.phase2.yml up -d
 
     # Verify secure connection
