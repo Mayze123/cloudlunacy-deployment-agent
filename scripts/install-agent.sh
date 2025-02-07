@@ -342,7 +342,7 @@ COMPOSE
     attempt=$((attempt + 1))
   done
 
-  # Generate and load credentials if not already generated
+  # Generate credentials (if not already generated)
   generate_mongo_credentials
 
   # Step 2: Create root user without auth using heredoc
@@ -490,6 +490,7 @@ EOF
     return 1
   fi
 
+  # Update the environment file with the credentials
   cat <<EOF > "$MONGO_ENV_FILE"
 MONGO_INITDB_ROOT_USERNAME=${MONGO_INITDB_ROOT_USERNAME}
 MONGO_INITDB_ROOT_PASSWORD=${MONGO_INITDB_ROOT_PASSWORD}
@@ -501,7 +502,7 @@ EOF
   chmod 600 "$MONGO_ENV_FILE"
 
   log "Verifying management user access..."
-  if ! docker exec mongodb mongosh --quiet -u "${MONGO_MANAGER_USERNAME}" -p "${MONGO_MANAGER_PASSWORD}" --eval "db.adminCommand('ping')" ; then
+  if ! docker exec mongodb mongosh --quiet -u "${MONGO_MANAGER_USERNAME}" -p "${MONGO_MANAGER_PASSWORD}" --authenticationDatabase "admin" --eval "db.adminCommand('ping')" ; then
     log_error "Failed to verify management user access"
     return 1
   fi
