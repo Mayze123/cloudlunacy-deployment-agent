@@ -406,12 +406,10 @@ services:
       mongod
       --auth
       --bind_ip_all
-    ports:
-      - "27017:27017"
     volumes:
       - mongo_data:/data/db
     networks:
-      - internal
+      - traefik_network  
     healthcheck:
       test: >
         mongosh 
@@ -428,8 +426,9 @@ volumes:
   mongo_data:
 
 networks:
-  internal:
-    external: true
+  traefik_network:  
+    external: true 
+    name: traefik_network  
 COMPOSE
 
   # Bring down the old MongoDB container and bring up the new one with auth
@@ -709,15 +708,18 @@ get_public_ip() {
 }
 
 generate_subdomain() {
-  # Create short hash from SERVER_ID (12 characters)
+  # Create a short hash from SERVER_ID (first 12 characters of the SHA256 sum)
   local hash=$(echo -n "$SERVER_ID" | sha256sum | cut -c1-12)
   local prefix="cl-${hash}"
 
-  # Ensure valid DNS format
-  prefix=${prefix//[^a-z0-9]/-} # Replace invalid chars with dashes
-  prefix=${prefix:0:24}         # Trim to max 24 characters
+  # Sanitize: Replace any non-alphanumeric/dash characters with dashes
+  prefix=${prefix//[^a-z0-9-]/-}
+  # Trim to a maximum of 24 characters (if needed)
+  prefix=${prefix:0:24}
 
-  echo "$prefix"
+  # Append the front door base domain so the full subdomain becomes:
+  # cl-<hash>.mongodb.cloudlunacy.uk
+  echo "${prefix}.${FRONTDOOR_SUBDOMAIN_BASE}"
 }
 
 validate_subdomain() {
