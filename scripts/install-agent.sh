@@ -274,78 +274,38 @@ wait_for_mongodb_health() {
 generate_mongo_credentials() {
   log "Generating MongoDB credentials..."
 
-  # Generate credentials only if not already set
-  if [ -z "${MONGO_INITDB_ROOT_USERNAME:-}" ]; then
-    MONGO_INITDB_ROOT_USERNAME=$(openssl rand -hex 12)
-    MONGO_INITDB_ROOT_PASSWORD=$(openssl rand -hex 24)
-  fi
+  # Create random credentials
+  MONGO_INITDB_ROOT_USERNAME=$(openssl rand -hex 12)
+  MONGO_INITDB_ROOT_PASSWORD=$(openssl rand -hex 24)
+  MONGO_MANAGER_USERNAME="manager"
+  MONGO_MANAGER_PASSWORD=$(openssl rand -hex 24)
 
-  # Write the credentials to the file
+  # Write them to the Mongo .env file
   cat << EOF > "$MONGO_ENV_FILE"
-    export MONGO_INITDB_ROOT_USERNAME="$MONGO_INITDB_ROOT_USERNAME"
-    export MONGO_INITDB_ROOT_PASSWORD="$MONGO_INITDB_ROOT_PASSWORD"
-    EOF
+MONGO_INITDB_ROOT_USERNAME=$MONGO_INITDB_ROOT_USERNAME
+MONGO_INITDB_ROOT_PASSWORD=$MONGO_INITDB_ROOT_PASSWORD
+MONGO_MANAGER_USERNAME=$MONGO_MANAGER_USERNAME
+MONGO_MANAGER_PASSWORD=$MONGO_MANAGER_PASSWORD
+EOF
 
-# Set file permissions
-chmod 600 "$MONGO_ENV_FILE"
+  chown "$USERNAME":"$USERNAME" "$MONGO_ENV_FILE"
+  chmod 600 "$MONGO_ENV_FILE"
 
-# Change ownership so that the cloudlunacy user can read the file
-chown cloudlunacy:cloudlunacy "$MONGO_ENV_FILE"
-    
-    # Source with validation
-    set +u
-    if [ -f "$MONGO_ENV_FILE" ]; then  
-        . "$MONGO_ENV_FILE"
-    else
-        log_error "MongoDB credentials file missing!"
-        exit 1
-    fi
-    set -u
-
-    # Verify variables
-    if [ -z "${MONGO_INITDB_ROOT_USERNAME:-}" ] || [ -z "${MONGO_INITDB_ROOT_PASSWORD:-}" ]; then
-        log_error "Failed to generate MongoDB credentials!"
-        exit 1
-    fi
+  # Source them right away so subsequent commands can use them
+  set +u # temporarily disable 'unbound variable' strictness
+  source "$MONGO_ENV_FILE"
+  set -u
 }
 
 setup_mongodb() {
-    log "Setting up MongoDB with authentication sequence..."
-    
-    # Create working directory
-    mkdir -p "$MONGODB_DIR"
-    chown -R "$USERNAME":"$USERNAME" "$MONGODB_DIR"
+  log "Setting up MongoDB with authentication sequence..."
 
-    # Generate credentials if not already exists
-    if [ ! -f "$MONGO_ENV_FILE" ]; then
-        log "Generating new MongoDB credentials..."
-        MONGO_INITDB_ROOT_USERNAME=$(openssl rand -hex 12)
-        MONGO_INITDB_ROOT_PASSWORD=$(openssl rand -hex 24)
-        echo "MONGO_INITDB_ROOT_USERNAME=$MONGO_INITDB_ROOT_USERNAME" > "$MONGO_ENV_FILE"
-        echo "MONGO_INITDB_ROOT_PASSWORD=$MONGO_INITDB_ROOT_PASSWORD" >> "$MONGO_ENV_FILE"
-        chmod 600 "$MONGO_ENV_FILE"
-    fi
+  mkdir -p "$MONGODB_DIR"
+  chown "$USERNAME":"$USERNAME" "$MONGODB_DIR"
 
-    # Source credentials with safety checks
-    set +u
-    source "$MONGO_ENV_FILE"
-    set -u
-
-    # Verify credentials
-    if [ -z "${MONGO_INITDB_ROOT_USERNAME:-}" ] || [ -z "${MONGO_INITDB_ROOT_PASSWORD:-}" ]; then
-        log_error "MongoDB credentials not properly initialized!"
-        exit 1
-    fi
-
-    # Ensure Docker network exists
-    if ! docker network inspect traefik_network >/dev/null 2>&1; then
-        log "Creating traefik_network..."
-        docker network create traefik_network
-    fi
-
-    # Phase 1: Initial setup without authentication
-    log "Phase 1: Starting MongoDB without auth..."
-    cat <<COMPOSE > "$MONGODB_DIR/docker-compose.phase1.yml"
+  # Step 1: Start MongoDB without auth for initial setup
+  log "Step 1: Starting MongoDB without auth..."
+  cat << COMPOSE > "$MONGODB_DIR/docker-compose.mongodb.yml"
 version: '3.8'
 
 services:
@@ -353,13 +313,16 @@ services:
     image: mongo:6.0
     container_name: mongodb
     restart: unless-stopped
-    command: mongod --bind_ip_all
+    command: >
+      mongod
+      --bind_ip_all
     volumes:
       - mongo_data:/data/db
     networks:
-      - traefik_network
+      - internal
     healthcheck:
-      test: mongosh --eval "db.adminCommand('ping')"
+      test: >
+        mongosh --eval "db.adminCommand('ping')"
       interval: 10s
       timeout: 5s
       retries: 3
@@ -369,30 +332,66 @@ volumes:
   mongo_data:
 
 networks:
-  traefik_network:
+  internal:
     external: true
 COMPOSE
 
-    # Start initial MongoDB
-    log "Starting initial MongoDB container..."
-    cd "$MONGODB_DIR"
-    sudo -u "$USERNAME" docker-compose -f docker-compose.phase1.yml up -d
+  # Bring up MongoDB
+  cd "$MONGODB_DIR"
+  sudo -u "$USERNAME" docker-compose -f docker-compose.mongodb.yml down -v
+  sudo -u "$USERNAME" docker-compose -f docker-compose.mongodb.yml up -d
 
-    # Wait for MongoDB to become healthy
-    local health_retries=10
-    while ! docker inspect --format '{{.State.Health.Status}}' mongodb | grep -q "healthy"; do
-        if [ $health_retries -le 0 ]; then
-            log_error "MongoDB failed to start in phase 1"
-            docker logs mongodb
-            exit 1
-        fi
-        sleep 10
-        health_retries=$((health_retries - 1))
-    done
+  # Wait for initial MongoDB to be healthy
+  log "Waiting for MongoDB to be healthy..."
+  local max_attempts=10
+  local attempt=1
+  local healthy=false
 
-    # Phase 2: Secure setup with authentication
-    log "Phase 2: Configuring authenticated MongoDB..."
-    cat <<COMPOSE > "$MONGODB_DIR/docker-compose.phase2.yml"
+  while [ $attempt -le $max_attempts ]; do
+    if docker ps --filter "name=mongodb" --format "{{.Status}}" | grep -q "healthy"; then
+      healthy=true
+      break
+    fi
+    log "Waiting for MongoDB to be healthy (attempt $attempt/$max_attempts)..."
+    sleep 5
+    attempt=$((attempt + 1))
+  done
+
+  if [ "$healthy" != "true" ]; then
+    log_error "MongoDB failed to become healthy"
+    docker logs mongodb
+    return 1
+  fi
+
+  # Step 2: Create root user
+  log "Step 2: Creating root user..."
+  MONGO_INITDB_ROOT_USERNAME=$(openssl rand -hex 12)
+  MONGO_INITDB_ROOT_PASSWORD=$(openssl rand -hex 24)
+
+  # Create root user without auth
+  if ! docker exec mongodb mongosh --eval "
+        db.getSiblingDB('admin').createUser({
+            user: '${MONGO_INITDB_ROOT_USERNAME}',
+            pwd: '${MONGO_INITDB_ROOT_PASSWORD}',
+            roles: ['root']
+        })
+    "; then
+    log_error "Failed to create root user"
+    return 1
+  fi
+
+  # Save credentials
+  cat << EOF > "$MONGO_ENV_FILE"
+MONGO_INITDB_ROOT_USERNAME=$MONGO_INITDB_ROOT_USERNAME
+MONGO_INITDB_ROOT_PASSWORD=$MONGO_INITDB_ROOT_PASSWORD
+EOF
+
+  chown "$USERNAME":"$USERNAME" "$MONGO_ENV_FILE"
+  chmod 600 "$MONGO_ENV_FILE"
+
+  # Step 3: Restart MongoDB with auth
+  log "Step 3: Restarting MongoDB with auth."
+  cat << COMPOSE > "$MONGODB_DIR/docker-compose.mongodb.yml"
 version: '3.8'
 
 services:
@@ -403,123 +402,153 @@ services:
     environment:
       MONGO_INITDB_ROOT_USERNAME: "${MONGO_INITDB_ROOT_USERNAME}"
       MONGO_INITDB_ROOT_PASSWORD: "${MONGO_INITDB_ROOT_PASSWORD}"
-    command: mongod --auth --bind_ip_all
+    command: >
+      mongod
+      --auth
+      --bind_ip_all
+    ports:
+      - "27017:27017"
     volumes:
       - mongo_data:/data/db
     networks:
-      - traefik_network
+      - internal
     healthcheck:
-      test: ["CMD", "mongosh", "--host", "localhost", "-u", "${MONGO_INITDB_ROOT_USERNAME}", "-p", "${MONGO_INITDB_ROOT_PASSWORD}", "--eval", "db.adminCommand('ping')"]
+      test: >
+        mongosh 
+        --host localhost
+        -u "${MONGO_INITDB_ROOT_USERNAME}"
+        -p "${MONGO_INITDB_ROOT_PASSWORD}"
+        --eval "db.adminCommand('ping')"
       interval: 10s
       timeout: 5s
       retries: 3
-      start_period: 30s
+      start_period: 20s
 
 volumes:
   mongo_data:
 
 networks:
-  traefik_network:
+  internal:
     external: true
 COMPOSE
 
-    # Restart with authentication
-    log "Restarting MongoDB with authentication..."
-    sudo -u "$USERNAME" docker-compose -f docker-compose.phase1.yml down
-    sudo -u "$USERNAME" docker-compose -f docker-compose.phase2.yml up -d
+  # Bring down the old MongoDB container and bring up the new one with auth
+  sudo -u "$USERNAME" docker-compose --env-file "$MONGO_ENV_FILE" -f docker-compose.mongodb.yml down -v
+  sudo -u "$USERNAME" docker-compose --env-file "$MONGO_ENV_FILE" -f docker-compose.mongodb.yml up -d
 
-    # Verify secure connection
-    local verify_retries=10
-    while ! docker exec mongodb mongosh \
-        -u "$MONGO_INITDB_ROOT_USERNAME" \
-        -p "$MONGO_INITDB_ROOT_PASSWORD" \
-        --eval "db.adminCommand('ping')" &>/dev/null; do
-        if [ $verify_retries -le 0 ]; then
-            log_error "Failed to verify authenticated MongoDB connection"
-            docker logs mongodb
-            exit 1
-        fi
-        sleep 10
-        verify_retries=$((verify_retries - 1))
-    done
+  # Wait for secure MongoDB to be healthy with increased timeout
+  log "Waiting for secure MongoDB to be healthy..."
+  attempt=1
+  healthy=false
 
-    log "MongoDB authentication setup completed successfully"
-    
-    # Create management user
-    create_mongo_management_user
+  while [ $attempt -le $max_attempts ]; do
+    if docker ps --filter "name=mongodb" --format "{{.Status}}" | grep -q "healthy"; then
+      healthy=true
+      break
+    fi
+    log "Waiting for secure MongoDB to be healthy (attempt $attempt/$max_attempts)..."
+    # Show current container logs for debugging
+    docker logs --tail 10 mongodb
+    sleep 10
+    attempt=$((attempt + 1))
+  done
+
+  if [ "$healthy" != "true" ]; then
+    log_error "Secure MongoDB failed to become healthy"
+    docker logs mongodb
+    return 1
+  fi
+
+  # Verify secure connection
+  log "Verifying secure connection..."
+  for i in {1..5}; do
+    if docker exec mongodb mongosh \
+      -u "$MONGO_INITDB_ROOT_USERNAME" \
+      -p "$MONGO_INITDB_ROOT_PASSWORD" \
+      --eval "db.adminCommand('ping')"; then
+      log "MongoDB setup completed successfully"
+      return 0
+    fi
+    log "Connection attempt $i failed, retrying..."
+    sleep 5
+  done
+
+  log_error "Failed to verify secure MongoDB connection"
+  docker logs mongodb
+  return 1
 }
 
 create_mongo_management_user() {
-    log "Creating/updating MongoDB management user..."
-    
-    # Ensure environment file exists and can be read
-    if [ ! -f "$MONGO_ENV_FILE" ]; then
-        log_error "MongoDB environment file not found at $MONGO_ENV_FILE"
-        return 1
+  log "Creating/updating MongoDB management user..."
+
+  # Ensure environment file exists and can be read
+  if [ ! -f "$MONGO_ENV_FILE" ]; then
+    log_error "MongoDB environment file not found at $MONGO_ENV_FILE"
+    return 1
+  fi
+
+  # Source MongoDB environment variables
+  set +u # Temporarily disable errors for unbound variables
+  source "$MONGO_ENV_FILE"
+  set -u
+
+  # Verify required variables are set
+  if [ -z "${MONGO_INITDB_ROOT_USERNAME:-}" ] || [ -z "${MONGO_INITDB_ROOT_PASSWORD:-}" ]; then
+    log_error "Root credentials not found in environment file"
+    return 1
+  fi
+
+  # Set management user constants
+  MONGO_MANAGER_USERNAME="manager"
+  local max_retries=3
+  local retry_count=0
+  local success=false
+
+  # Function to verify MongoDB connection
+  verify_mongodb_connection() {
+    docker exec mongodb mongosh \
+      --host localhost \
+      -u "$MONGO_INITDB_ROOT_USERNAME" \
+      -p "$MONGO_INITDB_ROOT_PASSWORD" \
+      --eval "db.adminCommand('ping')" &> /dev/null
+  }
+
+  # Wait for MongoDB to be fully operational
+  log "Waiting for MongoDB to be ready..."
+  while [ $retry_count -lt $max_retries ]; do
+    if verify_mongodb_connection; then
+      success=true
+      break
     fi
+    log "Attempt $((retry_count + 1))/$max_retries: MongoDB not ready yet, waiting..."
+    sleep 10
+    retry_count=$((retry_count + 1))
+  done
 
-    # Source MongoDB environment variables
-    set +u  # Temporarily disable errors for unbound variables
-    source "$MONGO_ENV_FILE"
-    set -u
+  if [ "$success" != "true" ]; then
+    log_error "Failed to connect to MongoDB after $max_retries attempts"
+    return 1
+  fi
 
-    # Verify required variables are set
-    if [ -z "${MONGO_INITDB_ROOT_USERNAME:-}" ] || [ -z "${MONGO_INITDB_ROOT_PASSWORD:-}" ]; then
-        log_error "Root credentials not found in environment file"
-        return 1
-    fi
-
-    # Set management user constants
-    MONGO_MANAGER_USERNAME="manager"
-    local max_retries=3
-    local retry_count=0
-    local success=false
-
-    # Function to verify MongoDB connection
-    verify_mongodb_connection() {
-            docker exec mongodb mongosh \
-            --host localhost \
-            -u "$MONGO_INITDB_ROOT_USERNAME" \
-            -p "$MONGO_INITDB_ROOT_PASSWORD" \
-            --eval "db.adminCommand('ping')" &>/dev/null
-    }
-
-    # Wait for MongoDB to be fully operational
-    log "Waiting for MongoDB to be ready..."
-    while [ $retry_count -lt $max_retries ]; do
-        if verify_mongodb_connection; then
-            success=true
-            break
-        fi
-        log "Attempt $((retry_count + 1))/$max_retries: MongoDB not ready yet, waiting..."
-        sleep 10
-        retry_count=$((retry_count + 1))
-    done
-
-    if [ "$success" != "true" ]; then
-        log_error "Failed to connect to MongoDB after $max_retries attempts"
-        return 1
-    fi
-
-    # Check if management user exists
-    log "Checking for existing management user..."
-    local user_exists
-    user_exists=$(docker exec mongodb mongosh \
+  # Check if management user exists
+  log "Checking for existing management user..."
+  local user_exists
+  user_exists=$(docker exec mongodb mongosh \
     -u "$MONGO_INITDB_ROOT_USERNAME" \
     -p "$MONGO_INITDB_ROOT_PASSWORD" \
     --eval "db.getSiblingDB('admin').getUser('$MONGO_MANAGER_USERNAME')" \
     --quiet)
 
-    # Generate new password regardless of whether we're creating or updating
-    MONGO_MANAGER_PASSWORD=$(openssl rand -hex 24)
+  # Generate new password regardless of whether we're creating or updating
+  MONGO_MANAGER_PASSWORD=$(openssl rand -hex 24)
 
-    if [ "$user_exists" = "null" ] || [ -z "$user_exists" ]; then
-        log "Creating new management user..."
-        # Create new management user
-        if ! docker exec mongodb mongosh \
-            -u "$MONGO_INITDB_ROOT_USERNAME" \
-            -p "$MONGO_INITDB_ROOT_PASSWORD" \
-            --eval "db.getSiblingDB('admin').createUser({
+  if [ "$user_exists" = "null" ] || [ -z "$user_exists" ]; then
+    log "Creating new management user..."
+    # Create new management user
+    if ! docker exec mongodb mongosh \
+      -u "$MONGO_INITDB_ROOT_USERNAME" \
+      -p "$MONGO_INITDB_ROOT_PASSWORD" \
+      --eval "db.getSiblingDB('admin').createUser({
                 user: '$MONGO_MANAGER_USERNAME',
                 pwd: '$MONGO_MANAGER_PASSWORD',
                 roles: [
@@ -528,16 +557,16 @@ create_mongo_management_user() {
                     {role: 'clusterMonitor', db: 'admin'}
                 ]
             })"; then
-            log_error "Failed to create management user"
-            return 1
-        fi
-    else
-        log "Updating existing management user password..."
-        # Update existing management user
-        if ! docker exec mongodb mongosh \
-            -u "$MONGO_INITDB_ROOT_USERNAME" \
-            -p "$MONGO_INITDB_ROOT_PASSWORD" \
-            --eval "db.getSiblingDB('admin').updateUser('$MONGO_MANAGER_USERNAME', {
+      log_error "Failed to create management user"
+      return 1
+    fi
+  else
+    log "Updating existing management user password..."
+    # Update existing management user
+    if ! docker exec mongodb mongosh \
+      -u "$MONGO_INITDB_ROOT_USERNAME" \
+      -p "$MONGO_INITDB_ROOT_PASSWORD" \
+      --eval "db.getSiblingDB('admin').updateUser('$MONGO_MANAGER_USERNAME', {
                 pwd: '$MONGO_MANAGER_PASSWORD',
                 roles: [
                     {role: 'userAdminAnyDatabase', db: 'admin'},
@@ -545,74 +574,74 @@ create_mongo_management_user() {
                     {role: 'clusterMonitor', db: 'admin'}
                 ]
             })"; then
-            log_error "Failed to update management user"
-            return 1
-        fi
+      log_error "Failed to update management user"
+      return 1
     fi
+  fi
 
-    # Update environment file with all credentials
-    log "Updating environment file with credentials..."
-    {
-        echo "MONGO_INITDB_ROOT_USERNAME=$MONGO_INITDB_ROOT_USERNAME"
-        echo "MONGO_INITDB_ROOT_PASSWORD=$MONGO_INITDB_ROOT_PASSWORD"
-        echo "MONGO_MANAGER_USERNAME=$MONGO_MANAGER_USERNAME"
-        echo "MONGO_MANAGER_PASSWORD=$MONGO_MANAGER_PASSWORD"
-    } > "$MONGO_ENV_FILE"
+  # Update environment file with all credentials
+  log "Updating environment file with credentials..."
+  {
+    echo "MONGO_INITDB_ROOT_USERNAME=$MONGO_INITDB_ROOT_USERNAME"
+    echo "MONGO_INITDB_ROOT_PASSWORD=$MONGO_INITDB_ROOT_PASSWORD"
+    echo "MONGO_MANAGER_USERNAME=$MONGO_MANAGER_USERNAME"
+    echo "MONGO_MANAGER_PASSWORD=$MONGO_MANAGER_PASSWORD"
+  } > "$MONGO_ENV_FILE"
 
-    # Secure the environment file
-    chmod 600 "$MONGO_ENV_FILE"
-    chown "$USERNAME:$USERNAME" "$MONGO_ENV_FILE"
+  # Secure the environment file
+  chmod 600 "$MONGO_ENV_FILE"
+  chown "$USERNAME:$USERNAME" "$MONGO_ENV_FILE"
 
-    # Verify management user access
-    log "Verifying management user access..."
-    if ! docker exec mongodb mongosh \
-        -u "$MONGO_MANAGER_USERNAME" \
-        -p "$MONGO_MANAGER_PASSWORD" \
-        --eval "db.adminCommand('ping')"; then
-        log_error "Failed to verify management user access"
-        return 1
-    fi
+  # Verify management user access
+  log "Verifying management user access..."
+  if ! docker exec mongodb mongosh \
+    -u "$MONGO_MANAGER_USERNAME" \
+    -p "$MONGO_MANAGER_PASSWORD" \
+    --eval "db.adminCommand('ping')"; then
+    log_error "Failed to verify management user access"
+    return 1
+  fi
 
-    log "Management user setup completed successfully"
-    return 0
+  log "Management user setup completed successfully"
+  return 0
 }
 
 adjust_firewall_settings() {
-    log "Adjusting firewall settings..."
-    TRUSTED_IP="138.199.165.36" 
-    if command -v ufw >/dev/null 2>&1; then
-        ufw allow from $TRUSTED_IP to any port 27017 proto tcp
-        log "Allowed port 27017 for trusted IP $TRUSTED_IP."
-    else
-        iptables -A INPUT -p tcp -s $TRUSTED_IP --dport 27017 -j ACCEPT
-        log "Allowed port 27017 for trusted IP $TRUSTED_IP via iptables."
-    fi
-    log "Firewall settings adjusted."
+  log "Adjusting firewall settings..."
+  TRUSTED_IP="138.199.165.36"
+  if command -v ufw > /dev/null 2>&1; then
+    ufw allow from $TRUSTED_IP to any port 27017 proto tcp
+    log "Allowed port 27017 for trusted IP $TRUSTED_IP."
+  else
+    iptables -A INPUT -p tcp -s $TRUSTED_IP --dport 27017 -j ACCEPT
+    log "Allowed port 27017 for trusted IP $TRUSTED_IP via iptables."
+  fi
+  log "Firewall settings adjusted."
 }
 
 configure_network() {
-    log "Configuring network access to front server..."
-    
-    # Allow front server IP to access MongoDB
-    FRONT_SERVER_IP="138.199.165.36"
-    ufw allow from "$FRONT_SERVER_IP" to any port 27017 proto tcp
-    
-    # Allow agent to reach frontdoor API
-    ufw allow out to "$FRONT_SERVER_IP" port 3000 proto tcp
-    
-    log "Network rules configured for front server access"
+  log "Configuring network access to front server..."
+
+  # Allow front server IP to access MongoDB
+  FRONT_SERVER_IP="138.199.165.36"
+  ufw allow from "$FRONT_SERVER_IP" to any port 27017 proto tcp
+
+  # Allow agent to reach frontdoor API
+  ufw allow out to "$FRONT_SERVER_IP" port 3000 proto tcp
+
+  log "Network rules configured for front server access"
 }
 
 register_with_frontdoor() {
-    log "Registering agent with frontdoor service..."
-    
-    local PUBLIC_IP=$(curl -s https://api.ipify.org)
-    local API_URL="$FRONTDOOR_API_URL/api/frontdoor/add-subdomain"
-    
-    curl -X POST "$API_URL" \
-         -H "Authorization: Bearer $FRONTDOOR_API_TOKEN" \
-         -H "Content-Type: application/json" \
-         -d @- <<EOF
+  log "Registering agent with frontdoor service..."
+
+  local PUBLIC_IP=$(curl -s https://api.ipify.org)
+  local API_URL="$FRONTDOOR_API_URL/api/frontdoor/add-subdomain"
+
+  curl -X POST "$API_URL" \
+    -H "Authorization: Bearer $FRONTDOOR_API_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d @- << EOF
 {
     "subdomain": "$SERVER_ID.$FRONTDOOR_SUBDOMAIN_BASE",
     "targetIp": "$PUBLIC_IP"
@@ -680,18 +709,15 @@ get_public_ip() {
 }
 
 generate_subdomain() {
-  # Create a short hash from SERVER_ID (first 12 characters of the SHA256 sum)
+  # Create short hash from SERVER_ID (12 characters)
   local hash=$(echo -n "$SERVER_ID" | sha256sum | cut -c1-12)
   local prefix="cl-${hash}"
 
-  # Sanitize: Replace any non-alphanumeric/dash characters with dashes
-  prefix=${prefix//[^a-z0-9-]/-}
-  # Trim to a maximum of 24 characters (if needed)
-  prefix=${prefix:0:24}
+  # Ensure valid DNS format
+  prefix=${prefix//[^a-z0-9]/-} # Replace invalid chars with dashes
+  prefix=${prefix:0:24}         # Trim to max 24 characters
 
-  # Append the front door base domain so the full subdomain becomes:
-  # cl-<hash>.mongodb.cloudlunacy.uk
-  echo "${prefix}.${FRONTDOOR_SUBDOMAIN_BASE}"
+  echo "$prefix"
 }
 
 validate_subdomain() {
