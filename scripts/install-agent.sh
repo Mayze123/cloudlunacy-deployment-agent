@@ -280,11 +280,17 @@ generate_mongo_credentials() {
         MONGO_INITDB_ROOT_PASSWORD=$(openssl rand -hex 24)
     fi
     
-    # Write to file
+    # Write the credentials to the file
     cat <<EOF > "$MONGO_ENV_FILE"
-export MONGO_INITDB_ROOT_USERNAME="$MONGO_INITDB_ROOT_USERNAME"
-export MONGO_INITDB_ROOT_PASSWORD="$MONGO_INITDB_ROOT_PASSWORD"
-EOF
+    export MONGO_INITDB_ROOT_USERNAME="$MONGO_INITDB_ROOT_USERNAME"
+    export MONGO_INITDB_ROOT_PASSWORD="$MONGO_INITDB_ROOT_PASSWORD"
+    EOF
+
+# Set file permissions
+chmod 600 "$MONGO_ENV_FILE"
+
+# Change ownership so that the cloudlunacy user can read the file
+chown cloudlunacy:cloudlunacy "$MONGO_ENV_FILE"
     
     # Source with validation
     set +u
