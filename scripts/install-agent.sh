@@ -1,64 +1,60 @@
 #!/bin/bash
 # ------------------------------------------------------------------------------
-# Installation Script for CloudLunacy Deployment Agent with MongoDB
-# Version: 2.5.2 (Modified for two-phase MongoDB setup)
-# Author: Mahamadou Taibou
-# Date: 2024-11-24
+# Installation Script for CloudLunacy Deployment Agent with MongoDB (Front Server Mode)
+# Version: 3.0.0
+# Author: Mahamadou Taibou (modified by you)
+# Date: 2024-11-24 (modified for front server integration)
 #
 # Description:
 # This script installs and configures the CloudLunacy Deployment Agent on a VPS.
 # It performs the following tasks:
 #   - Detects the operating system and version
 #   - Updates system packages
-#   - Installs necessary dependencies (Docker, Node.js, Git, jq, Certbot)
+#   - Installs necessary dependencies (Docker, Node.js, Git, jq, lsof)
 #   - Sets up MongoDB in two phases:
-#       Phase 1: No auth -> root user is created by official entrypoint
-#       Phase 2: Enable auth -> health check passes with credentials
+#       Phase 1: No auth -> root user is created
+#       Phase 2: Enable auth (without TLS) -> health check passes with credentials
 #   - Creates a dedicated user with correct permissions
 #   - Downloads the latest version of the Deployment Agent from GitHub
 #   - Installs Node.js dependencies
 #   - Configures environment variables
 #   - Sets up the Deployment Agent as a systemd service
-#   - Automates SSL certificate renewal
 #   - Provides post-installation verification and feedback
 #
 # Usage:
-#   sudo ./install-agent.sh <AGENT_TOKEN> <SERVER_ID> [BACKEND_BASE_URL]
+#   sudo ./install-agent.sh <AGENT_TOKEN> <SERVER_ID> <EMAIL> [BACKEND_BASE_URL]
 #
 # Arguments:
 #   AGENT_TOKEN      - Unique token for agent authentication
 #   SERVER_ID        - Unique identifier for the server
+#   EMAIL            - (Not used in this version, kept for backward compatibility)
 #   BACKEND_BASE_URL - (Optional) Backend base URL; defaults to https://your-default-backend-url
 # ------------------------------------------------------------------------------
 
 set -euo pipefail
 # Uncomment the following line to enable debugging
-set -x
+#set -x
 IFS=$'\n\t'
 
 # ----------------------------
 # Configuration Variables
 # ----------------------------
+# For front server mode, DOMAIN represents the (sub)domain that will be used
+# by the front server to route traffic.
+DOMAIN="mongodb.cloudlunacy.uk"
 USERNAME="cloudlunacy"
 BASE_DIR="/opt/cloudlunacy"
 MONGODB_DIR="$BASE_DIR/mongodb"
 MONGO_ENV_FILE="$MONGODB_DIR/.env"
-FRONT_API_TOKEN="your_secret_token"
-
-FRONTDOOR_API_URL="http://138.199.165.36:3000"
-FRONTDOOR_API_TOKEN="your_secret_token"
-FRONTDOOR_SUBDOMAIN_BASE="mongodb.cloudlunacy.uk"
-FRONTDOOR_CONFIG="/etc/cloudlunacy/frontdoor.conf"
 
 # ----------------------------
 # Function Definitions
 # ----------------------------
-
 display_info() {
   echo "-------------------------------------------------"
   echo "CloudLunacy Deployment Agent Installation Script"
-  echo "Version: 2.5.2"
-  echo "Author: Mahamadou Taibou"
+  echo "Version: 3.0.0 (Front Server Mode)"
+  echo "Author: Mahamadou Taibou (modified)"
   echo "Date: 2024-11-24"
   echo "-------------------------------------------------"
 }
@@ -78,7 +74,7 @@ log_error() {
 check_args() {
   if [ "$#" -lt 3 ] || [ "$#" -gt 5 ]; then
     log_error "Invalid number of arguments."
-    echo "Usage: $0 <AGENT_TOKEN> <SERVER_ID> [BACKEND_BASE_URL]"
+    echo "Usage: $0 <AGENT_TOKEN> <SERVER_ID> <EMAIL> [BACKEND_BASE_URL]"
     exit 1
   fi
 }
@@ -168,9 +164,8 @@ install_docker() {
           lsb-release
         mkdir -p /etc/apt/keyrings
         curl -fsSL https://download.docker.com/linux/$OS_TYPE/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-        echo \
-          "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/$OS_TYPE \
-                    $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/$OS_TYPE $(lsb_release -cs) stable" \
+          | tee /etc/apt/sources.list.d/docker.list > /dev/null
         apt-get update -y
         apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
         ;;
@@ -240,54 +235,33 @@ install_mongosh() {
   log "MongoDB Shell Docker image pulled."
 }
 
-wait_for_mongodb_health() {
-  log "Waiting for MongoDB container to be healthy..."
-  local max_attempts=10
-  local attempt=1
-
-  while [ $attempt -le $max_attempts ]; do
-    if docker ps --filter "name=mongodb" --format "{{.Status}}" | grep -q "healthy"; then
-      log "MongoDB container is healthy"
-      return 0
-    fi
-
-    # Get current health check status
-    local status=$(docker ps --filter "name=mongodb" --format "{{.Status}}")
-    log "Attempt $attempt/$max_attempts: Current status: $status"
-
-    # If container is unhealthy, get the last health check output
-    if echo "$status" | grep -q "unhealthy"; then
-      log "Last health check output:"
-      docker inspect --format "{{json .State.Health.Log}}" mongodb | jq -r '.[-1].Output'
-    fi
-
-    sleep 30
-    attempt=$((attempt + 1))
-  done
-
-  log_error "MongoDB failed to become healthy after $max_attempts attempts"
-  log_error "Container logs:"
-  docker logs mongodb
-  return 1
-}
-
+# ----------------------------
+# MongoDB Setup (Two-Phase, Without TLS)
+# ----------------------------
 generate_mongo_credentials() {
   log "Generating MongoDB credentials..."
+
+  # Create random credentials
   MONGO_INITDB_ROOT_USERNAME=$(openssl rand -hex 12)
   MONGO_INITDB_ROOT_PASSWORD=$(openssl rand -hex 24)
   MONGO_MANAGER_USERNAME="manager"
   MONGO_MANAGER_PASSWORD=$(openssl rand -hex 24)
 
-  cat <<EOF > "$MONGO_ENV_FILE"
-MONGO_INITDB_ROOT_USERNAME=${MONGO_INITDB_ROOT_USERNAME}
-MONGO_INITDB_ROOT_PASSWORD=${MONGO_INITDB_ROOT_PASSWORD}
-MONGO_MANAGER_USERNAME=${MONGO_MANAGER_USERNAME}
-MONGO_MANAGER_PASSWORD=${MONGO_MANAGER_PASSWORD}
+  # Write them to the Mongo .env file
+  cat << EOF > "$MONGO_ENV_FILE"
+MONGO_INITDB_ROOT_USERNAME=$MONGO_INITDB_ROOT_USERNAME
+MONGO_INITDB_ROOT_PASSWORD=$MONGO_INITDB_ROOT_PASSWORD
+MONGO_MANAGER_USERNAME=$MONGO_MANAGER_USERNAME
+MONGO_MANAGER_PASSWORD=$MONGO_MANAGER_PASSWORD
 EOF
 
   chown "$USERNAME":"$USERNAME" "$MONGO_ENV_FILE"
   chmod 600 "$MONGO_ENV_FILE"
-  set +u; source "$MONGO_ENV_FILE"; set -u
+
+  # Source them so subsequent commands can use them
+  set +u
+  source "$MONGO_ENV_FILE"
+  set -u
 }
 
 setup_mongodb() {
@@ -296,21 +270,22 @@ setup_mongodb() {
   mkdir -p "$MONGODB_DIR"
   chown "$USERNAME":"$USERNAME" "$MONGODB_DIR"
 
-  # Step 1: Start MongoDB without auth for initial setup
+  # Phase 1: Start MongoDB without auth
   log "Step 1: Starting MongoDB without auth..."
-  cat <<COMPOSE > "$MONGODB_DIR/docker-compose.mongodb.yml"
+  cat << COMPOSE > "$MONGODB_DIR/docker-compose.mongodb.yml"
 version: '3.8'
 services:
   mongodb:
     image: mongo:6.0
     container_name: mongodb
     restart: unless-stopped
-    command: >
-      mongod --bind_ip_all
+    command: mongod --bind_ip_all
     volumes:
       - mongo_data:/data/db
     networks:
-      - internal
+      internal:
+        aliases:
+          - $DOMAIN
     healthcheck:
       test: [ "CMD", "mongosh", "--eval", "db.adminCommand('ping')" ]
       interval: 10s
@@ -328,7 +303,6 @@ COMPOSE
   sudo -u "$USERNAME" docker-compose -f docker-compose.mongodb.yml down -v
   sudo -u "$USERNAME" docker-compose -f docker-compose.mongodb.yml up -d
 
-  # Wait for MongoDB to be healthy
   log "Waiting for MongoDB to be healthy..."
   local max_attempts=10
   local attempt=1
@@ -342,27 +316,37 @@ COMPOSE
     attempt=$((attempt + 1))
   done
 
-  # Generate credentials (if not already generated)
+  # Generate credentials and source them
   generate_mongo_credentials
 
-  # Step 2: Create root user without auth using heredoc
+  # Phase 2: Create root user (without auth) then restart with auth enabled
   log "Step 2: Creating root user..."
-  docker exec mongodb mongosh --quiet <<EOF
-db.getSiblingDB('admin').createUser({
-  user: "${MONGO_INITDB_ROOT_USERNAME}",
-  pwd: "${MONGO_INITDB_ROOT_PASSWORD}",
-  roles: ['root']
-});
-EOF
-  if [ $? -ne 0 ]; then
+  # For this phase, generate new random credentials for root user
+  MONGO_INITDB_ROOT_USERNAME=$(openssl rand -hex 12)
+  MONGO_INITDB_ROOT_PASSWORD=$(openssl rand -hex 24)
+  if ! docker exec mongodb mongosh --eval "
+        db.getSiblingDB('admin').createUser({
+            user: '$MONGO_INITDB_ROOT_USERNAME',
+            pwd: '$MONGO_INITDB_ROOT_PASSWORD',
+            roles: ['root']
+        })
+    "; then
     log_error "Failed to create root user"
     docker logs mongodb
     return 1
   fi
 
-  # Step 3: Restart MongoDB with authentication enabled
+  # Save root credentials to the env file
+  cat << EOF > "$MONGO_ENV_FILE"
+MONGO_INITDB_ROOT_USERNAME=$MONGO_INITDB_ROOT_USERNAME
+MONGO_INITDB_ROOT_PASSWORD=$MONGO_INITDB_ROOT_PASSWORD
+EOF
+
+  chown "$USERNAME":"$USERNAME" "$MONGO_ENV_FILE"
+  chmod 600 "$MONGO_ENV_FILE"
+
   log "Step 3: Restarting MongoDB with auth..."
-  cat <<COMPOSE > "$MONGODB_DIR/docker-compose.mongodb.yml"
+  cat << COMPOSE > "$MONGODB_DIR/docker-compose.mongodb.yml"
 version: '3.8'
 services:
   mongodb:
@@ -370,31 +354,33 @@ services:
     container_name: mongodb
     restart: unless-stopped
     environment:
-      MONGO_INITDB_ROOT_USERNAME: "${MONGO_INITDB_ROOT_USERNAME}"
-      MONGO_INITDB_ROOT_PASSWORD: "${MONGO_INITDB_ROOT_PASSWORD}"
-    command: >
-      mongod --auth --bind_ip_all
+      MONGO_INITDB_ROOT_USERNAME: "\${MONGO_INITDB_ROOT_USERNAME}"
+      MONGO_INITDB_ROOT_PASSWORD: "\${MONGO_INITDB_ROOT_PASSWORD}"
+    command: mongod --auth --bind_ip_all
+    ports:
+      - "27017:27017"
     volumes:
       - mongo_data:/data/db
     networks:
-      - traefik_network
+      internal:
+        aliases:
+          - $DOMAIN
     healthcheck:
-      test: [ "CMD", "mongosh", "--host", "localhost", "-u", "${MONGO_INITDB_ROOT_USERNAME}", "-p", "${MONGO_INITDB_ROOT_PASSWORD}", "--eval", "db.adminCommand('ping')" ]
-      interval: 10s
+      test: [ "CMD", "mongosh", "--host", "localhost", "-u", "\${MONGO_INITDB_ROOT_USERNAME}", "-p", "\${MONGO_INITDB_ROOT_PASSWORD}", "--eval", "db.adminCommand('ping')" ]
+      interval: 5s
       timeout: 5s
       retries: 3
-      start_period: 20s
+      start_period: 10s
 volumes:
   mongo_data:
 networks:
-  traefik_network:
+  internal:
     external: true
 COMPOSE
 
   sudo -u "$USERNAME" docker-compose --env-file "$MONGO_ENV_FILE" -f docker-compose.mongodb.yml down -v
   sudo -u "$USERNAME" docker-compose --env-file "$MONGO_ENV_FILE" -f docker-compose.mongodb.yml up -d
 
-  # Wait for the secure MongoDB container to become healthy
   log "Waiting for secure MongoDB to be healthy..."
   attempt=1
   while [ $attempt -le $max_attempts ]; do
@@ -403,6 +389,7 @@ COMPOSE
       break
     fi
     log "Waiting for secure MongoDB to be healthy (attempt $attempt/$max_attempts)..."
+    docker logs --tail 10 mongodb
     sleep 10
     attempt=$((attempt + 1))
   done
@@ -412,14 +399,13 @@ COMPOSE
     return 1
   fi
 
-  # Verify secure connection using root credentials
   log "Verifying secure MongoDB connection..."
   for i in {1..5}; do
-    if docker exec mongodb mongosh --quiet -u "${MONGO_INITDB_ROOT_USERNAME}" -p "${MONGO_INITDB_ROOT_PASSWORD}" --eval "db.adminCommand('ping')" ; then
+    if docker exec mongodb mongosh --quiet -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" --eval "db.adminCommand('ping')"; then
       log "MongoDB setup completed successfully"
       return 0
     fi
-    log "Secure connection attempt $i failed, retrying..."
+    log "Connection attempt $i failed, retrying..."
     sleep 5
   done
 
@@ -436,12 +422,8 @@ create_mongo_management_user() {
     return 1
   fi
 
-  # Source environment variables with proper error handling
   set +u
-  if ! source "$MONGO_ENV_FILE"; then
-    log_error "Failed to source MongoDB environment file"
-    return 1
-  fi
+  source "$MONGO_ENV_FILE"
   set -u
 
   if [ -z "${MONGO_INITDB_ROOT_USERNAME:-}" ] || [ -z "${MONGO_INITDB_ROOT_PASSWORD:-}" ]; then
@@ -451,112 +433,89 @@ create_mongo_management_user() {
 
   local max_retries=3
   local retry_count=0
-  local connection_success=false
-
-  # Wait for MongoDB to be ready with root credentials
   while [ $retry_count -lt $max_retries ]; do
-    if docker exec mongodb mongosh --quiet \
-      -u "${MONGO_INITDB_ROOT_USERNAME}" \
-      -p "${MONGO_INITDB_ROOT_PASSWORD}" \
-      --authenticationDatabase admin \
-      --eval "db.adminCommand('ping')" >/dev/null 2>&1; then
-      connection_success=true
+    if docker exec mongodb mongosh --quiet -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" --eval "db.adminCommand('ping')"; then
       break
     fi
     log "Waiting for MongoDB to be ready (attempt $((retry_count + 1))/$max_retries)..."
     sleep 10
     retry_count=$((retry_count + 1))
   done
-
-  if ! $connection_success; then
+  if [ $retry_count -eq $max_retries ]; then
     log_error "Failed to connect to MongoDB after $max_retries attempts"
     return 1
   fi
 
-  # Create/update management user with proper authentication
-  docker exec mongodb mongosh --quiet \
-    -u "${MONGO_INITDB_ROOT_USERNAME}" \
-    -p "${MONGO_INITDB_ROOT_PASSWORD}" \
-    --authenticationDatabase admin <<EOF
-var adminDB = db.getSiblingDB('admin');
-var user = adminDB.getUser("${MONGO_MANAGER_USERNAME}");
-if (!user) {
-  adminDB.createUser({
-    user: "${MONGO_MANAGER_USERNAME}",
-    pwd: "${MONGO_MANAGER_PASSWORD}",
-    roles: [
-      {role: 'userAdminAnyDatabase', db: 'admin'},
-      {role: 'readWriteAnyDatabase', db: 'admin'},
-      {role: 'clusterMonitor', db: 'admin'},
-      {role: 'dbAdminAnyDatabase', db: 'admin'}
-    ]
-  });
-} else {
-  adminDB.updateUser("${MONGO_MANAGER_USERNAME}", {
-    pwd: "${MONGO_MANAGER_PASSWORD}",
-    roles: [
-      {role: 'userAdminAnyDatabase', db: 'admin'},
-      {role: 'readWriteAnyDatabase', db: 'admin'},
-      {role: 'clusterMonitor', db: 'admin'},
-      {role: 'dbAdminAnyDatabase', db: 'admin'}
-    ]
-  });
-}
-EOF
+  # Set management user constants (manager is fixed)
+  MONGO_MANAGER_USERNAME="manager"
+  # Generate a new password regardless of whether we are creating or updating
+  MONGO_MANAGER_PASSWORD=$(openssl rand -hex 24)
 
-  if [ $? -ne 0 ]; then
-    log_error "Failed to create/update management user"
-    return 1
+  user_exists=$(docker exec mongodb mongosh --quiet \
+    -u "$MONGO_INITDB_ROOT_USERNAME" \
+    -p "$MONGO_INITDB_ROOT_PASSWORD" \
+    --eval "db.getSiblingDB('admin').getUser('$MONGO_MANAGER_USERNAME')" \
+    --quiet)
+
+  if [ "$user_exists" = "null" ] || [ -z "$user_exists" ]; then
+    log "Creating new management user..."
+    if ! docker exec mongodb mongosh --quiet \
+      -u "$MONGO_INITDB_ROOT_USERNAME" \
+      -p "$MONGO_INITDB_ROOT_PASSWORD" \
+      --eval "db.getSiblingDB('admin').createUser({
+                user: '$MONGO_MANAGER_USERNAME',
+                pwd: '$MONGO_MANAGER_PASSWORD',
+                roles: [
+                    {role: 'userAdminAnyDatabase', db: 'admin'},
+                    {role: 'readWriteAnyDatabase', db: 'admin'},
+                    {role: 'clusterMonitor', db: 'admin'}
+                ]
+            })"; then
+      log_error "Failed to create management user"
+      return 1
+    fi
+  else
+    log "Updating existing management user password..."
+    if ! docker exec mongodb mongosh --quiet \
+      -u "$MONGO_INITDB_ROOT_USERNAME" \
+      -p "$MONGO_INITDB_ROOT_PASSWORD" \
+      --eval "db.getSiblingDB('admin').updateUser('$MONGO_MANAGER_USERNAME', {
+                pwd: '$MONGO_MANAGER_PASSWORD',
+                roles: [
+                    {role: 'userAdminAnyDatabase', db: 'admin'},
+                    {role: 'readWriteAnyDatabase', db: 'admin'},
+                    {role: 'clusterMonitor', db: 'admin'}
+                ]
+            })"; then
+      log_error "Failed to update management user"
+      return 1
+    fi
   fi
 
-  # Update environment file with proper permissions
-  if ! grep -q "MONGO_MANAGER_USERNAME" "$MONGO_ENV_FILE"; then
-    echo "MONGO_MANAGER_USERNAME=${MONGO_MANAGER_USERNAME}" >> "$MONGO_ENV_FILE"
-  fi
-  if ! grep -q "MONGO_MANAGER_PASSWORD" "$MONGO_ENV_FILE"; then
-    echo "MONGO_MANAGER_PASSWORD=${MONGO_MANAGER_PASSWORD}" >> "$MONGO_ENV_FILE"
-  fi
+  log "Updating environment file with credentials..."
+  {
+    echo "MONGO_INITDB_ROOT_USERNAME=$MONGO_INITDB_ROOT_USERNAME"
+    echo "MONGO_INITDB_ROOT_PASSWORD=$MONGO_INITDB_ROOT_PASSWORD"
+    echo "MONGO_MANAGER_USERNAME=$MONGO_MANAGER_USERNAME"
+    echo "MONGO_MANAGER_PASSWORD=$MONGO_MANAGER_PASSWORD"
+  } > "$MONGO_ENV_FILE"
 
   chown "$USERNAME":"$USERNAME" "$MONGO_ENV_FILE"
   chmod 600 "$MONGO_ENV_FILE"
 
-  # Enhanced verification with retries
   log "Verifying management user access..."
-  local verify_attempts=3
-  for ((i=1; i<=verify_attempts; i++)); do
-    if docker exec mongodb mongosh --quiet \
-      -u "${MONGO_MANAGER_USERNAME}" \
-      -p "${MONGO_MANAGER_PASSWORD}" \
-      --authenticationDatabase admin \
-      --eval "db.adminCommand('ping')" >/dev/null 2>&1; then
-      log "Management user verification successful"
-      return 0
-    fi
-    log "Verification attempt $i failed, retrying..."
-    sleep 5
-  done
+  if ! docker exec mongodb mongosh --quiet -u "$MONGO_MANAGER_USERNAME" -p "$MONGO_MANAGER_PASSWORD" --eval "db.adminCommand('ping')"; then
+    log_error "Failed to verify management user access"
+    return 1
+  fi
 
-  log_error "Failed to verify management user access after $verify_attempts attempts"
-  return 1
-}
-
-# Updated helper function for MongoDB connections
-mongo_authenticated_command() {
-  local username=$1
-  local password=$2
-  local command=$3
-  local database=${4:-admin}
-
-  docker exec mongodb mongosh --quiet \
-    -u "$username" \
-    -p "$password" \
-    --authenticationDatabase "$database" \
-    --eval "$command"
+  log "Management user setup completed successfully"
+  return 0
 }
 
 adjust_firewall_settings() {
   log "Adjusting firewall settings..."
-  TRUSTED_IP="138.199.165.36"
+  TRUSTED_IP="128.140.53.203"
   if command -v ufw > /dev/null 2>&1; then
     ufw allow from $TRUSTED_IP to any port 27017 proto tcp
     log "Allowed port 27017 for trusted IP $TRUSTED_IP."
@@ -567,202 +526,28 @@ adjust_firewall_settings() {
   log "Firewall settings adjusted."
 }
 
-configure_network() {
-  log "Configuring network access to front server..."
-
-  # Allow front server IP to access MongoDB
-  FRONT_SERVER_IP="138.199.165.36"
-  ufw allow from "$FRONT_SERVER_IP" to any port 27017 proto tcp
-
-  # Allow agent to reach frontdoor API
-  ufw allow out to "$FRONT_SERVER_IP" port 3000 proto tcp
-
-  log "Network rules configured for front server access"
-}
-
-register_with_frontdoor() {
-  log "Registering agent with frontdoor service..."
-
-  local PUBLIC_IP=$(curl -s https://api.ipify.org)
-  local API_URL="$FRONTDOOR_API_URL/api/frontdoor/add-subdomain"
-
-  curl -X POST "$API_URL" \
-    -H "Authorization: Bearer $FRONTDOOR_API_TOKEN" \
-    -H "Content-Type: application/json" \
-    -d @- << EOF
-{
-    "subdomain": "$SERVER_ID.$FRONTDOOR_SUBDOMAIN_BASE",
-    "targetIp": "$PUBLIC_IP"
-}
-EOF
-
-  log "Registration complete. Subdomain: $SERVER_ID.$FRONTDOOR_SUBDOMAIN_BASE"
-}
-
-verify_frontdoor_connection() {
-  log "Verifying frontdoor service connection..."
-
-  response=$(curl -s -o /dev/null -w "%{http_code}" \
-    -H "Authorization: Bearer $FRONTDOOR_API_TOKEN" \
-    "$FRONTDOOR_API_URL/api/frontdoor/add-subdomain")
-
-  if [ "$response" -eq 401 ]; then
-    log_error "Invalid API token"
-    exit 1
-  elif [ "$response" -ne 200 ]; then
-    log_error "Connection failed (HTTP $response)"
-    exit 1
-  fi
-
-  log "Frontdoor service connection verified"
-}
-
-create_frontdoor_config() {
-  log "Creating frontdoor API configuration..."
-  mkdir -p /etc/cloudlunacy
-
-  cat << EOF > "$FRONTDOOR_CONFIG"
-# CloudLunacy Frontdoor Configuration
-FRONTDOOR_API_URL="${FRONTDOOR_API_URL}"
-FRONTDOOR_API_TOKEN="${FRONTDOOR_API_TOKEN}"
-FRONTDOOR_SUBDOMAIN_BASE="${FRONTDOOR_SUBDOMAIN_BASE}"
-EOF
-
-  chmod 600 "$FRONTDOOR_CONFIG"
-  log "Frontdoor configuration created at $FRONTDOOR_CONFIG"
-
-  # Security validation
-  if ! curl -sI "${FRONTDOOR_API_URL}/health" | grep -q "200 OK"; then
-    log_warn "Could not verify frontdoor API connectivity"
-  fi
-}
-
-get_public_ip() {
-  log "Obtaining public IP address..."
-  local max_retries=3
-  local retry_delay=5
-
-  for ((i = 1; i <= max_retries; i++)); do
-    PUBLIC_IP=$(curl -s --fail https://api.ipify.org)
-    if [ -n "$PUBLIC_IP" ]; then
-      log "Public IP obtained: $PUBLIC_IP"
-      return 0
-    fi
-    log_warn "Failed to get public IP (attempt $i/$max_retries)"
-    sleep $retry_delay
-  done
-
-  log_error "Could not determine public IP"
-  return 1
-}
-
-generate_subdomain() {
-  # Create a short hash from SERVER_ID (first 12 characters of the SHA256 sum)
-  local hash=$(echo -n "$SERVER_ID" | sha256sum | cut -c1-12)
-  local prefix="cl-${hash}"
-
-  # Sanitize: Replace any non-alphanumeric/dash characters with dashes
-  prefix=${prefix//[^a-z0-9-]/-}
-  # Trim to a maximum of 24 characters (if needed)
-  prefix=${prefix:0:24}
-
-  # Append the front door base domain so the full subdomain becomes:
-  # cl-<hash>.mongodb.cloudlunacy.uk
-  echo "${prefix}.${FRONTDOOR_SUBDOMAIN_BASE}"
-}
-
-validate_subdomain() {
-  local subdomain="$1"
-
-  # Basic DNS validation
-  if [[ ! "$subdomain" =~ ^[a-z0-9-]{1,24}$ ]]; then
-    log_error "Invalid subdomain format: $subdomain"
-    return 1
-  fi
-
-  # Check against DNS restrictions
-  if [[ "$subdomain" == -* || "$subdomain" == *- ]]; then
-    log_error "Subdomain cannot start/end with dash: $subdomain"
-    return 1
-  fi
-
-  return 0
-}
-
-register_subdomain() {
-  log "Registering subdomain with front server..."
-
-  local api_url="${FRONTDOOR_API_URL}/api/frontdoor/add-subdomain"
-  local subdomain="$(generate_subdomain)"
-
-  local response=$(
-    curl -s -o /dev/null -w "%{http_code}" \
-      -X POST "$api_url" \
-      -H "Authorization: Bearer ${FRONTDOOR_API_TOKEN}" \
-      -H "Content-Type: application/json" \
-      -d @- << EOF
-{
-    "subdomain": "$subdomain",
-    "targetIp": "$PUBLIC_IP"
-}
-EOF
-  )
-
-  case "$response" in
-    200 | 201)
-      log "Subdomain registered: $subdomain → $PUBLIC_IP"
-      return 0
-      ;;
-    401)
-      log_error "Invalid API token"
-      return 1
-      ;;
-    409)
-      log_error "Subdomain already exists"
-      return 1
-      ;;
-    *)
-      log_error "Registration failed (HTTP $response)"
-      return 1
-      ;;
-  esac
-}
-
-load_frontdoor_config() {
-  # No need for existence check - we create it earlier
-  source "$FRONTDOOR_CONFIG"
-
-  # Add validation for good measure
-  if [ -z "$FRONTDOOR_API_URL" ] || [ -z "$FRONTDOOR_API_TOKEN" ]; then
-    log_error "Frontdoor configuration invalid"
-    exit 1
-  fi
-}
-
-configure_environment() {
+configure_env() {
   log "Configuring environment variables..."
   ENV_FILE="$BASE_DIR/.env"
 
-  # Ensure MongoDB environment file exists
+  mkdir -p "$BASE_DIR"
+
   if [ ! -f "$MONGO_ENV_FILE" ]; then
     log_error "MongoDB environment file not found at $MONGO_ENV_FILE"
     return 1
   fi
 
-  # Source the MongoDB environment file
-  set +u # Temporarily disable errors for unbound variables
+  set +u
   source "$MONGO_ENV_FILE"
   set -u
 
-  # Verify required MongoDB variables are set
   if [ -z "${MONGO_MANAGER_USERNAME:-}" ] || [ -z "${MONGO_MANAGER_PASSWORD:-}" ]; then
     log_error "MongoDB manager credentials not found in environment file"
     return 1
   fi
 
-  # Log verification of credentials (without exposing them)
   log "Verifying MongoDB manager credentials..."
-  if ! docker exec mongodb mongosh \
+  if ! docker exec mongodb mongosh --quiet \
     -u "${MONGO_MANAGER_USERNAME}" \
     -p "${MONGO_MANAGER_PASSWORD}" \
     --eval "db.adminCommand('ping')" &> /dev/null; then
@@ -772,37 +557,26 @@ configure_environment() {
 
   log "MongoDB manager credentials verified successfully"
 
-  # Create environment file with explicit values
   cat > "$ENV_FILE" << EOL
 BACKEND_URL="${BACKEND_URL:-https://your-default-backend-url}"
 AGENT_API_TOKEN="${AGENT_TOKEN}"
 SERVER_ID="${SERVER_ID}"
 MONGO_MANAGER_USERNAME="${MONGO_MANAGER_USERNAME}"
 MONGO_MANAGER_PASSWORD="${MONGO_MANAGER_PASSWORD}"
-MONGO_HOST="localhost"
+MONGO_HOST="$DOMAIN"
 MONGO_PORT=27017
 NODE_ENV=production
-FRONTDOOR_API_URL="$FRONTDOOR_API_URL"
-FRONTDOOR_API_TOKEN="$FRONTDOOR_API_TOKEN"
-PUBLIC_IP="$PUBLIC_IP"
 EOL
 
   chown "$USERNAME:$USERNAME" "$ENV_FILE"
   chmod 600 "$ENV_FILE"
 
-  # Verify file contents
   if [ ! -s "$ENV_FILE" ]; then
     log_error "Environment file is empty or not created properly"
     return 1
   fi
 
-  # Verify required variables are present
-  local required_vars=(
-    "MONGO_MANAGER_USERNAME"
-    "MONGO_MANAGER_PASSWORD"
-    "MONGO_HOST"
-  )
-
+  local required_vars=("MONGO_MANAGER_USERNAME" "MONGO_MANAGER_PASSWORD" "MONGO_HOST")
   for var in "${required_vars[@]}"; do
     if ! grep -q "^${var}=" "$ENV_FILE"; then
       log_error "Missing required variable ${var} in environment file"
@@ -888,18 +662,15 @@ setup_service() {
   log "Setting up CloudLunacy Deployment Agent as a systemd service..."
   SERVICE_FILE="/etc/systemd/system/cloudlunacy.service"
 
-  # Set up logging directory with proper permissions
   LOG_DIR="/var/log/cloudlunacy"
   mkdir -p "$LOG_DIR"
   chown -R "$USERNAME:$USERNAME" "$LOG_DIR"
   chmod 750 "$LOG_DIR"
 
-  # Create log files
   touch "$LOG_DIR/app.log" "$LOG_DIR/error.log"
   chown "$USERNAME:$USERNAME" "$LOG_DIR/app.log" "$LOG_DIR/error.log"
   chmod 640 "$LOG_DIR/app.log" "$LOG_DIR/error.log"
 
-  # First, verify Node.js can run the application
   log "Verifying Node.js application..."
   if ! sudo -u "$USERNAME" bash -c "cd $BASE_DIR && NODE_ENV=production node -e 'require(\"./agent.js\")'" 2> "$LOG_DIR/verify.log"; then
     log_error "Node.js application verification failed. Check $LOG_DIR/verify.log for details"
@@ -907,7 +678,6 @@ setup_service() {
     return 1
   fi
 
-  # Create systemd service file with debug logging
   cat > "$SERVICE_FILE" << EOF
 [Unit]
 Description=CloudLunacy Deployment Agent
@@ -922,28 +692,23 @@ WorkingDirectory=$BASE_DIR
 RuntimeDirectory=cloudlunacy
 RuntimeDirectoryMode=0750
 
-# Environment setup
 Environment="HOME=$BASE_DIR"
 Environment="NODE_ENV=production"
 Environment="DEBUG=*"
 Environment="NODE_DEBUG=*"
 EnvironmentFile=$BASE_DIR/.env
 
-# Execution
 ExecStart=/usr/bin/node --trace-warnings $BASE_DIR/agent.js
 ExecStartPre=/usr/bin/node -c $BASE_DIR/agent.js
 
-# Logging
 StandardOutput=append:$LOG_DIR/app.log
 StandardError=append:$LOG_DIR/error.log
 
-# Restart configuration
 Restart=always
 RestartSec=10
 StartLimitInterval=200
 StartLimitBurst=5
 
-# Security
 ProtectSystem=full
 ReadWriteDirectories=$BASE_DIR $LOG_DIR
 PrivateTmp=true
@@ -955,17 +720,8 @@ EOF
 
   chmod 644 "$SERVICE_FILE"
 
-  # Verify environment file has required variables
   ENV_CHECK=($BASE_DIR/.env)
-  REQUIRED_VARS=(
-    "BACKEND_URL"
-    "AGENT_API_TOKEN"
-    "SERVER_ID"
-    "MONGO_MANAGER_USERNAME"
-    "MONGO_MANAGER_PASSWORD"
-    "MONGO_HOST"
-  )
-
+  REQUIRED_VARS=("BACKEND_URL" "AGENT_API_TOKEN" "SERVER_ID" "MONGO_MANAGER_USERNAME" "MONGO_MANAGER_PASSWORD" "MONGO_HOST")
   log "Verifying environment variables..."
   for var in "${REQUIRED_VARS[@]}"; do
     if ! grep -q "^${var}=" "$BASE_DIR/.env"; then
@@ -974,7 +730,6 @@ EOF
     fi
   done
 
-  # Reload systemd and restart service
   systemctl daemon-reload
   systemctl stop cloudlunacy 2> /dev/null || true
   sleep 2
@@ -983,29 +738,21 @@ EOF
   systemctl start cloudlunacy
   sleep 5
 
-  # Check service status with enhanced diagnostics
   if ! systemctl is-active --quiet cloudlunacy; then
     log_error "Service failed to start. Diagnostics:"
-
     echo "Node.js Version:"
     node --version
-
     echo "Environment File Contents (sanitized):"
     grep -v "PASSWORD\|TOKEN" "$BASE_DIR/.env" || true
-
     echo "Service Status:"
     systemctl status cloudlunacy
-
     echo "Service Logs:"
     tail -n 50 "$LOG_DIR/error.log"
-
     echo "Node.js Application Logs:"
     tail -n 50 "$LOG_DIR/app.log"
-
     return 1
   fi
 
-  # Enable service for boot
   systemctl enable cloudlunacy
 
   log "CloudLunacy service setup completed successfully"
@@ -1014,44 +761,29 @@ EOF
 
 verify_installation() {
   log "Verifying CloudLunacy Deployment Agent installation..."
-
-  # Wait a bit for the service to stabilize
   sleep 5
-
   if ! systemctl is-active --quiet cloudlunacy; then
     log_error "CloudLunacy Deployment Agent failed to start. Debug information:"
-
-    # Check Node.js installation
     log_error "------- Node.js Version -------"
     node --version
-
-    # Check agent.js existence and permissions
     log_error "------- Agent.js Status -------"
     ls -l /opt/cloudlunacy/agent.js
-
-    # Service Logs with more context
     log_error "------- Service Status -------"
     systemctl status cloudlunacy
-
     log_error "------- Detailed Service Logs -------"
     journalctl -u cloudlunacy -n 50 --no-pager
-
     log_error "------- Environment File Contents -------"
     cat "$BASE_DIR/.env"
-
     log_error "------- MongoDB CA File Status -------"
-    ls -la /etc/ssl/mongo/
-
+    ls -la /etc/ssl/mongo/ 2> /dev/null || echo "CA file not used in this configuration."
     log_error "------- Agent Log File -------"
     if [ -f "$BASE_DIR/logs/agent.log" ]; then
       tail -n 50 "$BASE_DIR/logs/agent.log"
     else
       echo "Agent log file not found at $BASE_DIR/logs/agent.log"
     fi
-
     return 1
   fi
-
   log "CloudLunacy Deployment Agent is running successfully."
 }
 
@@ -1065,13 +797,12 @@ completion_message() {
                        |___/
 \033[0m"
   echo -e "\nYour CloudLunacy Deployment Agent is ready to use."
-
   PUBLIC_IP=$(curl -s https://api.ipify.org || true)
   if [ -z "$PUBLIC_IP" ]; then
     PUBLIC_IP="your_server_ip"
     echo -e "Could not retrieve public IP address. Please replace 'your_server_ip' with your actual IP."
   fi
-
+  echo -e "Your front server will now handle subdomain routing and certificate management."
   echo -e "Logs are located at: $BASE_DIR/logs/agent.log"
   echo -e "It's recommended to back up your environment file:"
   echo -e "cp $BASE_DIR/.env $BASE_DIR/.env.backup"
@@ -1092,73 +823,51 @@ main() {
 
   AGENT_TOKEN="$1"
   SERVER_ID="$2"
-  BACKEND_BASE_URL="${3:-https://your-default-backend-url}"
+  EMAIL="$3"
+  BACKEND_BASE_URL="${4:-https://your-default-backend-url}"
   BACKEND_URL="${BACKEND_BASE_URL}"
 
-  # 1) Basic environment detection & updates first
+  # 1) Basic environment detection & updates
   detect_os
   update_system
   install_dependencies
 
-  # 2) Now install Docker before we call any 'docker' commands
+  # 2) Install Docker and Node.js
   install_docker
-
-  # 3) Then set up your user
-  setup_user_directories
-
-  create_frontdoor_config
-  load_frontdoor_config
-
-  # 4) Install MongoDB Shell, Node.js, Docker permissions, etc.
-  install_mongosh
   install_node
+
+  # 3) Set up dedicated user and environment
+  setup_user_directories
+  configure_env
+
+  # 4) Install mongosh and set up Docker permissions
+  install_mongosh
   setup_docker_permissions
+
+  # 5) Download agent code and install dependencies
   download_agent
   install_agent_dependencies
   stop_conflicting_containers
 
-  # Clean up any existing MongoDB containers
+  # 6) Clean up any existing MongoDB containers
   log "Cleaning up any existing MongoDB containers..."
   docker rm -f mongodb 2> /dev/null || true
   docker volume rm -f $(docker volume ls -q --filter name=mongo_data) 2> /dev/null || true
 
-  # 5) Set up MongoDB
+  # 7) Set up MongoDB (two-phase: create root user then restart with auth)
   setup_mongodb
   create_mongo_management_user
 
-  # 6) Obtain public IP
-  if ! get_public_ip; then
-    log_error "Cannot proceed without public IP"
-    exit 1
-  fi
-
-  # 7) Register subdomain with the front door
-  if ! register_subdomain; then
-    log_error "Subdomain registration failed - check front server status"
-    exit 1
-  fi
-
-  # 8) Adjust firewall settings
+  # 8) Adjust firewall settings and finish environment configuration
   adjust_firewall_settings
 
-  # 9) Configure environment variables **after** MongoDB setup
-  configure_environment
-
-  # 10) Configure network
-  configure_network
-
-  # 11) Set up systemd service
+  # 9) Set up the CloudLunacy Deployment Agent as a systemd service
   setup_service
 
-  # 12) Verify installation
+  # 10) Verify installation and show completion message
   verify_installation
-
-  # 13) Completion message and credentials display
   completion_message
   display_mongodb_credentials
-
-  # 14) Verify frontdoor connection
-  verify_frontdoor_connection
 }
 
 main "$@"
