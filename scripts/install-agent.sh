@@ -436,8 +436,12 @@ create_mongo_management_user() {
     return 1
   fi
 
+  # Source environment variables with proper error handling
   set +u
-  source "$MONGO_ENV_FILE"
+  if ! source "$MONGO_ENV_FILE"; then
+    log_error "Failed to source MongoDB environment file"
+    return 1
+  fi
   set -u
 
   if [ -z "${MONGO_INITDB_ROOT_USERNAME:-}" ] || [ -z "${MONGO_INITDB_ROOT_PASSWORD:-}" ]; then
@@ -447,20 +451,33 @@ create_mongo_management_user() {
 
   local max_retries=3
   local retry_count=0
+  local connection_success=false
+
+  # Wait for MongoDB to be ready with root credentials
   while [ $retry_count -lt $max_retries ]; do
-    if docker exec mongodb mongosh --quiet -u "${MONGO_INITDB_ROOT_USERNAME}" -p "${MONGO_INITDB_ROOT_PASSWORD}" --eval "db.adminCommand('ping')" ; then
+    if docker exec mongodb mongosh --quiet \
+      -u "${MONGO_INITDB_ROOT_USERNAME}" \
+      -p "${MONGO_INITDB_ROOT_PASSWORD}" \
+      --authenticationDatabase admin \
+      --eval "db.adminCommand('ping')" >/dev/null 2>&1; then
+      connection_success=true
       break
     fi
     log "Waiting for MongoDB to be ready (attempt $((retry_count + 1))/$max_retries)..."
     sleep 10
     retry_count=$((retry_count + 1))
   done
-  if [ $retry_count -eq $max_retries ]; then
+
+  if ! $connection_success; then
     log_error "Failed to connect to MongoDB after $max_retries attempts"
     return 1
   fi
 
-  docker exec mongodb mongosh --quiet <<EOF
+  # Create/update management user with proper authentication
+  docker exec mongodb mongosh --quiet \
+    -u "${MONGO_INITDB_ROOT_USERNAME}" \
+    -p "${MONGO_INITDB_ROOT_PASSWORD}" \
+    --authenticationDatabase admin <<EOF
 var adminDB = db.getSiblingDB('admin');
 var user = adminDB.getUser("${MONGO_MANAGER_USERNAME}");
 if (!user) {
@@ -470,7 +487,8 @@ if (!user) {
     roles: [
       {role: 'userAdminAnyDatabase', db: 'admin'},
       {role: 'readWriteAnyDatabase', db: 'admin'},
-      {role: 'clusterMonitor', db: 'admin'}
+      {role: 'clusterMonitor', db: 'admin'},
+      {role: 'dbAdminAnyDatabase', db: 'admin'}
     ]
   });
 } else {
@@ -479,7 +497,8 @@ if (!user) {
     roles: [
       {role: 'userAdminAnyDatabase', db: 'admin'},
       {role: 'readWriteAnyDatabase', db: 'admin'},
-      {role: 'clusterMonitor', db: 'admin'}
+      {role: 'clusterMonitor', db: 'admin'},
+      {role: 'dbAdminAnyDatabase', db: 'admin'}
     ]
   });
 }
@@ -490,25 +509,49 @@ EOF
     return 1
   fi
 
-  # Update the environment file with the credentials
-  cat <<EOF > "$MONGO_ENV_FILE"
-MONGO_INITDB_ROOT_USERNAME=${MONGO_INITDB_ROOT_USERNAME}
-MONGO_INITDB_ROOT_PASSWORD=${MONGO_INITDB_ROOT_PASSWORD}
-MONGO_MANAGER_USERNAME=${MONGO_MANAGER_USERNAME}
-MONGO_MANAGER_PASSWORD=${MONGO_MANAGER_PASSWORD}
-EOF
+  # Update environment file with proper permissions
+  if ! grep -q "MONGO_MANAGER_USERNAME" "$MONGO_ENV_FILE"; then
+    echo "MONGO_MANAGER_USERNAME=${MONGO_MANAGER_USERNAME}" >> "$MONGO_ENV_FILE"
+  fi
+  if ! grep -q "MONGO_MANAGER_PASSWORD" "$MONGO_ENV_FILE"; then
+    echo "MONGO_MANAGER_PASSWORD=${MONGO_MANAGER_PASSWORD}" >> "$MONGO_ENV_FILE"
+  fi
 
   chown "$USERNAME":"$USERNAME" "$MONGO_ENV_FILE"
   chmod 600 "$MONGO_ENV_FILE"
 
+  # Enhanced verification with retries
   log "Verifying management user access..."
-  if ! docker exec mongodb mongosh --quiet -u "${MONGO_MANAGER_USERNAME}" -p "${MONGO_MANAGER_PASSWORD}" --authenticationDatabase "admin" --eval "db.adminCommand('ping')" ; then
-    log_error "Failed to verify management user access"
-    return 1
-  fi
+  local verify_attempts=3
+  for ((i=1; i<=verify_attempts; i++)); do
+    if docker exec mongodb mongosh --quiet \
+      -u "${MONGO_MANAGER_USERNAME}" \
+      -p "${MONGO_MANAGER_PASSWORD}" \
+      --authenticationDatabase admin \
+      --eval "db.adminCommand('ping')" >/dev/null 2>&1; then
+      log "Management user verification successful"
+      return 0
+    fi
+    log "Verification attempt $i failed, retrying..."
+    sleep 5
+  done
 
-  log "Management user setup completed successfully"
-  return 0
+  log_error "Failed to verify management user access after $verify_attempts attempts"
+  return 1
+}
+
+# Updated helper function for MongoDB connections
+mongo_authenticated_command() {
+  local username=$1
+  local password=$2
+  local command=$3
+  local database=${4:-admin}
+
+  docker exec mongodb mongosh --quiet \
+    -u "$username" \
+    -p "$password" \
+    --authenticationDatabase "$database" \
+    --eval "$command"
 }
 
 adjust_firewall_settings() {
