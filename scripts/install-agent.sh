@@ -340,135 +340,61 @@ COMPOSE
 
 create_mongo_management_user() {
     log "Creating/updating MongoDB management user..."
-
-    # Validate environment file
-    if [ ! -f "$MONGO_ENV_FILE" ]; then
-        log_error "MongoDB environment file not found at $MONGO_ENV_FILE"
-        return 1
-    fi
-
-    # Load credentials with error handling
-    set +u
-    if ! source "$MONGO_ENV_FILE"; then
-        log_error "Failed to source MongoDB environment file"
-        return 1
-    fi
-    set -u
-
-    # Verify root credentials exist
-    if [[ -z "$MONGO_INITDB_ROOT_USERNAME" || -z "$MONGO_INITDB_ROOT_PASSWORD" ]]; then
-        log_error "Root credentials not found in environment file"
-        return 1
-    fi
-
-    # Connection retry parameters
-    local max_retries=5
-    local retry_delay=5
-    local retry_count=0
-    local connection_success=false
-
+    
+    # Load environment variables
+    source "$MONGO_ENV_FILE"
+    
     # Wait for MongoDB to be ready
-    log "Waiting for MongoDB connection..."
-    while [ $retry_count -lt $max_retries ]; do
+    local retries=5
+    local wait_time=5
+    for ((i=1; i<=retries; i++)); do
         if docker exec mongodb mongosh --quiet \
             -u "$MONGO_INITDB_ROOT_USERNAME" \
             -p "$MONGO_INITDB_ROOT_PASSWORD" \
             --authenticationDatabase admin \
-            --eval "db.adminCommand('ping')" >/dev/null 2>&1; then
-            connection_success=true
+            --eval "db.adminCommand('ping')" &>/dev/null; then
             break
         fi
-        retry_count=$((retry_count + 1))
-        log "Connection attempt $retry_count/$max_retries failed, retrying..."
-        sleep $retry_delay
+        log "Waiting for MongoDB connection ($i/$retries)..."
+        sleep $wait_time
     done
 
-    if ! $connection_success; then
-        log_error "Failed to connect to MongoDB after $max_retries attempts"
-        return 1
-    fi
-
     # Create/update management user
-    log "Configuring management user..."
-    if ! docker exec mongodb mongosh --quiet \
+    docker exec mongodb mongosh --quiet \
         -u "$MONGO_INITDB_ROOT_USERNAME" \
         -p "$MONGO_INITDB_ROOT_PASSWORD" \
         --authenticationDatabase admin <<EOF
-var adminDB = db.getSiblingDB('admin');
-var user = adminDB.getUser("$MONGO_MANAGER_USERNAME");
-if (!user) {
-    adminDB.createUser({
-        user: "$MONGO_MANAGER_USERNAME",
-        pwd: "$MONGO_MANAGER_PASSWORD",
-        roles: [
-            { role: 'userAdminAnyDatabase', db: 'admin' },
-            { role: 'readWriteAnyDatabase', db: 'admin' },
-            { role: 'clusterMonitor', db: 'admin' },
-            { role: 'dbAdminAnyDatabase', db: 'admin' }
-        ]
-    });
-} else {
-    adminDB.updateUser("$MONGO_MANAGER_USERNAME", {
-        pwd: "$MONGO_MANAGER_PASSWORD",
-        roles: [
-            { role: 'userAdminAnyDatabase', db: 'admin' },
-            { role: 'readWriteAnyDatabase', db: 'admin' },
-            { role: 'clusterMonitor', db: 'admin' },
-            { role: 'dbAdminAnyDatabase', db: 'admin' }
-        ]
-    });
-}
+use admin
+db.createUser({
+  user: "$MONGO_MANAGER_USERNAME",
+  pwd: "$MONGO_MANAGER_PASSWORD",
+  roles: [
+    {role: 'userAdminAnyDatabase', db: 'admin'},
+    {role: 'readWriteAnyDatabase', db: 'admin'},
+    {role: 'clusterMonitor', db: 'admin'},
+    {role: 'dbAdminAnyDatabase', db: 'admin'},
+    {role: 'root', db: 'admin'}
+  ]
+})
 EOF
-    then
-        log_error "Failed to create/update management user"
-        return 1
-    fi
 
-    # Update environment file
-    log "Updating credentials file..."
-    {
-        echo "MONGO_INITDB_ROOT_USERNAME=$MONGO_INITDB_ROOT_USERNAME"
-        echo "MONGO_INITDB_ROOT_PASSWORD=$MONGO_INITDB_ROOT_PASSWORD" 
-        echo "MONGO_MANAGER_USERNAME=$MONGO_MANAGER_USERNAME"
-        echo "MONGO_MANAGER_PASSWORD=$MONGO_MANAGER_PASSWORD"
-    } > "$MONGO_ENV_FILE"
-
-    # Set proper permissions
-    chown "$USERNAME":"$USERNAME" "$MONGO_ENV_FILE"
-    chmod 600 "$MONGO_ENV_FILE"
-
-    # Verification parameters
+    # Verify with enhanced retry logic
     local verify_attempts=5
-    local verify_success=false
-
-    # Verify management user access
-    log "Verifying management user credentials..."
     for ((i=1; i<=verify_attempts; i++)); do
         if docker exec mongodb mongosh --quiet \
             -u "$MONGO_MANAGER_USERNAME" \
             -p "$MONGO_MANAGER_PASSWORD" \
             --authenticationDatabase admin \
-            --eval "db.adminCommand('ping')" >/dev/null 2>&1; then
-            verify_success=true
-            break
+            --eval "db.adminCommand('ping')"; then
+            log "Management user verified successfully"
+            return 0
         fi
-        log "Verification attempt $i/$verify_attempts failed, retrying..."
-        sleep $retry_delay
+        log "Verification attempt $i failed, retrying..."
+        sleep 3
     done
 
-    if $verify_success; then
-        log "Management user configured successfully"
-        return 0
-    else
-        log_error "Management user verification failed after $verify_attempts attempts"
-        log_error "Last MongoDB error:"
-        docker exec mongodb mongosh --quiet \
-            -u "$MONGO_MANAGER_USERNAME" \
-            -p "$MONGO_MANAGER_PASSWORD" \
-            --authenticationDatabase admin \
-            --eval "db.adminCommand('ping')"
-        return 1
-    fi
+    log_error "Failed to verify management user after $verify_attempts attempts"
+    return 1
 }
 
 configure_env() {
