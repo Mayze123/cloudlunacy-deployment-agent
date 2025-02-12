@@ -1,15 +1,14 @@
 #!/bin/bash
 # ------------------------------------------------------------------------------
-# Installation Script for CloudLunacy Deployment Agent and MongoDB with TLS
-# Version: 2.8.0
-# Author: Mahamadou Taibou (Updated)
-# Date: 2025-02-12
+# Installation Script for CloudLunacy Deployment Agent
+# Version: 2.6.0 (Simplified without Traefik/TLS)
+# Author: Mahamadou Taibou
+# Date: 2024-12-01
 #
 # Description:
-# This script installs and configures the CloudLunacy Deployment Agent on a VPS,
-# and deploys a MongoDB instance with TLS enabled via Docker Compose.
-# Each VPS gets its own MongoDB instance running on its own subdomain.
+# This script installs and configures the CloudLunacy Deployment Agent on a VPS.
 # ------------------------------------------------------------------------------
+
 set -euo pipefail
 IFS=$'\n\t'
 
@@ -22,12 +21,13 @@ BASE_DIR="/opt/cloudlunacy"
 # ----------------------------
 # Function Definitions
 # ----------------------------
+
 display_info() {
   echo "-------------------------------------------------"
-  echo "CloudLunacy Deployment Agent & MongoDB Installation Script"
-  echo "Version: 2.8.0 (Updated with edge-case handling)"
+  echo "CloudLunacy Deployment Agent Installation Script"
+  echo "Version: 2.6.0 (Simplified)"
   echo "Author: Mahamadou Taibou"
-  echo "Date: 2025-02-12"
+  echo "Date: 2024-12-01"
   echo "-------------------------------------------------"
 }
 
@@ -159,7 +159,7 @@ install_docker() {
     log "Docker installed successfully."
   fi
 
-  # Install Docker Compose if not available
+  # Install Docker Compose
   log "Checking Docker Compose installation..."
   if command -v docker-compose > /dev/null 2>&1; then
     log "Docker Compose is already installed."
@@ -201,6 +201,8 @@ install_node() {
   log "Node.js installed successfully."
 }
 
+
+
 configure_env() {
   log "Configuring environment variables..."
   ENV_FILE="$BASE_DIR/.env"
@@ -234,18 +236,10 @@ setup_user_directories() {
 }
 
 download_agent() {
-  log "Cloning or updating the CloudLunacy Deployment Agent repository..."
-  if [ -d "$BASE_DIR/.git" ]; then
-    log "Repository already exists. Updating repository..."
-    cd "$BASE_DIR"
-    sudo -u "$USERNAME" git pull || log_warn "Git pull failed, please check repository status."
-  elif [ -d "$BASE_DIR" ] && [ "$(ls -A "$BASE_DIR")" ]; then
-    log_warn "Directory $BASE_DIR exists and is not empty but does not appear to be a Git repository. Skipping clone."
-  else
-    sudo -u "$USERNAME" git clone https://github.com/Mayze123/cloudlunacy-deployment-agent.git "$BASE_DIR"
-  fi
+  log "Cloning the CloudLunacy Deployment Agent repository..."
+  sudo -u "$USERNAME" git clone https://github.com/Mayze123/cloudlunacy-deployment-agent.git "$BASE_DIR"
   chown -R "$USERNAME":"$USERNAME" "$BASE_DIR"
-  log "Agent repository is present at $BASE_DIR."
+  log "Agent cloned to $BASE_DIR."
 }
 
 install_agent_dependencies() {
@@ -300,105 +294,16 @@ EOF
 }
 
 verify_installation() {
-  log "Verifying CloudLunacy Deployment Agent installation..."
+  log "Verifying installation..."
   sleep 5
   if systemctl is-active --quiet cloudlunacy; then
     log "CloudLunacy Deployment Agent is running successfully."
   else
-    log_error "Agent service failed to start. Check logs with: journalctl -u cloudlunacy"
+    log_error "Service failed to start. Check logs with: journalctl -u cloudlunacy"
     return 1
   fi
 }
 
-# ----------------------------
-# New Function: Setup MongoDB with TLS via Docker Compose
-# ----------------------------
-setup_mongodb() {
-  log "Setting up MongoDB instance with TLS..."
-  
-  # Define MongoDB directories and files
-  MONGODB_BASE_DIR="/opt/cloudlunacy/mongodb"
-  MONGODB_COMPOSE_FILE="$MONGODB_BASE_DIR/docker-compose.yml"
-  MONGODB_CERT_DIR="/etc/ssl/mongodb"
-  
-  # Determine the MongoDB subdomain (default: hostname appended with .mongodb.cloudlunacy.uk)
-  MONGODB_SUBDOMAIN="${MONGODB_SUBDOMAIN:-$(hostname)}.mongodb.cloudlunacy.uk"
-  log "MongoDB will be accessible at: $MONGODB_SUBDOMAIN (ensure your DNS wildcard *.mongodb.cloudlunacy.uk points to this VPS)"
-  
-  # Create the certificate directory if it does not exist
-  if [ ! -d "$MONGODB_CERT_DIR" ]; then
-    mkdir -p "$MONGODB_CERT_DIR"
-    chmod 700 "$MONGODB_CERT_DIR"
-    log "Created certificate directory: $MONGODB_CERT_DIR"
-  fi
-
-  # Generate a self-signed TLS certificate if one is not already provided
-  if [ ! -f "$MONGODB_CERT_DIR/mongodb.pem" ]; then
-    log "TLS certificate not found. Generating a self-signed certificate for $MONGODB_SUBDOMAIN..."
-    openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-      -keyout "$MONGODB_CERT_DIR/mongodb.key" \
-      -out "$MONGODB_CERT_DIR/mongodb.crt" \
-      -subj "/CN=$MONGODB_SUBDOMAIN"
-    # Combine the key and certificate into a single PEM file
-    cat "$MONGODB_CERT_DIR/mongodb.key" "$MONGODB_CERT_DIR/mongodb.crt" > "$MONGODB_CERT_DIR/mongodb.pem"
-    rm "$MONGODB_CERT_DIR/mongodb.key" "$MONGODB_CERT_DIR/mongodb.crt"
-    chmod 600 "$MONGODB_CERT_DIR/mongodb.pem"
-    log "Self-signed certificate generated at $MONGODB_CERT_DIR/mongodb.pem"
-  else
-    log "Existing TLS certificate found at $MONGODB_CERT_DIR/mongodb.pem"
-  fi
-
-  # Create the MongoDB base directory for data and compose file if it doesn't exist
-  if [ ! -d "$MONGODB_BASE_DIR" ]; then
-    mkdir -p "$MONGODB_BASE_DIR"
-    log "Created MongoDB base directory: $MONGODB_BASE_DIR"
-  fi
-
-  # Optional: Check if a CA certificate exists and set the option accordingly
-  TLS_CA_OPTION=""
-  if [ -f "$MONGODB_CERT_DIR/ca.pem" ]; then
-    TLS_CA_OPTION="--tlsCAFile /etc/ssl/mongodb/ca.pem"
-    log "Found CA certificate at $MONGODB_CERT_DIR/ca.pem; it will be used in MongoDB configuration."
-  fi
-
-  # Create (or update) the docker-compose file for MongoDB
-  log "Creating/updating docker-compose file for MongoDB..."
-  cat > "$MONGODB_COMPOSE_FILE" << EOF
-version: '3.8'
-services:
-  mongodb:
-    image: mongo:latest
-    container_name: mongodb
-    restart: unless-stopped
-    ports:
-      - "27017:27017"
-    volumes:
-      - ${MONGODB_BASE_DIR}/data:/data/db
-      - ${MONGODB_CERT_DIR}:${MONGODB_CERT_DIR}:ro
-    command: >
-      mongod --tlsMode requireTLS
-             --tlsCertificateKeyFile ${MONGODB_CERT_DIR}/mongodb.pem ${TLS_CA_OPTION}
-EOF
-
-  log "MongoDB docker-compose file created/updated at $MONGODB_COMPOSE_FILE"
-
-  # Deploy MongoDB using Docker Compose
-  log "Deploying MongoDB container..."
-  cd "$MONGODB_BASE_DIR"
-  docker-compose up -d
-
-  # Verify that the MongoDB container is running
-  sleep 5
-  if docker ps --filter "name=mongodb" --filter "status=running" | grep mongodb > /dev/null; then
-    log "MongoDB is running successfully."
-  else
-    log_error "MongoDB container failed to start. Check logs with: docker logs mongodb"
-  fi
-}
-
-# ----------------------------
-# Main Function
-# ----------------------------
 main() {
   check_root
   display_info
@@ -421,9 +326,6 @@ main() {
   setup_docker_permissions
   setup_service
   verify_installation
-
-  # Deploy MongoDB with TLS
-  setup_mongodb
 
   log "Installation completed successfully!"
 }
