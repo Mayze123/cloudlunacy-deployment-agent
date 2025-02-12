@@ -1,12 +1,12 @@
 #!/bin/bash
 # ------------------------------------------------------------------------------
 # Installation Script for CloudLunacy Deployment Agent and MongoDB with TLS
-# Version: 2.7.0 (Updated with MongoDB TLS deployment)
+# Version: 2.8.0
 # Author: Mahamadou Taibou (Updated)
 # Date: 2025-02-12
 #
 # Description:
-# This script installs and configures the CloudLunacy Deployment Agent on a VPS
+# This script installs and configures the CloudLunacy Deployment Agent on a VPS,
 # and deploys a MongoDB instance with TLS enabled via Docker Compose.
 # Each VPS gets its own MongoDB instance running on its own subdomain.
 # ------------------------------------------------------------------------------
@@ -22,11 +22,10 @@ BASE_DIR="/opt/cloudlunacy"
 # ----------------------------
 # Function Definitions
 # ----------------------------
-
 display_info() {
   echo "-------------------------------------------------"
   echo "CloudLunacy Deployment Agent & MongoDB Installation Script"
-  echo "Version: 2.7.0 (Updated with MongoDB TLS deployment)"
+  echo "Version: 2.8.0 (Updated with edge-case handling)"
   echo "Author: Mahamadou Taibou"
   echo "Date: 2025-02-12"
   echo "-------------------------------------------------"
@@ -235,10 +234,18 @@ setup_user_directories() {
 }
 
 download_agent() {
-  log "Cloning the CloudLunacy Deployment Agent repository..."
-  sudo -u "$USERNAME" git clone https://github.com/Mayze123/cloudlunacy-deployment-agent.git "$BASE_DIR"
+  log "Cloning or updating the CloudLunacy Deployment Agent repository..."
+  if [ -d "$BASE_DIR/.git" ]; then
+    log "Repository already exists. Updating repository..."
+    cd "$BASE_DIR"
+    sudo -u "$USERNAME" git pull || log_warn "Git pull failed, please check repository status."
+  elif [ -d "$BASE_DIR" ] && [ "$(ls -A "$BASE_DIR")" ]; then
+    log_warn "Directory $BASE_DIR exists and is not empty but does not appear to be a Git repository. Skipping clone."
+  else
+    sudo -u "$USERNAME" git clone https://github.com/Mayze123/cloudlunacy-deployment-agent.git "$BASE_DIR"
+  fi
   chown -R "$USERNAME":"$USERNAME" "$BASE_DIR"
-  log "Agent cloned to $BASE_DIR."
+  log "Agent repository is present at $BASE_DIR."
 }
 
 install_agent_dependencies() {
@@ -341,21 +348,21 @@ setup_mongodb() {
     log "Existing TLS certificate found at $MONGODB_CERT_DIR/mongodb.pem"
   fi
 
-  # Create the MongoDB base directory for data and compose file
+  # Create the MongoDB base directory for data and compose file if it doesn't exist
   if [ ! -d "$MONGODB_BASE_DIR" ]; then
     mkdir -p "$MONGODB_BASE_DIR"
     log "Created MongoDB base directory: $MONGODB_BASE_DIR"
   fi
 
-  # Check if a CA certificate exists and set the option accordingly (optional)
+  # Optional: Check if a CA certificate exists and set the option accordingly
   TLS_CA_OPTION=""
   if [ -f "$MONGODB_CERT_DIR/ca.pem" ]; then
     TLS_CA_OPTION="--tlsCAFile /etc/ssl/mongodb/ca.pem"
     log "Found CA certificate at $MONGODB_CERT_DIR/ca.pem; it will be used in MongoDB configuration."
   fi
 
-  # Create the docker-compose file for MongoDB
-  log "Creating docker-compose file for MongoDB..."
+  # Create (or update) the docker-compose file for MongoDB
+  log "Creating/updating docker-compose file for MongoDB..."
   cat > "$MONGODB_COMPOSE_FILE" << EOF
 version: '3.8'
 services:
@@ -373,7 +380,7 @@ services:
              --tlsCertificateKeyFile ${MONGODB_CERT_DIR}/mongodb.pem ${TLS_CA_OPTION}
 EOF
 
-  log "MongoDB docker-compose file created at $MONGODB_COMPOSE_FILE"
+  log "MongoDB docker-compose file created/updated at $MONGODB_COMPOSE_FILE"
 
   # Deploy MongoDB using Docker Compose
   log "Deploying MongoDB container..."
