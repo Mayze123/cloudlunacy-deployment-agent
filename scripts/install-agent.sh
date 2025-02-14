@@ -213,17 +213,18 @@ install_mongo() {
   log "Installing MongoDB container..."
   # Check if a container named "mongodb-agent" exists
   if docker ps -a --format '{{.Names}}' | grep -q '^mongodb-agent$'; then
-    log "MongoDB container already exists. Starting it..."
-    docker start mongodb-agent
-  else
-    log "Creating and starting MongoDB container..."
-    docker run -d \
-      --name mongodb-agent \
-      -p ${MONGO_PORT}:27017 \
-      -e MONGO_INITDB_ROOT_USERNAME=admin \
-      -e MONGO_INITDB_ROOT_PASSWORD=adminpassword \
-      mongo:latest
+    log "MongoDB container already exists. Removing it to re-create with proper port mapping..."
+    docker rm -f mongodb-agent || { log_error "Failed to remove existing MongoDB container"; exit 1; }
   fi
+
+  log "Creating and starting MongoDB container..."
+  docker run -d \
+    --name mongodb-agent \
+    -p ${MONGO_PORT}:27017 \
+    -e MONGO_INITDB_ROOT_USERNAME=admin \
+    -e MONGO_INITDB_ROOT_PASSWORD=adminpassword \
+    mongo:latest || { log_error "Failed to start MongoDB container"; exit 1; }
+  
   log "MongoDB container is running."
 }
 
