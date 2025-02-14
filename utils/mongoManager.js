@@ -4,11 +4,11 @@ const fs = require("fs").promises;
 
 class MongoManager {
   constructor() {
-    // Manager credentials (ensure these are set in your environment)
+    // Manager credentials from environment
     this.managerUsername = process.env.MONGO_MANAGER_USERNAME;
     this.managerPassword = process.env.MONGO_MANAGER_PASSWORD;
 
-    // MongoDB host and port
+    // MongoDB host and port (adjust as necessary)
     this.mongoHost = process.env.MONGO_HOST || "mongodb";
     this.mongoPort = process.env.MONGO_PORT || "27017";
 
@@ -16,9 +16,6 @@ class MongoManager {
     this.isInitialized = false;
   }
 
-  /**
-   * Wait for MongoDB to be ready by attempting to connect multiple times.
-   */
   async waitForMongoDB() {
     logger.info("Waiting for MongoDB to be ready...");
     const maxAttempts = 10;
@@ -29,8 +26,7 @@ class MongoManager {
         logger.info(`Connection attempt ${attempt}/${maxAttempts}`);
         const uri = `mongodb://${this.managerUsername}:${this.managerPassword}@${this.mongoHost}:${this.mongoPort}/admin`;
         const client = new MongoClient(uri, {
-          tls: true,
-          tlsAllowInvalidCertificates: true,
+          // No TLS options are used since our MongoDB container isn’t set up for TLS
           authSource: "admin",
           authMechanism: "SCRAM-SHA-256",
           directConnection: true,
@@ -58,12 +54,8 @@ class MongoManager {
     }
   }
 
-  /**
-   * Initialize (or verify) the MongoDB manager user.
-   * If ENABLE_MONGO_MANAGER is "false", the initialization is skipped.
-   */
   async initializeManagerUser() {
-    // Check for bypass flag.
+    // If a bypass flag is set, skip initialization.
     if (process.env.ENABLE_MONGO_MANAGER === "false") {
       logger.info(
         "MongoDB manager initialization skipped via ENABLE_MONGO_MANAGER flag.",
@@ -77,12 +69,10 @@ class MongoManager {
     }
 
     try {
-      // Create a client using the provided credentials.
+      // Create a client using the provided credentials without TLS options
       const client = new MongoClient(
         `mongodb://${this.mongoHost}:${this.mongoPort}/admin`,
         {
-          tls: true,
-          tlsAllowInvalidCertificates: true,
           auth: {
             username: this.managerUsername,
             password: this.managerPassword,
@@ -106,9 +96,6 @@ class MongoManager {
     }
   }
 
-  /**
-   * Establish a connection to MongoDB.
-   */
   async connect() {
     try {
       if (!this.isInitialized) {
@@ -140,9 +127,6 @@ class MongoManager {
     }
   }
 
-  /**
-   * Create a new database and a user with readWrite permissions for that database.
-   */
   async createDatabaseAndUser(dbName, username, password) {
     try {
       const client = await this.connect();
@@ -163,9 +147,6 @@ class MongoManager {
     }
   }
 
-  /**
-   * Close the MongoDB connection.
-   */
   async close() {
     try {
       if (this.client) {
@@ -179,9 +160,6 @@ class MongoManager {
     }
   }
 
-  /**
-   * Verify the MongoDB connection by issuing a ping command.
-   */
   async verifyConnection() {
     try {
       const client = await this.connect();
