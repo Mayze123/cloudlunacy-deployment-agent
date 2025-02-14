@@ -18,7 +18,7 @@ IFS=$'\n\t'
 USERNAME="cloudlunacy"
 BASE_DIR="/opt/cloudlunacy"
 # Use the front server's IP as the default API URL.
-: "${FRONT_API_URL:=http://138.199.165.36:3000}"
+: "${FRONT_API_URL:=http://138.199.165.36:3005}"
 : "${NODE_PORT:=3005}"
 : "${MONGO_PORT:=27017}"
 
