@@ -255,11 +255,14 @@ configure_env() {
   fi
   
   cat > "$ENV_FILE" << EOL
-BACKEND_URL="${BACKEND_URL:-https://your-default-backend-url}"
+BACKEND_URL="${BACKEND_URL}"
+FRONT_API_URL="${FRONT_API_URL}"
 AGENT_API_TOKEN="${AGENT_TOKEN}"
 SERVER_ID="${SERVER_ID}"
 NODE_ENV=production
 JWT_SECRET=${JWT_SECRET}
+MONGO_MANAGER_USERNAME=admin
+MONGO_MANAGER_PASSWORD=adminpassword
 EOL
 
   chown "$USERNAME:$USERNAME" "$ENV_FILE"
