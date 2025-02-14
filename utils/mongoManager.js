@@ -4,10 +4,11 @@ const fs = require("fs").promises;
 
 class MongoManager {
   constructor() {
-    // Manager credentials
+    // Manager credentials (ensure these are set in your environment)
     this.managerUsername = process.env.MONGO_MANAGER_USERNAME;
     this.managerPassword = process.env.MONGO_MANAGER_PASSWORD;
 
+    // MongoDB host and port
     this.mongoHost = process.env.MONGO_HOST || "mongodb";
     this.mongoPort = process.env.MONGO_PORT || "27017";
 
@@ -15,6 +16,9 @@ class MongoManager {
     this.isInitialized = false;
   }
 
+  /**
+   * Wait for MongoDB to be ready by attempting to connect multiple times.
+   */
   async waitForMongoDB() {
     logger.info("Waiting for MongoDB to be ready...");
     const maxAttempts = 10;
@@ -24,7 +28,6 @@ class MongoManager {
       try {
         logger.info(`Connection attempt ${attempt}/${maxAttempts}`);
         const uri = `mongodb://${this.managerUsername}:${this.managerPassword}@${this.mongoHost}:${this.mongoPort}/admin`;
-
         const client = new MongoClient(uri, {
           tls: true,
           tlsAllowInvalidCertificates: true,
@@ -45,24 +48,36 @@ class MongoManager {
 
         if (attempt === maxAttempts) {
           throw new Error(
-            `Failed to connect after ${maxAttempts} attempts: ${errorMessage}`
+            `Failed to connect after ${maxAttempts} attempts: ${errorMessage}`,
           );
         }
 
-        const backoffDelay = retryDelay;
-        logger.info(`Waiting ${backoffDelay}ms before next attempt...`);
-        await new Promise((resolve) => setTimeout(resolve, backoffDelay));
+        logger.info(`Waiting ${retryDelay}ms before next attempt...`);
+        await new Promise((resolve) => setTimeout(resolve, retryDelay));
       }
     }
   }
 
+  /**
+   * Initialize (or verify) the MongoDB manager user.
+   * If ENABLE_MONGO_MANAGER is "false", the initialization is skipped.
+   */
   async initializeManagerUser() {
+    // Check for bypass flag.
+    if (process.env.ENABLE_MONGO_MANAGER === "false") {
+      logger.info(
+        "MongoDB manager initialization skipped via ENABLE_MONGO_MANAGER flag.",
+      );
+      this.isInitialized = true;
+      return;
+    }
+
     if (this.isInitialized) {
       return;
     }
 
     try {
-      // Test connection with the provided credentials
+      // Create a client using the provided credentials.
       const client = new MongoClient(
         `mongodb://${this.mongoHost}:${this.mongoPort}/admin`,
         {
@@ -76,7 +91,7 @@ class MongoManager {
           authMechanism: "SCRAM-SHA-256",
           directConnection: true,
           serverSelectionTimeoutMS: 10000,
-        }
+        },
       );
 
       await client.connect();
@@ -91,6 +106,9 @@ class MongoManager {
     }
   }
 
+  /**
+   * Establish a connection to MongoDB.
+   */
   async connect() {
     try {
       if (!this.isInitialized) {
@@ -122,6 +140,9 @@ class MongoManager {
     }
   }
 
+  /**
+   * Create a new database and a user with readWrite permissions for that database.
+   */
   async createDatabaseAndUser(dbName, username, password) {
     try {
       const client = await this.connect();
@@ -133,7 +154,7 @@ class MongoManager {
       });
 
       logger.info(
-        `Database ${dbName} and user ${username} created successfully`
+        `Database ${dbName} and user ${username} created successfully`,
       );
       return { dbName, username, password };
     } catch (error) {
@@ -142,6 +163,9 @@ class MongoManager {
     }
   }
 
+  /**
+   * Close the MongoDB connection.
+   */
   async close() {
     try {
       if (this.client) {
@@ -155,6 +179,9 @@ class MongoManager {
     }
   }
 
+  /**
+   * Verify the MongoDB connection by issuing a ping command.
+   */
   async verifyConnection() {
     try {
       const client = await this.connect();
