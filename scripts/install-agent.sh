@@ -217,7 +217,7 @@ install_mongo() {
     log "Creating and starting MongoDB container..."
     docker run -d \
       --name mongodb-agent \
-      -p 27017:27017 \
+      -p 3005:27017 \
       -e MONGO_INITDB_ROOT_USERNAME=admin \
       -e MONGO_INITDB_ROOT_PASSWORD=adminpassword \
       mongo:latest
