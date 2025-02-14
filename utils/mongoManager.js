@@ -55,8 +55,9 @@ class MongoManager {
   }
 
   async initializeManagerUser() {
+    const enable = true;
     // If a bypass flag is set, skip initialization.
-    if (process.env.ENABLE_MONGO_MANAGER === "false") {
+    if (enable) {
       logger.info(
         "MongoDB manager initialization skipped via ENABLE_MONGO_MANAGER flag.",
       );
