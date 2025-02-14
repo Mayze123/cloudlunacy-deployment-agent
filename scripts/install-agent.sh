@@ -17,6 +17,8 @@ IFS=$'\n\t'
 # ----------------------------
 USERNAME="cloudlunacy"
 BASE_DIR="/opt/cloudlunacy"
+# Use the front server's IP as the default API URL.
+: "${FRONT_API_URL:=http://138.199.165.36:3000}"
 
 # ----------------------------
 # Function Definitions
@@ -202,21 +204,67 @@ install_node() {
 }
 
 
+# ------------------------------------------------------------------------------
+# New Function: Install MongoDB as a Docker Container
+# ------------------------------------------------------------------------------
+install_mongo() {
+  log "Installing MongoDB container..."
+  # Check if a container named "mongodb-agent" exists
+  if docker ps -a --format '{{.Names}}' | grep -q '^mongodb-agent$'; then
+    log "MongoDB container already exists. Starting it..."
+    docker start mongodb-agent
+  else
+    log "Creating and starting MongoDB container..."
+    docker run -d \
+      --name mongodb-agent \
+      -p ${MONGO_PORT}:27017 \
+      -e MONGO_INITDB_ROOT_USERNAME=admin \
+      -e MONGO_INITDB_ROOT_PASSWORD=adminpassword \
+      mongo:latest
+  fi
+  log "MongoDB container is running."
+}
+
+# ------------------------------------------------------------------------------
+# Register Agent with the Front Server
+# ------------------------------------------------------------------------------
+register_agent() {
+  log "Registering agent with front server..."
+  # Get primary IP address of the VPS
+  LOCAL_IP=$(hostname -I | awk '{print $1}')
+  
+  RESPONSE=$(curl -s -X POST "${FRONT_API_URL}/api/agent/register" \
+    -H "Content-Type: application/json" \
+    -d "{\"agentToken\": \"${AGENT_TOKEN}\", \"serverId\": \"${SERVER_ID}\", \"mongoIp\": \"${LOCAL_IP}\" }")
+  
+  if echo "$RESPONSE" | grep -q "token"; then
+    log "Agent registered successfully. Response: $RESPONSE"
+  else
+    log_error "Agent registration failed. Response: $RESPONSE"
+    exit 1
+  fi
+}
 
 configure_env() {
   log "Configuring environment variables..."
   ENV_FILE="$BASE_DIR/.env"
-
+  
+  # Generate a global JWT secret if not already set
+  if [ -z "${JWT_SECRET:-}" ]; then
+    JWT_SECRET=$(openssl rand -base64 32)
+  fi
+  
   cat > "$ENV_FILE" << EOL
 BACKEND_URL="${BACKEND_URL:-https://your-default-backend-url}"
 AGENT_API_TOKEN="${AGENT_TOKEN}"
 SERVER_ID="${SERVER_ID}"
 NODE_ENV=production
+JWT_SECRET=${JWT_SECRET}
 EOL
 
   chown "$USERNAME:$USERNAME" "$ENV_FILE"
   chmod 600 "$ENV_FILE"
-  log "Environment configuration completed successfully"
+  log "Environment configuration completed successfully."
 }
 
 setup_user_directories() {
@@ -237,9 +285,15 @@ setup_user_directories() {
 
 download_agent() {
   log "Cloning the CloudLunacy Deployment Agent repository..."
-  sudo -u "$USERNAME" git clone https://github.com/Mayze123/cloudlunacy-deployment-agent.git "$BASE_DIR"
-  chown -R "$USERNAME":"$USERNAME" "$BASE_DIR"
-  log "Agent cloned to $BASE_DIR."
+  if [ -d "$BASE_DIR/.git" ]; then
+    log "Repository already exists in $BASE_DIR. Updating repository..."
+    cd "$BASE_DIR" || { log_error "Failed to change directory to $BASE_DIR"; exit 1; }
+    sudo -u "$USERNAME" git pull || { log_error "Failed to update repository"; exit 1; }
+  else
+    sudo -u "$USERNAME" git clone https://github.com/Mayze123/cloudlunacy-deployment-agent.git "$BASE_DIR" || { log_error "Failed to clone repository"; exit 1; }
+    chown -R "$USERNAME:$USERNAME" "$BASE_DIR"
+  fi
+  log "Agent repository is up to date at $BASE_DIR."
 }
 
 install_agent_dependencies() {
@@ -305,27 +359,30 @@ verify_installation() {
 }
 
 main() {
-  check_root
+ check_root
   display_info
   check_args "$@"
 
   AGENT_TOKEN="$1"
   SERVER_ID="$2"
-  BACKEND_BASE_URL="${3:-https://your-default-backend-url}"
+  BACKEND_BASE_URL="${3:-$BACKEND_URL}"
   BACKEND_URL="${BACKEND_BASE_URL}"
 
   detect_os
   update_system
   install_dependencies
   install_docker
+  install_node
   setup_user_directories
   stop_conflicting_containers
   configure_env
   download_agent
   install_agent_dependencies
   setup_docker_permissions
+  install_mongo
   setup_service
   verify_installation
+  register_agent
 
   log "Installation completed successfully!"
 }
