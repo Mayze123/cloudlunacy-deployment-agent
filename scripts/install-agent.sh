@@ -294,11 +294,13 @@ setup_user_directories() {
 download_agent() {
   log "Cloning the CloudLunacy Deployment Agent repository..."
   if [ -d "$BASE_DIR/.git" ]; then
-    log "Repository already exists in $BASE_DIR. Updating repository..."
+    log "Repository already exists in $BASE_DIR. Forcing update of repository..."
     cd "$BASE_DIR" || { log_error "Failed to change directory to $BASE_DIR"; exit 1; }
-    sudo -u "$USERNAME" git pull || { log_error "Failed to update repository"; exit 1; }
+    # Reset any local changes and update from remote
+    sudo -u "$USERNAME" git fetch --all || { log_error "Failed to fetch repository updates"; exit 1; }
+    sudo -u "$USERNAME" git reset --hard origin/main || { log_error "Failed to reset repository"; exit 1; }
   else
-    sudo -u "$USERNAME" git clone https://github.com/Mayze123/cloudlunacy-deployment-agent.git "$BASE_DIR" || { log_error "Failed to clone repository"; exit 1; }
+    sudo -u "$USERNAME" git clone "$FRONT_REPO_URL" "$BASE_DIR" || { log_error "Failed to clone repository"; exit 1; }
     chown -R "$USERNAME:$USERNAME" "$BASE_DIR"
   fi
   log "Agent repository is up to date at $BASE_DIR."
