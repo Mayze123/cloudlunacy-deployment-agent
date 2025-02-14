@@ -19,6 +19,8 @@ USERNAME="cloudlunacy"
 BASE_DIR="/opt/cloudlunacy"
 # Use the front server's IP as the default API URL.
 : "${FRONT_API_URL:=http://138.199.165.36:3000}"
+: "${NODE_PORT:=3005}"
+: "${MONGO_PORT:=27017}"
 
 # ----------------------------
 # Function Definitions
@@ -217,7 +219,7 @@ install_mongo() {
     log "Creating and starting MongoDB container..."
     docker run -d \
       --name mongodb-agent \
-      -p 3005:27017 \
+      -p ${MONGO_PORT}:27017 \
       -e MONGO_INITDB_ROOT_USERNAME=admin \
       -e MONGO_INITDB_ROOT_PASSWORD=adminpassword \
       mongo:latest
