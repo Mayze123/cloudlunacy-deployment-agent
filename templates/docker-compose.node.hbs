@@ -18,9 +18,9 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.{{sanitizedAppName}}.rule=Host(`{{domain}}`)"
-      - "traefik.http.routers.{{sanitizedAppName}}.entrypoints=web"
+      - "traefik.http.routers.{{sanitizedAppName}}.entrypoints=web,websecure"
+      - "traefik.http.routers.{{sanitizedAppName}}.tls.certresolver=letsencrypt"
       - "traefik.http.services.{{sanitizedAppName}}.loadbalancer.server.port={{containerPort}}"
-
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
       interval: 30s

@@ -266,6 +266,8 @@ NODE_ENV=production
 JWT_SECRET=${JWT_SECRET}
 MONGO_MANAGER_USERNAME=admin
 MONGO_MANAGER_PASSWORD=adminpassword
+MONGO_DOMAIN=mongodb.cloudlunacy.uk
+APP_DOMAIN=apps.cloudlunacy.uk
 EOL
 
   chown "$USERNAME:$USERNAME" "$ENV_FILE"

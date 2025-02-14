@@ -79,9 +79,5 @@ RUN chown -R appuser:appgroup /app
 # Switch to the non-root user
 USER appuser
 
-# Expose application and health check ports (optional, since Traefik handles routing)
-# EXPOSE 8080
-# EXPOSE 9000
-
 # Start the application using the start script
 CMD ["./start.sh"]
