@@ -22,6 +22,7 @@ BASE_DIR="/opt/cloudlunacy"
 : "${NODE_PORT:=3005}"
 : "${MONGO_PORT:=27017}"
 
+
 # ----------------------------
 # Function Definitions
 # ----------------------------
@@ -300,7 +301,6 @@ download_agent() {
     sudo -u "$USERNAME" git fetch --all || { log_error "Failed to fetch repository updates"; exit 1; }
     sudo -u "$USERNAME" git reset --hard origin/main || { log_error "Failed to reset repository"; exit 1; }
   else
-    sudo -u "$USERNAME" git clone "$FRONT_REPO_URL" "$BASE_DIR" || { log_error "Failed to clone repository"; exit 1; }
     chown -R "$USERNAME:$USERNAME" "$BASE_DIR"
   fi
   log "Agent repository is up to date at $BASE_DIR."
