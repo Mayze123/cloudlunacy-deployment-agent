@@ -306,12 +306,12 @@ download_agent() {
   log "Agent repository is up to date at $BASE_DIR."
 }
 
-# install_agent_dependencies() {
-#   log "Installing agent dependencies..."
-#   cd "$BASE_DIR"
-#   sudo -u "$USERNAME" npm install
-#   log "Agent dependencies installed."
-# }
+install_agent_dependencies() {
+  log "Installing agent dependencies..."
+  cd "$BASE_DIR"
+  sudo -u "$USERNAME" npm install
+  log "Agent dependencies installed."
+}
 
 setup_docker_permissions() {
   log "Setting up Docker permissions..."
@@ -387,7 +387,7 @@ main() {
   stop_conflicting_containers
   configure_env
   download_agent
-#   install_agent_dependencies
+  install_agent_dependencies
   setup_docker_permissions
   install_mongo
   setup_service
