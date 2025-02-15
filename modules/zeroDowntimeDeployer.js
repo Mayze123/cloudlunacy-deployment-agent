@@ -76,6 +76,8 @@ class ZeroDowntimeDeployer {
       serviceName: Joi.string().required(),
       domain: Joi.string().required(),
       envVarsToken: Joi.string().required(),
+      // Optionally, you can include targetUrl for HTTP apps
+      targetUrl: Joi.string().optional(),
     });
 
     // Validate payload
@@ -102,6 +104,7 @@ class ZeroDowntimeDeployer {
       serviceName,
       domain,
       envVarsToken,
+      targetUrl, // optional target URL for HTTP apps
     } = value;
 
     // Override the domain based on appType:
@@ -117,6 +120,39 @@ class ZeroDowntimeDeployer {
       const appDomain = process.env.APP_DOMAIN || "apps.cloudlunacy.uk";
       finalDomain = `${serviceName}.${appDomain}`;
       logger.info(`Using HTTP app domain: ${finalDomain}`);
+
+      // Register the HTTP app subdomain with the front server.
+      try {
+        const axios = require("axios");
+        // Determine target URL:
+        // Use payload.targetUrl if provided, otherwise default to localhost with containerPort (or 8080).
+        const resolvedTargetUrl =
+          targetUrl || `http://localhost:${value.containerPort || 8080}`;
+        const frontApiUrl = process.env.FRONT_API_URL;
+        if (!frontApiUrl) {
+          throw new Error(
+            "FRONT_API_URL is not defined in environment variables",
+          );
+        }
+        const registrationPayload = {
+          subdomain: serviceName, // This combined with APP_DOMAIN becomes finalDomain.
+          targetUrl: resolvedTargetUrl,
+        };
+        logger.info("Registering HTTP app subdomain with front server...");
+        const response = await axios.post(
+          `${frontApiUrl}/api/frontdoor/add-app`,
+          registrationPayload,
+          { headers: { "Content-Type": "application/json" } },
+        );
+        logger.info(
+          "HTTP app subdomain registered successfully:",
+          response.data,
+        );
+      } catch (err) {
+        logger.error("Failed to register HTTP app subdomain:", err.message);
+        // Depending on your requirements, you might decide to throw here or continue.
+        throw err;
+      }
     }
 
     // Implement deployment lock to prevent concurrent deployments for the same service
@@ -131,7 +167,6 @@ class ZeroDowntimeDeployer {
       });
       return;
     }
-
     this.deploymentLocks.add(serviceLockKey);
 
     const projectName = `${deploymentId}-${appName}`
@@ -186,7 +221,6 @@ class ZeroDowntimeDeployer {
       }
 
       // No need to allocate ports since Traefik handles routing
-
       const blueGreenLabel = oldContainer ? "green" : "blue";
       const newContainerName = `${serviceName}-${blueGreenLabel}`;
 
@@ -229,7 +263,6 @@ class ZeroDowntimeDeployer {
     } catch (error) {
       logger.error(`Deployment ${deploymentId} failed:`, error);
       rollbackNeeded = true;
-
       try {
         if (rollbackNeeded && oldContainer) {
           await this.performRollback(oldContainer, newContainer, finalDomain);
@@ -237,7 +270,6 @@ class ZeroDowntimeDeployer {
       } catch (rollbackError) {
         logger.error("Rollback failed:", rollbackError);
       }
-
       this.sendError(ws, {
         deploymentId,
         status: "failed",
@@ -250,8 +282,6 @@ class ZeroDowntimeDeployer {
       }
     }
   }
-
-  // ... (other methods remain unchanged)
 
   async gracefulContainerRemoval(container, deployDir, projectName) {
     try {
