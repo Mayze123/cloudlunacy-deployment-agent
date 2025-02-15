@@ -1,5 +1,3 @@
-// deploy/ZeroDowntimeDeployer.js
-
 const { executeCommand } = require("../utils/executor");
 const logger = require("../utils/logger");
 const fs = require("fs").promises;
@@ -9,6 +7,7 @@ const { ensureDeploymentPermissions } = require("../utils/permissionCheck");
 const apiClient = require("../utils/apiClient");
 const EnvironmentManager = require("../utils/environmentManager");
 const Joi = require("joi");
+const { execSync } = require("child_process");
 
 class ZeroDowntimeDeployer {
   constructor() {
@@ -24,10 +23,9 @@ class ZeroDowntimeDeployer {
       process.env.DEPLOY_BASE_DIR || "/opt/cloudlunacy/deployments";
     this.templatesDir =
       process.env.TEMPLATES_DIR || "/opt/cloudlunacy/templates";
-    this.deploymentLocks = new Set(); // Simple in-memory lock mechanism
+    this.deploymentLocks = new Set();
   }
 
-  // Convert validatePrerequisites to an arrow function
   validatePrerequisites = async () => {
     try {
       await executeCommand("which", ["docker"]);
@@ -38,7 +36,6 @@ class ZeroDowntimeDeployer {
     }
   };
 
-  // Convert validateNetworks to an arrow function
   validateNetworks = async () => {
     try {
       const { stdout: networks } = await executeCommand("docker", [
@@ -53,9 +50,6 @@ class ZeroDowntimeDeployer {
           "create",
           "traefik-network",
         ]);
-        logger.info("Created traefik-network");
-      } else {
-        logger.info("traefik-network already exists");
       }
     } catch (error) {
       throw new Error(`Network validation failed: ${error.message}`);
@@ -63,7 +57,6 @@ class ZeroDowntimeDeployer {
   };
 
   async deploy(payload, ws) {
-    // Define schema for payload validation
     const payloadSchema = Joi.object({
       deploymentId: Joi.string().required(),
       appType: Joi.string().required(),
@@ -76,11 +69,9 @@ class ZeroDowntimeDeployer {
       serviceName: Joi.string().required(),
       domain: Joi.string().required(),
       envVarsToken: Joi.string().required(),
-      // Optionally, you can include targetUrl for HTTP apps
       targetUrl: Joi.string().optional(),
     });
 
-    // Validate payload
     const { error, value } = payloadSchema.validate(payload);
     if (error) {
       logger.error(`Invalid payload: ${error.message}`);
@@ -104,67 +95,42 @@ class ZeroDowntimeDeployer {
       serviceName,
       domain,
       envVarsToken,
-      targetUrl, // optional target URL for HTTP apps
+      targetUrl,
     } = value;
 
-    // Override the domain based on appType:
-    // - If it's a MongoDB deployment (appType === "mongo"), use the MONGO_DOMAIN
-    // - Otherwise, for HTTP apps, use APP_DOMAIN
-    let finalDomain = domain; // fallback to the provided one if needed
-    if (appType.toLowerCase() === "mongo") {
-      const mongoDomain = process.env.MONGO_DOMAIN || "mongodb.cloudlunacy.uk";
-      finalDomain = `${serviceName}.${mongoDomain}`;
-      logger.info(`Using MongoDB domain: ${finalDomain}`);
-    } else {
-      // For HTTP apps (e.g. React, Node) use APP_DOMAIN
-      const appDomain = process.env.APP_DOMAIN || "apps.cloudlunacy.uk";
-      finalDomain = `${serviceName}.${appDomain}`;
-      logger.info(`Using HTTP app domain: ${finalDomain}`);
+    const LOCAL_IP = execSync("hostname -I | awk '{print $1}'")
+      .toString()
+      .trim();
+    let finalDomain = domain;
 
-      // Register the HTTP app subdomain with the front server.
+    if (appType.toLowerCase() === "mongo") {
+      finalDomain = `${serviceName}.${process.env.MONGO_DOMAIN}`;
+    } else {
+      finalDomain = `${serviceName}.${process.env.APP_DOMAIN}`;
+      const resolvedTargetUrl =
+        targetUrl || `http://${LOCAL_IP}:${value.containerPort || 8080}`;
+
       try {
         const axios = require("axios");
-        // Determine target URL:
-        // Use payload.targetUrl if provided, otherwise default to localhost with containerPort (or 8080).
-        const resolvedTargetUrl =
-          targetUrl || `http://localhost:${value.containerPort || 8080}`;
         const frontApiUrl = process.env.FRONT_API_URL;
-        if (!frontApiUrl) {
-          throw new Error(
-            "FRONT_API_URL is not defined in environment variables",
-          );
-        }
-        const registrationPayload = {
-          subdomain: serviceName, // This combined with APP_DOMAIN becomes finalDomain.
-          targetUrl: resolvedTargetUrl,
-        };
-        logger.info("Registering HTTP app subdomain with front server...");
         const response = await axios.post(
           `${frontApiUrl}/api/frontdoor/add-app`,
-          registrationPayload,
+          {
+            subdomain: serviceName,
+            targetUrl: resolvedTargetUrl,
+          },
           { headers: { "Content-Type": "application/json" } },
         );
-        logger.info(
-          "HTTP app subdomain registered successfully:",
-          response.data,
-        );
       } catch (err) {
-        logger.error("Failed to register HTTP app subdomain:", err.message);
-        // Depending on your requirements, you might decide to throw here or continue.
         throw err;
       }
     }
 
-    // Implement deployment lock to prevent concurrent deployments for the same service
     const serviceLockKey = `${serviceName}-${environment}`;
     if (this.deploymentLocks.has(serviceLockKey)) {
-      const msg = `Deployment already in progress for service ${serviceName} in environment ${environment}`;
+      const msg = `Deployment already in progress for ${serviceName} in ${environment}`;
       logger.warn(msg);
-      this.sendError(ws, {
-        deploymentId,
-        status: "failed",
-        message: msg,
-      });
+      this.sendError(ws, { deploymentId, status: "failed", message: msg });
       return;
     }
     this.deploymentLocks.add(serviceLockKey);
@@ -181,31 +147,17 @@ class ZeroDowntimeDeployer {
     let envManager = null;
 
     try {
-      const permissionsOk = await ensureDeploymentPermissions();
-      if (!permissionsOk) {
-        throw new Error("Deployment failed: Permission check failed");
-      }
-
+      await ensureDeploymentPermissions();
       await this.validatePrerequisites();
       await this.setupDirectories(deployDir, backupDir);
 
-      // Initialize environment manager
       envManager = new EnvironmentManager(deployDir);
-
-      // Setup environment by fetching environment variables via apiClient
       const envVars = await this.fetchEnvironmentVariables(
         deploymentId,
         envVarsToken,
       );
-      if (!envVars) {
-        throw new Error("Failed to retrieve environment variables");
-      }
-
-      // Write environment variables to .env file
       const envFilePath = await envManager.writeEnvFile(envVars, environment);
-      logger.info("Environment variables written to .env file");
 
-      // Clone repository into deployDir, handling existing backup
       await this.cloneRepository(
         deployDir,
         repositoryOwner,
@@ -214,88 +166,68 @@ class ZeroDowntimeDeployer {
         githubToken,
       );
 
-      // Backup old container if exists
       oldContainer = await this.getCurrentContainer(serviceName);
-      if (oldContainer) {
-        await this.backupCurrentState(oldContainer, backupDir);
-      }
+      if (oldContainer) await this.backupCurrentState(oldContainer, backupDir);
 
-      // No need to allocate ports since Traefik handles routing
       const blueGreenLabel = oldContainer ? "green" : "blue";
       const newContainerName = `${serviceName}-${blueGreenLabel}`;
 
-      // Pass the computed finalDomain to the template handler
       newContainer = await this.buildAndStartContainer({
         projectName,
         serviceName: newContainerName,
         deployDir,
-        domain: finalDomain, // use the updated domain here
+        domain: finalDomain,
         envFilePath,
         environment,
         payload: value,
         ws,
       });
 
-      const envSetupOk = await envManager.verifyEnvironmentSetup(
-        newContainer.name,
-      );
-      if (!envSetupOk) {
-        throw new Error("Environment verification failed");
-      }
-
+      await envManager.verifyEnvironmentSetup(newContainer.name);
       await this.performHealthCheck(newContainer, finalDomain);
       await this.switchTraffic(oldContainer, newContainer, finalDomain);
 
-      if (oldContainer) {
+      if (oldContainer)
         await this.gracefulContainerRemoval(
           oldContainer,
           deployDir,
           projectName,
         );
-      }
 
       this.sendSuccess(ws, {
         deploymentId,
         status: "success",
-        message: "Zero-downtime deployment completed successfully",
+        message: "Deployment completed",
         domain: finalDomain,
       });
     } catch (error) {
       logger.error(`Deployment ${deploymentId} failed:`, error);
       rollbackNeeded = true;
       try {
-        if (rollbackNeeded && oldContainer) {
+        if (rollbackNeeded && oldContainer)
           await this.performRollback(oldContainer, newContainer, finalDomain);
-        }
       } catch (rollbackError) {
         logger.error("Rollback failed:", rollbackError);
       }
       this.sendError(ws, {
         deploymentId,
         status: "failed",
-        message: error.message || "Deployment failed",
+        message: error.message,
       });
     } finally {
       this.deploymentLocks.delete(serviceLockKey);
-      if (!rollbackNeeded) {
-        await this.cleanup(deployDir, rollbackNeeded);
-      }
+      if (!rollbackNeeded) await this.cleanup(deployDir, rollbackNeeded);
     }
   }
 
   async gracefulContainerRemoval(container, deployDir, projectName) {
     try {
-      logger.info(`Stopping and removing container: ${container.name}`);
       await executeCommand(
         "docker-compose",
         ["-p", projectName, "down", "-v"],
         { cwd: deployDir },
       );
-      logger.info(
-        `Container ${container.name} stopped and removed successfully`,
-      );
     } catch (error) {
-      logger.error(`Failed to remove container ${container.name}:`, error);
       throw new Error(
         `Failed to remove container ${container.name}: ${error.message}`,
       );
@@ -306,18 +238,10 @@ class ZeroDowntimeDeployer {
     try {
       const response = await apiClient.post(
         `/api/deploy/env-vars/${deploymentId}`,
-        {
-          token: envVarsToken,
-        },
+        { token: envVarsToken },
       );
-      if (!response.data || !response.data.variables) {
-        logger.error("Invalid response format for environment variables API");
-        return null;
-      }
-      logger.info("Successfully retrieved environment variables from API");
       return response.data.variables;
     } catch (error) {
-      logger.error(`Failed to fetch environment variables: ${error.message}`);
       return null;
     }
   }
@@ -326,9 +250,7 @@ class ZeroDowntimeDeployer {
     try {
       await fs.mkdir(deployDir, { recursive: true });
       await fs.mkdir(backupDir, { recursive: true });
-      logger.info(`Directories prepared successfully: ${deployDir}`);
     } catch (error) {
-      logger.error(`Failed to setup directories: ${error.message}`);
       throw new Error(`Directory setup failed: ${error.message}`);
     }
   }
@@ -339,13 +261,11 @@ class ZeroDowntimeDeployer {
       path.dirname(deployDir),
       `${path.basename(deployDir)}_temp_${Date.now()}`,
     );
+
     try {
-      logger.info(`Cloning repository into temporary directory: ${tempDir}`);
       await executeCommand("git", ["clone", "-b", branch, repoUrl, tempDir]);
-      logger.info("Repository cloned successfully into temporary directory");
       const files = await fs.readdir(tempDir);
       for (const file of files) {
-        if (file === "backup") continue;
         const srcPath = path.join(tempDir, file);
         const destPath = path.join(deployDir, file);
         const stat = await fs.lstat(srcPath);
@@ -355,17 +275,9 @@ class ZeroDowntimeDeployer {
           await fs.copyFile(srcPath, destPath);
         }
       }
-      logger.info(
-        "Repository files merged into deployment directory successfully",
-      );
-    } catch (error) {
-      logger.error(`Git clone failed: ${error.message}`);
-      throw new Error(`Git clone failed: ${error.message}`);
     } finally {
-      if (await this.directoryExists(tempDir)) {
+      if (await this.directoryExists(tempDir))
         await fs.rm(tempDir, { recursive: true, force: true });
-        logger.info(`Temporary directory ${tempDir} removed`);
-      }
     }
   }
 
@@ -387,10 +299,7 @@ class ZeroDowntimeDeployer {
         path.join(backupDir, "backup-metadata.json"),
         JSON.stringify(backupMetadata, null, 2),
       );
-      logger.info(`Backup created successfully: ${backupName}`);
-    } catch (error) {
-      logger.warn(`Backup failed: ${error.message}`);
-    }
+    } catch (error) {}
   }
 
   async getCurrentContainer(serviceName) {
@@ -412,7 +321,6 @@ class ZeroDowntimeDeployer {
       const [name, id, status] = containerInfo.trim().split(" ");
       return { name: name.replace("/", ""), id, status };
     } catch (error) {
-      logger.warn(`Error getting current container: ${error.message}`);
       return null;
     }
   }
@@ -421,46 +329,29 @@ class ZeroDowntimeDeployer {
     let healthy = false;
     let attempts = 0;
     while (!healthy && attempts < this.healthCheckRetries) {
+      await new Promise((resolve) =>
+        setTimeout(resolve, this.healthCheckInterval),
+      );
       try {
-        await new Promise((resolve) =>
-          setTimeout(resolve, this.healthCheckInterval),
-        );
         const { stdout } = await executeCommand("docker", [
           "inspect",
           "--format",
           "{{.State.Health.Status}}",
           container.id,
         ]);
-        const status = stdout.trim();
-        if (status === "healthy") {
+        if (stdout.trim() === "healthy") {
           healthy = true;
-          logger.info(`Health check passed for container ${container.name}`);
           break;
-        } else {
-          logger.warn(`Health check status: ${status}`);
         }
       } catch (error) {
         attempts++;
-        logger.warn(
-          `Health check attempt ${attempts} failed for container ${container.name}:`,
-          error.message,
-        );
       }
     }
-    if (!healthy) {
-      throw new Error("Container failed health checks");
-    }
+    if (!healthy) throw new Error("Container failed health checks");
   }
 
   async switchTraffic(oldContainer, newContainer, domain) {
-    try {
-      logger.info("Waiting for Traefik to update routes...");
-      await new Promise((resolve) => setTimeout(resolve, 5000));
-      logger.info("Traffic switch completed successfully.");
-    } catch (error) {
-      logger.error("Traffic switch failed:", error);
-      throw new Error(`Traffic switch failed: ${error.message}`);
-    }
+    await new Promise((resolve) => setTimeout(resolve, 5000));
   }
 
   async buildAndStartContainer({
@@ -474,35 +365,32 @@ class ZeroDowntimeDeployer {
     ws,
   }) {
     try {
-      try {
-        const existingContainers = await executeCommand("docker-compose", [
+      const existingContainers = await executeCommand("docker-compose", [
+        "-p",
+        projectName,
+        "ps",
+        "-q",
+        serviceName,
+      ]);
+      const containerIds = existingContainers.stdout
+        .trim()
+        .split("\n")
+        .filter((id) => id);
+      for (const id of containerIds)
+        await executeCommand("docker-compose", [
           "-p",
           projectName,
-          "ps",
-          "-q",
-          serviceName,
+          "down",
+          "-v",
         ]);
-        const containerIds = existingContainers.stdout
-          .trim()
-          .split("\n")
-          .filter((id) => id);
-        for (const id of containerIds) {
-          await executeCommand("docker-compose", [
-            "-p",
-            projectName,
-            "down",
-            "-v",
-          ]);
-        }
-      } catch (error) {
-        logger.warn(`Failed to clean up old containers: ${error.message}`);
-      }
+
       if (!this.templateHandler) {
         this.templateHandler = new TemplateHandler(
           this.templatesDir,
           require("../deployConfig.json"),
         );
       }
+
       const files = await this.templateHandler.generateDeploymentFiles({
         appType: payload.appType,
         appName: serviceName,
@@ -518,6 +406,7 @@ class ZeroDowntimeDeployer {
           start_period: "40s",
         },
       });
+
       await Promise.all([
         fs.writeFile(path.join(deployDir, "Dockerfile"), files.dockerfile),
         fs.writeFile(
@@ -525,7 +414,7 @@ class ZeroDowntimeDeployer {
           files.dockerCompose,
         ),
       ]);
-      logger.info("Deployment files written successfully");
+
       await executeCommand(
         "docker-compose",
         ["-p", projectName, "build", "--no-cache"],
@@ -534,38 +423,27 @@ class ZeroDowntimeDeployer {
       await executeCommand("docker-compose", ["-p", projectName, "up", "-d"], {
         cwd: deployDir,
       });
+
       const { stdout: newContainerId } = await executeCommand(
         "docker-compose",
         ["-p", projectName, "ps", "-q", serviceName],
         { cwd: deployDir },
       );
-      if (!newContainerId.trim()) {
-        throw new Error("Failed to get container ID after startup");
-      }
-      logger.info(
-        `Container ${serviceName} started with ID ${newContainerId.trim()}`,
-      );
       return { id: newContainerId.trim(), name: serviceName };
     } catch (error) {
-      logger.error("Container build/start failed:", error);
-      throw new Error(`Failed to build and start container: ${error.message}`);
+      throw new Error(`Failed to build/start container: ${error.message}`);
     }
   }
 
   async performRollback(oldContainer, newContainer, domain) {
-    logger.info("Initiating rollback procedure");
     try {
-      if (newContainer) {
-        logger.info(
-          `Stopping and removing new container: ${newContainer.name}`,
-        );
+      if (newContainer)
         await executeCommand("docker-compose", [
           "-p",
           newContainer.name,
           "down",
           "-v",
         ]);
-      }
       if (oldContainer) {
         const backupMetadataPath = path.join(
           "/opt/cloudlunacy/deployments",
@@ -573,15 +451,9 @@ class ZeroDowntimeDeployer {
           "backup",
           "backup-metadata.json",
         );
-        const exists = await this.fileExists(backupMetadataPath);
-        if (exists) {
+        if (await this.fileExists(backupMetadataPath)) {
           const backupMetadata = JSON.parse(
             await fs.readFile(backupMetadataPath, "utf-8"),
-          );
-          logger.info(`Restoring backup: ${backupMetadata.backupName}`);
-          const oldDeployDir = path.join(
-            this.deployBaseDir,
-            backupMetadata.containerName,
           );
           await executeCommand("docker", [
             "run",
@@ -594,14 +466,9 @@ class ZeroDowntimeDeployer {
             id: backupMetadata.containerId,
             name: backupMetadata.containerName,
           });
-        } else {
-          logger.warn(
-            "No backup metadata found. Skipping restoration of old container.",
-          );
         }
       }
     } catch (error) {
-      logger.error("Failed to restore old container:", error);
       throw new Error(`Failed to restore old container: ${error.message}`);
     }
   }
@@ -616,30 +483,22 @@ class ZeroDowntimeDeployer {
   }
 
   async sendSuccess(ws, data) {
-    if (ws && ws.readyState === ws.OPEN) {
+    if (ws?.readyState === ws.OPEN) {
       ws.send(
         JSON.stringify({
           type: "status",
-          payload: {
-            ...data,
-            timestamp: new Date().toISOString(),
-          },
+          payload: { ...data, timestamp: new Date().toISOString() },
         }),
       );
     }
   }
 
   async sendError(ws, data) {
-    if (ws && ws.readyState === ws.OPEN) {
+    if (ws?.readyState === ws.OPEN) {
       ws.send(
         JSON.stringify({
           type: "error",
-          payload: {
-            deploymentId: data.deploymentId,
-            status: "failed",
-            message: data.message || "Deployment failed",
-            timestamp: new Date().toISOString(),
-          },
+          payload: { ...data, timestamp: new Date().toISOString() },
         }),
       );
     }
@@ -649,14 +508,10 @@ class ZeroDowntimeDeployer {
     try {
       if (!keepBackup) {
         const backupDir = path.join(deployDir, "backup");
-        if (await this.directoryExists(backupDir)) {
+        if (await this.directoryExists(backupDir))
           await fs.rm(backupDir, { recursive: true, force: true });
-          logger.info(`Backup directory ${backupDir} removed`);
-        }
       }
-    } catch (error) {
-      logger.warn(`Cleanup error: ${error.message}`);
-    }
+    } catch (error) {}
   }
 
   async directoryExists(dir) {
