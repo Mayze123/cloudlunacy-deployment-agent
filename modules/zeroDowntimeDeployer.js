@@ -113,6 +113,7 @@ class ZeroDowntimeDeployer {
       try {
         const axios = require("axios");
         const frontApiUrl = process.env.FRONT_API_URL;
+        console.log(frontApiUrl);
         const response = await axios.post(
           `${frontApiUrl}/api/frontdoor/add-app`,
           {
@@ -121,6 +122,7 @@ class ZeroDowntimeDeployer {
           },
           { headers: { "Content-Type": "application/json" } },
         );
+        console.log(response);
       } catch (err) {
         throw err;
       }

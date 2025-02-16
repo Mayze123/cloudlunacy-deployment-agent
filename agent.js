@@ -46,7 +46,7 @@ const initializeMongoDB = () => {
   // ensure that the environment variables (like MONGO_MANAGER_USERNAME, etc.)
   // are set properly. Otherwise, simply log that initialization is complete.
   logger.info(
-    "MongoDB initialization: TLS verification is handled by the front server."
+    "MongoDB initialization: TLS verification is handled by the front server.",
   );
   return true;
 };
@@ -68,7 +68,7 @@ async function authenticateAndConnect() {
         headers: {
           "Content-Type": "application/json",
         },
-      }
+      },
     );
 
     const { wsUrl } = response.data;
@@ -155,12 +155,12 @@ function handleWebSocketClose(retryCount, retryDelay) {
     logger.warn(
       `WebSocket connection closed. Reconnecting in ${
         retryDelay / 1000
-      } seconds...`
+      } seconds...`,
     );
     setTimeout(authenticateAndConnect, retryDelay);
   } else {
     logger.error(
-      "Maximum reconnect attempts reached. Please check the connection."
+      "Maximum reconnect attempts reached. Please check the connection.",
     );
   }
 }
@@ -174,7 +174,7 @@ function handleAuthenticationError(error) {
     logger.error(
       `Authentication failed with status ${
         error.response.status
-      }: ${JSON.stringify(error.response.data)}`
+      }: ${JSON.stringify(error.response.data)}`,
     );
   } else if (error.request) {
     logger.error("No response received from backend:", error.request);
@@ -214,6 +214,7 @@ function handleDeployApp(message) {
   }
 
   ZeroDowntimeDeployer.deploy(message.payload, ws).finally(() => {
+    console.log(message.payload);
     if (process.env.GITHUB_TOKEN) delete process.env.GITHUB_TOKEN;
   });
 }
@@ -235,7 +236,7 @@ async function createDatabase(payload) {
     await mongoManager.createDatabaseAndUser(dbName, username, password);
 
     logger.info(
-      `Database ${dbName} and user ${username} created successfully.`
+      `Database ${dbName} and user ${username} created successfully.`,
     );
     sendWebSocketMessage("database_created", {
       databaseId,
