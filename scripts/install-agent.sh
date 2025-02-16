@@ -391,11 +391,11 @@ main() {
   install_node
   setup_user_directories
   stop_conflicting_containers
-  configure_env
   download_agent
   install_agent_dependencies
   setup_docker_permissions
   install_mongo
+  configure_env
   setup_service
   verify_installation
   register_agent
