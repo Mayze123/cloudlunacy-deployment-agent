@@ -107,25 +107,25 @@ class ZeroDowntimeDeployer {
       finalDomain = `${serviceName}.${process.env.MONGO_DOMAIN}`;
     } else {
       finalDomain = `${serviceName}.${process.env.APP_DOMAIN}`;
-      const resolvedTargetUrl =
-        targetUrl || `http://${LOCAL_IP}:${value.containerPort || 8080}`;
+      // const resolvedTargetUrl =
+      //   targetUrl || `http://${LOCAL_IP}:${value.containerPort || 8080}`;
 
-      try {
-        const axios = require("axios");
-        const frontApiUrl = process.env.FRONT_API_URL;
-        console.log(frontApiUrl);
-        const response = await axios.post(
-          `${frontApiUrl}/api/frontdoor/add-app`,
-          {
-            subdomain: serviceName,
-            targetUrl: resolvedTargetUrl,
-          },
-          { headers: { "Content-Type": "application/json" } },
-        );
-        console.log(response);
-      } catch (err) {
-        throw err;
-      }
+      // try {
+      //   const axios = require("axios");
+      //   const frontApiUrl = process.env.FRONT_API_URL;
+      //   console.log(frontApiUrl);
+      //   const response = await axios.post(
+      //     `${frontApiUrl}/api/frontdoor/add-app`,
+      //     {
+      //       subdomain: serviceName,
+      //       targetUrl: resolvedTargetUrl,
+      //     },
+      //     { headers: { "Content-Type": "application/json" } },
+      //   );
+      //   console.log(response);
+      // } catch (err) {
+      //   throw err;
+      // }
     }
 
     const serviceLockKey = `${serviceName}-${environment}`;
