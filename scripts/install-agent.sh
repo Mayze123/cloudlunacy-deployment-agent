@@ -293,35 +293,22 @@ setup_user_directories() {
 }
 
 download_agent() {
-  log "Checking CloudLunacy Deployment Agent repository..."
-  if [ -d "$BASE_DIR/.git" ]; then
-    cd "$BASE_DIR" || { log_error "Failed to change directory to $BASE_DIR"; exit 1; }
+  log "Cloning the CloudLunacy Deployment Agent repository..."
 
-    # Check for local modifications
-    if ! sudo -u "$USERNAME" git diff-index --quiet HEAD --; then
-      log_warn "Local changes detected in the repository. Aborting update to avoid data loss."
-      exit 1
-    fi
-
-    log "Repository already exists in $BASE_DIR. Forcing update of repository..."
-    sudo -u "$USERNAME" git fetch --all || { log_error "Failed to fetch repository updates"; exit 1; }
-
-    # Check if the remote has a new commit
-    CURRENT_HASH=$(sudo -u "$USERNAME" git rev-parse HEAD)
-    REMOTE_HASH=$(sudo -u "$USERNAME" git rev-parse origin/main)
-
-    if [ "$CURRENT_HASH" != "$REMOTE_HASH" ]; then
-      log "Repository is out of date. Updating repository..."
-      sudo -u "$USERNAME" git reset --hard origin/main || { log_error "Failed to reset repository"; exit 1; }
-    else
-      log "Repository is already up to date."
-    fi
-  else
-    log "Cloning the CloudLunacy Deployment Agent repository..."
-    sudo -u "$USERNAME" git clone https://github.com/Mayze123/cloudlunacy-deployment-agent.git "$BASE_DIR" \
-      || { log_error "Failed to clone repository"; exit 1; }
+  # If the directory exists, remove it completely
+  if [ -d "$BASE_DIR" ]; then
+    log "Directory $BASE_DIR already exists. Removing it for a fresh clone..."
+    rm -rf "$BASE_DIR" || { log_error "Failed to remove directory $BASE_DIR"; exit 1; }
   fi
-  log "Agent repository is up to date at $BASE_DIR."
+
+  # Create the base directory (if needed)
+  mkdir -p "$BASE_DIR" || { log_error "Failed to create directory $BASE_DIR"; exit 1; }
+
+  # Clone the repository afresh
+  sudo -u "$USERNAME" git clone https://github.com/Mayze123/cloudlunacy-deployment-agent.git "$BASE_DIR" \
+    || { log_error "Failed to clone repository"; exit 1; }
+
+  log "Agent repository is freshly cloned at $BASE_DIR."
 }
 
 install_agent_dependencies() {
