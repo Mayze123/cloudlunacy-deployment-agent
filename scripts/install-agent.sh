@@ -295,18 +295,19 @@ setup_user_directories() {
 download_agent() {
   log "Cloning the CloudLunacy Deployment Agent repository..."
 
-  # If the directory exists, remove it completely
+  # Remove existing directory if it exists
   if [ -d "$BASE_DIR" ]; then
     log "Directory $BASE_DIR already exists. Removing it for a fresh clone..."
     rm -rf "$BASE_DIR" || { log_error "Failed to remove directory $BASE_DIR"; exit 1; }
   fi
 
-  # Create the base directory (if needed)
-  mkdir -p "$BASE_DIR" || { log_error "Failed to create directory $BASE_DIR"; exit 1; }
-
-  # Clone the repository afresh
-  sudo -u "$USERNAME" git clone https://github.com/Mayze123/cloudlunacy-deployment-agent.git "$BASE_DIR" \
+  # Clone the repository as root (since root can write to /opt)
+  git clone https://github.com/Mayze123/cloudlunacy-deployment-agent.git "$BASE_DIR" \
     || { log_error "Failed to clone repository"; exit 1; }
+
+  # Change ownership of the cloned repository to the dedicated user
+  chown -R "$USERNAME":"$USERNAME" "$BASE_DIR" \
+    || { log_error "Failed to set ownership on $BASE_DIR"; exit 1; }
 
   log "Agent repository is freshly cloned at $BASE_DIR."
 }
