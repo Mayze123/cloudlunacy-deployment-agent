@@ -26,9 +26,24 @@ const { execSync } = require("child_process");
 // Load environment variables
 dotenv.config();
 
+// --- Load the JWT token from the persisted file ---
+const path = require("path");
+const jwtFile = path.join(__dirname, "..", ".agent_jwt.json");
+try {
+  const data = fs.readFileSync(jwtFile, "utf8");
+  const parsed = JSON.parse(data);
+  if (parsed.token) {
+    process.env.AGENT_JWT = parsed.token;
+    console.log("Loaded AGENT_JWT from token file.");
+  }
+} catch (err) {
+  console.log("No agent JWT file found; proceeding without loading token.");
+}
+
 // Configuration Constants
 const BACKEND_URL = process.env.BACKEND_URL;
 const AGENT_API_TOKEN = process.env.AGENT_API_TOKEN;
+const AGENT_JWT = process.env.AGENT_JWT; // JWT from registration
 const SERVER_ID = process.env.SERVER_ID;
 const WS_RECONNECT_MAX_RETRIES = 5;
 const WS_INITIAL_RETRY_DELAY = 5000;

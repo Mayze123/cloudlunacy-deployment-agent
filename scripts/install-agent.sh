@@ -236,15 +236,19 @@ register_agent() {
   log "Registering agent with front server..."
   # Get primary IP address of the VPS
   LOCAL_IP=$(hostname -I | awk '{print $1}')
-    log "register_agent ~ FRONT_API_URL, $FRONT_API_URL"
+  log "register_agent ~ FRONT_API_URL, $FRONT_API_URL"
   log "register_agent ~ LOCAL_IP:, $LOCAL_IP"
   
-    RESPONSE=$(curl -s -X POST "${FRONT_API_URL}/api/agent/register" \
+  RESPONSE=$(curl -s -X POST "${FRONT_API_URL}/api/agent/register" \
     -H "Content-Type: application/json" \
     -d "{\"agentId\": \"${SERVER_ID}\" }")
   
   if echo "$RESPONSE" | grep -q "token"; then
     log "Agent registered successfully. Response: $RESPONSE"
+    # Save the JWT to a file (separate from any static AGENT_API_TOKEN)
+    JWT_FILE="/opt/cloudlunacy/.agent_jwt.json"
+    echo "$RESPONSE" | jq . > "$JWT_FILE"
+    chmod 600 "$JWT_FILE"
   else
     log "Agent registration failed. Response: $RESPONSE"
     log_error "Agent registration failed. Response: $RESPONSE"

@@ -118,13 +118,22 @@ class ZeroDowntimeDeployer {
         `${frontApiUrl}/api/frontdoor/add-app`,
       );
       try {
+        // Use the JWT loaded in process.env.AGENT_JWT
+        const token = process.env.AGENT_JWT;
+        console.log("🚀 ~ ZeroDowntimeDeployer ~ deploy ~ token:", token);
         const response = await axios.post(
           `${frontApiUrl}/api/frontdoor/add-app`,
           {
             subdomain: serviceName,
             targetUrl: resolvedTargetUrl,
           },
-          { headers: { "Content-Type": "application/json" } },
+          {
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${token}`,
+            },
+            timeout: 10000, // 10-second timeout
+          },
         );
         console.log("[DEBUG] Frontdoor add-app response:", response.data);
       } catch (err) {
