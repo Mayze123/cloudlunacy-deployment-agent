@@ -98,11 +98,19 @@ class ZeroDowntimeDeployer {
       envVarsToken,
       targetUrl,
     } = value;
+    console.log("🚀 ~ ZeroDowntimeDeployer ~ deploy ~ value:", value);
 
     const LOCAL_IP = execSync("hostname -I | awk '{print $1}'")
       .toString()
       .trim();
     let finalDomain = domain;
+
+    const token = process.env.AGENT_JWT;
+    console.log("🚀 ~ ZeroDowntimeDeployer ~ deploy ~ token:", token);
+    console.log(
+      "🚀 ~ ZeroDowntimeDeployer ~ deploy ~ appType.toLowerCase():",
+      appType.toLowerCase(),
+    );
 
     if (appType.toLowerCase() === "mongo") {
       finalDomain = `${serviceName}.${process.env.MONGO_DOMAIN}`;
@@ -132,7 +140,7 @@ class ZeroDowntimeDeployer {
               "Content-Type": "application/json",
               Authorization: `Bearer ${token}`,
             },
-            timeout: 10000, // 10-second timeout
+            timeout: 20000, // 10-second timeout
           },
         );
         console.log("[DEBUG] Frontdoor add-app response:", response.data);
