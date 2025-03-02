@@ -117,24 +117,24 @@ class ZeroDowntimeDeployer {
         "[DEBUG] Calling frontdoor add-app endpoint at:",
         `${frontApiUrl}/api/frontdoor/add-app`,
       );
-      // try {
-      //   const response = await axios.post(
-      //     `${frontApiUrl}/api/frontdoor/add-app`,
-      //     {
-      //       subdomain: serviceName,
-      //       targetUrl: resolvedTargetUrl,
-      //     },
-      //     { headers: { "Content-Type": "application/json" } },
-      //   );
-      //   console.log("[DEBUG] Frontdoor add-app response:", response.data);
-      // } catch (err) {
-      //   console.log("🚀 ~ ZeroDowntimeDeployer ~ deploy ~ err:", err);
-      //   console.error(
-      //     "[ERROR] Failed to call frontdoor add-app endpoint:",
-      //     err.message,
-      //   );
-      //   throw err;
-      // }
+      try {
+        const response = await axios.post(
+          `${frontApiUrl}/api/frontdoor/add-app`,
+          {
+            subdomain: serviceName,
+            targetUrl: resolvedTargetUrl,
+          },
+          { headers: { "Content-Type": "application/json" } },
+        );
+        console.log("[DEBUG] Frontdoor add-app response:", response.data);
+      } catch (err) {
+        console.log("🚀 ~ ZeroDowntimeDeployer ~ deploy ~ err:", err);
+        console.error(
+          "[ERROR] Failed to call frontdoor add-app endpoint:",
+          err.message,
+        );
+        throw err;
+      }
     }
 
     const serviceLockKey = `${serviceName}-${environment}`;

@@ -237,9 +237,9 @@ register_agent() {
   # Get primary IP address of the VPS
   LOCAL_IP=$(hostname -I | awk '{print $1}')
   
-  RESPONSE=$(curl -s -X POST "${FRONT_API_URL}/api/agent/register" \
+    RESPONSE=$(curl -s -X POST "${FRONT_API_URL}/api/agent/register" \
     -H "Content-Type: application/json" \
-    -d "{\"agentToken\": \"${AGENT_TOKEN}\", \"serverId\": \"${SERVER_ID}\", \"mongoIp\": \"${LOCAL_IP}\" }")
+    -d "{\"agentId\": \"${SERVER_ID}\" }")
   
   if echo "$RESPONSE" | grep -q "token"; then
     log "Agent registered successfully. Response: $RESPONSE"
