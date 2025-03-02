@@ -150,7 +150,7 @@ class ZeroDowntimeDeployer {
           "[ERROR] Failed to call frontdoor add-app endpoint:",
           err.message,
         );
-        throw err;
+        // throw err;
       }
     }
 
