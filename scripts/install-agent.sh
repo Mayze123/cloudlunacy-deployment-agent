@@ -236,6 +236,8 @@ register_agent() {
   log "Registering agent with front server..."
   # Get primary IP address of the VPS
   LOCAL_IP=$(hostname -I | awk '{print $1}')
+    console.log("🚀 ~ register_agent ~ FRONT_API_URL:", FRONT_API_URL)
+  console.log("🚀 ~ register_agent ~ LOCAL_IP:", LOCAL_IP)
   
     RESPONSE=$(curl -s -X POST "${FRONT_API_URL}/api/agent/register" \
     -H "Content-Type: application/json" \
@@ -244,6 +246,7 @@ register_agent() {
   if echo "$RESPONSE" | grep -q "token"; then
     log "Agent registered successfully. Response: $RESPONSE"
   else
+    log "Agent registration failed. Response: $RESPONSE"
     log_error "Agent registration failed. Response: $RESPONSE"
     exit 1
   fi
