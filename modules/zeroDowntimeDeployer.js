@@ -107,25 +107,32 @@ class ZeroDowntimeDeployer {
       finalDomain = `${serviceName}.${process.env.MONGO_DOMAIN}`;
     } else {
       finalDomain = `${serviceName}.${process.env.APP_DOMAIN}`;
-      // const resolvedTargetUrl =
-      //   targetUrl || `http://${LOCAL_IP}:${value.containerPort || 8080}`;
 
-      // try {
-      //   const axios = require("axios");
-      //   const frontApiUrl = process.env.FRONT_API_URL;
-      //   console.log(frontApiUrl);
-      //   const response = await axios.post(
-      //     `${frontApiUrl}/api/frontdoor/add-app`,
-      //     {
-      //       subdomain: serviceName,
-      //       targetUrl: resolvedTargetUrl,
-      //     },
-      //     { headers: { "Content-Type": "application/json" } },
-      //   );
-      //   console.log(response);
-      // } catch (err) {
-      //   throw err;
-      // }
+      const frontApiUrl = process.env.FRONT_API_URL;
+      const resolvedTargetUrl =
+        targetUrl || `http://${LOCAL_IP}:${value.containerPort || 8080}`;
+      console.log("resolvedTargetUrl" + resolvedTargetUrl);
+      console.log(
+        "[DEBUG] Calling frontdoor add-app endpoint at:",
+        `${frontApiUrl}/api/frontdoor/add-app`,
+      );
+      try {
+        const response = await axios.post(
+          `${frontApiUrl}/api/frontdoor/add-app`,
+          {
+            subdomain: serviceName,
+            targetUrl: resolvedTargetUrl,
+          },
+          { headers: { "Content-Type": "application/json" } },
+        );
+        console.log("[DEBUG] Frontdoor add-app response:", response.data);
+      } catch (err) {
+        console.error(
+          "[ERROR] Failed to call frontdoor add-app endpoint:",
+          err.message,
+        );
+        throw err;
+      }
     }
 
     const serviceLockKey = `${serviceName}-${environment}`;
