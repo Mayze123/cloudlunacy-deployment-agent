@@ -28,16 +28,19 @@ dotenv.config();
 
 // --- Load the JWT token from the persisted file ---
 const path = require("path");
-const jwtFile = path.join(__dirname, "..", ".agent_jwt.json");
+const jwtFile = "/opt/cloudlunacy/.agent_jwt.json";
 try {
+  console.log(`Looking for JWT file at: ${jwtFile}`);
   const data = fs.readFileSync(jwtFile, "utf8");
+  console.log(`JWT file contents: ${data}`);
   const parsed = JSON.parse(data);
+  console.log(`Parsed token: ${parsed.token ? "Found" : "Not found"}`);
   if (parsed.token) {
     process.env.AGENT_JWT = parsed.token;
     console.log("Loaded AGENT_JWT from token file.");
   }
 } catch (err) {
-  console.log("No agent JWT file found; proceeding without loading token.");
+  console.log(`Error loading JWT file: ${err.message}`);
 }
 
 // Configuration Constants

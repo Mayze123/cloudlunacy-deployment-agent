@@ -249,6 +249,9 @@ register_agent() {
     JWT_FILE="/opt/cloudlunacy/.agent_jwt.json"
     echo "$RESPONSE" | jq . > "$JWT_FILE"
     chmod 600 "$JWT_FILE"
+    # Change ownership to the cloudlunacy user
+    chown $USERNAME:$USERNAME "$JWT_FILE"
+    log "JWT file permissions updated for $USERNAME user"
   else
     log "Agent registration failed. Response: $RESPONSE"
     log_error "Agent registration failed. Response: $RESPONSE"
