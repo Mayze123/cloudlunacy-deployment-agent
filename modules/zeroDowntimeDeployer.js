@@ -7,6 +7,7 @@ const { ensureDeploymentPermissions } = require("../utils/permissionCheck");
 const apiClient = require("../utils/apiClient");
 const EnvironmentManager = require("../utils/environmentManager");
 const Joi = require("joi");
+const axios = require("axios");
 const { execSync } = require("child_process");
 
 class ZeroDowntimeDeployer {
@@ -127,6 +128,7 @@ class ZeroDowntimeDeployer {
         );
         console.log("[DEBUG] Frontdoor add-app response:", response.data);
       } catch (err) {
+        console.log("🚀 ~ ZeroDowntimeDeployer ~ deploy ~ err:", err);
         console.error(
           "[ERROR] Failed to call frontdoor add-app endpoint:",
           err.message,
