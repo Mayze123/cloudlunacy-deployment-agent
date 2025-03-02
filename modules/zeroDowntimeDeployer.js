@@ -128,7 +128,18 @@ class ZeroDowntimeDeployer {
       try {
         // Use the JWT loaded in process.env.AGENT_JWT
         const token = process.env.AGENT_JWT;
-        console.log("🚀 ~ ZeroDowntimeDeployer ~ deploy ~ token:", token);
+        logger.info(
+          "Preparing to call front API with token:",
+          token ? "Token exists" : "No token found",
+        );
+        logger.info(`Full request URL: ${frontApiUrl}/api/frontdoor/add-app`);
+        logger.info(
+          `Request payload: ${JSON.stringify({
+            subdomain: serviceName,
+            targetUrl: resolvedTargetUrl,
+          })}`,
+        );
+
         const response = await axios.post(
           `${frontApiUrl}/api/frontdoor/add-app`,
           {
@@ -140,17 +151,25 @@ class ZeroDowntimeDeployer {
               "Content-Type": "application/json",
               Authorization: `Bearer ${token}`,
             },
-            timeout: 20000, // 10-second timeout
+            timeout: 20000,
           },
         );
-        console.log("[DEBUG] Frontdoor add-app response:", response.data);
+        logger.info("[DEBUG] Frontdoor add-app response:", response.data);
       } catch (err) {
-        console.log("🚀 ~ ZeroDowntimeDeployer ~ deploy ~ err:", err);
-        console.error(
-          "[ERROR] Failed to call frontdoor add-app endpoint:",
-          err.message,
-        );
-        // throw err;
+        logger.error("Detailed error information:", {
+          message: err.message,
+          code: err.code,
+          responseStatus: err.response?.status,
+          responseData: err.response?.data,
+          requestConfig: {
+            url: err.config?.url,
+            method: err.config?.method,
+            headers: err.config?.headers ? "Present" : "Missing",
+            data: err.config?.data,
+          },
+        });
+        logger.warn("Continuing deployment despite front API error");
+        // Don't throw the error - just continue
       }
     }
 
