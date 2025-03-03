@@ -10,6 +10,8 @@ services:
       - NODE_ENV={{environment}}
       - PORT={{containerPort}}
       - HEALTH_PORT=9000
+    ports:
+      - "{{containerPort}}:{{containerPort}}"  # Dynamic port mapping
     env_file:
       - "{{envFile}}"
     restart: unless-stopped
@@ -27,7 +29,3 @@ services:
       timeout: 5s
       retries: 3
       start_period: 40s
-
-networks:
-  traefik-network:
-    external: true

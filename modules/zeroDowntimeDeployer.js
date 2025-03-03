@@ -119,7 +119,7 @@ class ZeroDowntimeDeployer {
 
       const frontApiUrl = process.env.FRONT_API_URL;
       const resolvedTargetUrl =
-        targetUrl || `http://${LOCAL_IP}:${value.containerPort || 8080}`;
+        targetUrl || `http://${LOCAL_IP}:${value.containerPort}`;
       console.log("resolvedTargetUrl" + resolvedTargetUrl);
       console.log(
         "[DEBUG] Calling frontdoor add-app endpoint at:",
