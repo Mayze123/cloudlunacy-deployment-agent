@@ -15,6 +15,7 @@ class TemplateHandler {
     appType,
     appName,
     environment,
+    hostPort,
     containerPort,
     domain,
     envFile,
@@ -27,11 +28,11 @@ class TemplateHandler {
 
     const dockerfileTemplatePath = path.join(
       this.templatesDir,
-      config.dockerfileTemplate
+      config.dockerfileTemplate,
     );
     const dockerComposeTemplatePath = path.join(
       this.templatesDir,
-      config.dockerComposeTemplate
+      config.dockerComposeTemplate,
     );
 
     // Check if template files exist
@@ -42,16 +43,16 @@ class TemplateHandler {
 
     const dockerfileTemplateContent = await fs.readFile(
       dockerfileTemplatePath,
-      "utf-8"
+      "utf-8",
     );
     const dockerComposeTemplateContent = await fs.readFile(
       dockerComposeTemplatePath,
-      "utf-8"
+      "utf-8",
     );
 
     const dockerfileTemplate = Handlebars.compile(dockerfileTemplateContent);
     const dockerComposeTemplate = Handlebars.compile(
-      dockerComposeTemplateContent
+      dockerComposeTemplateContent,
     );
 
     // Compute sanitizedAppName
@@ -70,6 +71,7 @@ class TemplateHandler {
       appName,
       sanitizedAppName,
       environment,
+      hostPort,
       containerPort,
       domain,
       envFile,

@@ -25,6 +25,7 @@ class ZeroDowntimeDeployer {
     this.templatesDir =
       process.env.TEMPLATES_DIR || "/opt/cloudlunacy/templates";
     this.deploymentLocks = new Set();
+    this.STANDARD_CONTAINER_PORT = 8080;
   }
 
   validatePrerequisites = async () => {
@@ -37,7 +38,7 @@ class ZeroDowntimeDeployer {
     }
   };
 
-  validateNetworks = async () => {
+  async validateNetworks() {
     try {
       const { stdout: networks } = await executeCommand("docker", [
         "network",
@@ -45,17 +46,21 @@ class ZeroDowntimeDeployer {
         "--format",
         "{{.Name}}",
       ]);
+
       if (!networks.includes("traefik-network")) {
+        logger.info("Creating traefik-network as it doesn't exist");
         await executeCommand("docker", [
           "network",
           "create",
           "traefik-network",
         ]);
+      } else {
+        logger.debug("traefik-network exists, continuing deployment");
       }
     } catch (error) {
       throw new Error(`Network validation failed: ${error.message}`);
     }
-  };
+  }
 
   async deploy(payload, ws) {
     const payloadSchema = Joi.object({
@@ -105,6 +110,13 @@ class ZeroDowntimeDeployer {
       .trim();
     let finalDomain = domain;
 
+    // Initialize port manager
+    await portManager.initialize();
+
+    // Allocate a host port for this service
+    const { hostPort, containerPort } =
+      await portManager.allocatePort(serviceName);
+
     const token = process.env.AGENT_JWT;
     console.log("🚀 ~ ZeroDowntimeDeployer ~ deploy ~ token:", token);
     console.log(
@@ -118,15 +130,15 @@ class ZeroDowntimeDeployer {
       finalDomain = `${serviceName}.${process.env.APP_DOMAIN}`;
 
       const frontApiUrl = process.env.FRONT_API_URL;
-      const resolvedTargetUrl =
-        targetUrl || `http://${LOCAL_IP}:${value.containerPort}`;
+      const resolvedTargetUrl = `http://${LOCAL_IP}:${hostPort}`;
+
       console.log("resolvedTargetUrl" + resolvedTargetUrl);
       console.log(
         "[DEBUG] Calling frontdoor add-app endpoint at:",
         `${frontApiUrl}/api/frontdoor/add-app`,
       );
+
       try {
-        // Use the JWT loaded in process.env.AGENT_JWT
         const token = process.env.AGENT_JWT;
         logger.info(
           "Preparing to call front API with token:",
@@ -226,6 +238,8 @@ class ZeroDowntimeDeployer {
         domain: finalDomain,
         envFilePath,
         environment,
+        hostPort, // Pass the host port
+        containerPort, // Pass the fixed container port
         payload: value,
         ws,
       });
@@ -408,6 +422,8 @@ class ZeroDowntimeDeployer {
     domain,
     envFilePath,
     environment,
+    hostPort,
+    containerPort,
     payload,
     ws,
   }) {
@@ -442,7 +458,8 @@ class ZeroDowntimeDeployer {
         appType: payload.appType,
         appName: serviceName,
         environment,
-        containerPort: payload.containerPort || 8080,
+        hostPort,
+        containerPort,
         domain,
         envFile: path.basename(envFilePath),
         health: {
