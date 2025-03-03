@@ -9,6 +9,7 @@ const EnvironmentManager = require("../utils/environmentManager");
 const Joi = require("joi");
 const axios = require("axios");
 const { execSync } = require("child_process");
+const portManager = require("../utils/portManager");
 
 class ZeroDowntimeDeployer {
   constructor() {
