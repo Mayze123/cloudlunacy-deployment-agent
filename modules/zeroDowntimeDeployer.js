@@ -63,6 +63,130 @@ class ZeroDowntimeDeployer {
     }
   }
 
+  /**
+   * Enhanced function for registering services with the front server
+   */
+  async registerWithFrontServer(serviceName, targetUrl, appType) {
+    const token = process.env.AGENT_JWT;
+    const frontApiUrl = process.env.FRONT_API_URL;
+
+    if (!token) {
+      throw new Error(
+        "AGENT_JWT is not set - agent not properly registered with front server",
+      );
+    }
+
+    if (!frontApiUrl) {
+      throw new Error(
+        "FRONT_API_URL is not set - cannot communicate with front server",
+      );
+    }
+
+    logger.info(
+      `Registering service ${serviceName} with front server at ${frontApiUrl}`,
+    );
+
+    // Determine the correct endpoint based on app type
+    const endpoint =
+      appType.toLowerCase() === "mongo"
+        ? `${frontApiUrl}/api/frontdoor/add-subdomain`
+        : `${frontApiUrl}/api/frontdoor/add-app`;
+
+    // Prepare request payload
+    const payload =
+      appType.toLowerCase() === "mongo"
+        ? { subdomain: serviceName, targetIp: targetUrl.split(":")[0] }
+        : { subdomain: serviceName, targetUrl };
+
+    // Add retry logic for resilience
+    const maxRetries = 5;
+    const initialDelay = 1000; // 1 second
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        const response = await axios.post(endpoint, payload, {
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          timeout: 10000, // 10 seconds
+        });
+
+        logger.info(
+          `Service registration successful on attempt ${attempt}:`,
+          response.data,
+        );
+        return response.data;
+      } catch (error) {
+        const statusCode = error.response?.status;
+        const errorData = error.response?.data;
+
+        logger.error(`Registration attempt ${attempt} failed:`, {
+          statusCode,
+          error: errorData || error.message,
+        });
+
+        // Don't retry if it's an authentication or validation error
+        if (statusCode === 401 || statusCode === 403 || statusCode === 400) {
+          throw new Error(
+            `Service registration failed: ${errorData?.message || error.message}`,
+          );
+        }
+
+        // Last attempt failed, give up
+        if (attempt === maxRetries) {
+          throw new Error(
+            `Service registration failed after ${maxRetries} attempts`,
+          );
+        }
+
+        // Exponential backoff for retries
+        const delay = initialDelay * Math.pow(2, attempt - 1);
+        logger.info(`Retrying in ${delay}ms...`);
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+    }
+  }
+
+  /**
+   * Function to verify service accessibility after registration
+   */
+  async verifyServiceAccessibility(domain, protocol = "http") {
+    logger.info(`Verifying service accessibility at ${protocol}://${domain}`);
+
+    const maxAttempts = 10;
+    const retryDelay = 5000; // 5 seconds
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const response = await axios.get(`${protocol}://${domain}`, {
+          timeout: 5000,
+          validateStatus: (status) => status < 500, // Any non-server error is OK for verification
+        });
+
+        logger.info(
+          `Service at ${domain} is accessible (Status: ${response.status})`,
+        );
+        return true;
+      } catch (error) {
+        logger.warn(
+          `Attempt ${attempt}/${maxAttempts}: Service at ${domain} not accessible yet`,
+        );
+
+        if (attempt === maxAttempts) {
+          logger.error(
+            `Service verification failed after ${maxAttempts} attempts`,
+          );
+          return false;
+        }
+
+        await new Promise((resolve) => setTimeout(resolve, retryDelay));
+      }
+    }
+
+    return false;
+  }
+
   async deploy(payload, ws) {
     const payloadSchema = Joi.object({
       deploymentId: Joi.string().required(),
@@ -129,60 +253,29 @@ class ZeroDowntimeDeployer {
       finalDomain = `${serviceName}.${process.env.MONGO_DOMAIN}`;
     } else {
       finalDomain = `${serviceName}.${process.env.APP_DOMAIN}`;
-
-      const frontApiUrl = process.env.FRONT_API_URL;
       const resolvedTargetUrl = `http://${LOCAL_IP}:${hostPort}`;
 
-      console.log("resolvedTargetUrl" + resolvedTargetUrl);
-      console.log(
-        "[DEBUG] Calling frontdoor add-app endpoint at:",
-        `${frontApiUrl}/api/frontdoor/add-app`,
-      );
-
       try {
-        const token = process.env.AGENT_JWT;
-        logger.info(
-          "Preparing to call front API with token:",
-          token ? "Token exists" : "No token found",
-        );
-        logger.info(`Full request URL: ${frontApiUrl}/api/frontdoor/add-app`);
-        logger.info(
-          `Request payload: ${JSON.stringify({
-            subdomain: serviceName,
-            targetUrl: resolvedTargetUrl,
-          })}`,
-        );
+        // Register the service with robust error handling
+        await registerWithFrontServer(serviceName, resolvedTargetUrl, appType);
 
-        const response = await axios.post(
-          `${frontApiUrl}/api/frontdoor/add-app`,
-          {
-            subdomain: serviceName,
-            targetUrl: resolvedTargetUrl,
-          },
-          {
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${token}`,
-            },
-            timeout: 20000,
-          },
-        );
-        logger.info("[DEBUG] Frontdoor add-app response:", response.data);
+        // Verify that the service is accessible (optional but recommended)
+        const isAccessible = await verifyServiceAccessibility(finalDomain);
+        if (!isAccessible) {
+          logger.warn(
+            `Service at ${finalDomain} is not yet accessible, but deployment will continue`,
+          );
+        } else {
+          logger.info(
+            `Service at ${finalDomain} is accessible and properly routed`,
+          );
+        }
       } catch (err) {
-        logger.error("Detailed error information:", {
-          message: err.message,
-          code: err.code,
-          responseStatus: err.response?.status,
-          responseData: err.response?.data,
-          requestConfig: {
-            url: err.config?.url,
-            method: err.config?.method,
-            headers: err.config?.headers ? "Present" : "Missing",
-            data: err.config?.data,
-          },
-        });
+        logger.error(
+          `Failed to register service with front server: ${err.message}`,
+        );
         logger.warn("Continuing deployment despite front API error");
-        // Don't throw the error - just continue
+        // Don't throw the error - just continue with deployment
       }
     }
 
@@ -255,6 +348,18 @@ class ZeroDowntimeDeployer {
           deployDir,
           projectName,
         );
+
+      if (newContainer) {
+        logger.info(`Verifying service accessibility at ${finalDomain}...`);
+        const isAccessible = await verifyServiceAccessibility(finalDomain);
+        if (isAccessible) {
+          logger.info(`Service at ${finalDomain} is confirmed accessible`);
+        } else {
+          logger.warn(
+            `Service deployed but may not be accessible at ${finalDomain}`,
+          );
+        }
+      }
 
       this.sendSuccess(ws, {
         deploymentId,
