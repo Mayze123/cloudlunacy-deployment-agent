@@ -257,10 +257,14 @@ class ZeroDowntimeDeployer {
 
       try {
         // Register the service with robust error handling
-        await registerWithFrontServer(serviceName, resolvedTargetUrl, appType);
+        await this.registerWithFrontServer(
+          serviceName,
+          resolvedTargetUrl,
+          appType,
+        );
 
         // Verify that the service is accessible (optional but recommended)
-        const isAccessible = await verifyServiceAccessibility(finalDomain);
+        const isAccessible = await this.verifyServiceAccessibility(finalDomain);
         if (!isAccessible) {
           logger.warn(
             `Service at ${finalDomain} is not yet accessible, but deployment will continue`,
@@ -351,7 +355,7 @@ class ZeroDowntimeDeployer {
 
       if (newContainer) {
         logger.info(`Verifying service accessibility at ${finalDomain}...`);
-        const isAccessible = await verifyServiceAccessibility(finalDomain);
+        const isAccessible = await this.verifyServiceAccessibility(finalDomain);
         if (isAccessible) {
           logger.info(`Service at ${finalDomain} is confirmed accessible`);
         } else {
