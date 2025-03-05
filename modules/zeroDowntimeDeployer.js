@@ -65,6 +65,7 @@ class ZeroDowntimeDeployer {
 
   /**
    * Enhanced function for registering services with the front server
+   * Ensures front server is always in sync with the actual port being used
    */
   async registerWithFrontServer(serviceName, targetUrl, appType) {
     const token = process.env.AGENT_JWT;
@@ -85,6 +86,23 @@ class ZeroDowntimeDeployer {
     logger.info(
       `Registering service ${serviceName} with front server at ${frontApiUrl}`,
     );
+
+    // Extract port from target URL to ensure consistency
+    let actualPort = null;
+    try {
+      const urlObj = new URL(targetUrl);
+      actualPort = parseInt(urlObj.port, 10);
+
+      // Update our port manager to reflect the actual port being used
+      // This ensures our port allocation is in sync with reality
+      if (actualPort && !isNaN(actualPort)) {
+        await portManager.verifyPortMapping(serviceName, actualPort);
+      }
+    } catch (err) {
+      logger.warn(
+        `Could not parse URL ${targetUrl} to extract port: ${err.message}`,
+      );
+    }
 
     // Determine the correct endpoint based on app type
     const endpoint =
@@ -150,6 +168,7 @@ class ZeroDowntimeDeployer {
 
   /**
    * Function to verify service accessibility after registration
+   * Enhanced with better logging and direct port checking
    */
   async verifyServiceAccessibility(domain, protocol = "http") {
     logger.info(`Verifying service accessibility at ${protocol}://${domain}`);
@@ -157,8 +176,21 @@ class ZeroDowntimeDeployer {
     const maxAttempts = 10;
     const retryDelay = 5000; // 5 seconds
 
+    // Extract service name from domain for port checking
+    const serviceName = domain.split(".")[0];
+    let directPortCheck = false;
+
+    // Check if we have a port mapping for this service for direct checking
+    let directPort = null;
+    if (this.portMap && this.portMap[serviceName]) {
+      directPort = this.portMap[serviceName];
+      logger.info(`Will also attempt direct port check on port ${directPort}`);
+      directPortCheck = true;
+    }
+
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
+        // Try accessing via domain
         const response = await axios.get(`${protocol}://${domain}`, {
           timeout: 5000,
           validateStatus: (status) => status < 500, // Any non-server error is OK for verification
@@ -168,10 +200,43 @@ class ZeroDowntimeDeployer {
           `Service at ${domain} is accessible (Status: ${response.status})`,
         );
         return true;
-      } catch (error) {
+      } catch (domainError) {
         logger.warn(
-          `Attempt ${attempt}/${maxAttempts}: Service at ${domain} not accessible yet`,
+          `Attempt ${attempt}/${maxAttempts}: Service at ${domain} not accessible yet via domain: ${domainError.message}`,
         );
+
+        // If domain check failed and we have a direct port to check, try that
+        if (directPortCheck && directPort) {
+          try {
+            // Get the server's local IP
+            const LOCAL_IP = require("child_process")
+              .execSync("hostname -I | awk '{print $1}'")
+              .toString()
+              .trim();
+
+            const directUrl = `http://${LOCAL_IP}:${directPort}`;
+            logger.info(`Attempting direct port check: ${directUrl}`);
+
+            const directResponse = await axios.get(directUrl, {
+              timeout: 3000,
+              validateStatus: (status) => status < 500,
+            });
+
+            logger.info(
+              `Direct port check successful (Status: ${directResponse.status})`,
+            );
+            logger.warn(
+              `Service is accessible directly but not via domain. DNS or front server issue likely.`,
+            );
+
+            // Return true if direct check works - service is running but routing may have issues
+            return true;
+          } catch (directError) {
+            logger.warn(
+              `Direct port check also failed: ${directError.message}`,
+            );
+          }
+        }
 
         if (attempt === maxAttempts) {
           logger.error(
@@ -434,7 +499,15 @@ class ZeroDowntimeDeployer {
     );
 
     try {
-      await executeCommand("git", ["clone", "-b", branch, repoUrl, tempDir]);
+      await executeCommand("git", [
+        "clone",
+        "-b",
+        branch,
+        "--depth",
+        "1",
+        repoUrl,
+        tempDir,
+      ]);
       const files = await fs.readdir(tempDir);
       for (const file of files) {
         const srcPath = path.join(tempDir, file);

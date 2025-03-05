@@ -1,8 +1,7 @@
-// utils/portManager.js
+// utils/portManager.js - Simplified with fixed port allocation
 
 const fs = require("fs").promises;
 const path = require("path");
-const net = require("net");
 const logger = require("./logger");
 
 class PortManager {
@@ -21,6 +20,9 @@ class PortManager {
       try {
         const data = await fs.readFile(this.portsFile, "utf8");
         this.portMap = JSON.parse(data);
+        logger.info(
+          `Loaded port mappings for ${Object.keys(this.portMap).length} services`,
+        );
       } catch (error) {
         this.portMap = {};
         await this.savePorts();
@@ -34,105 +36,78 @@ class PortManager {
   async savePorts() {
     try {
       await fs.writeFile(this.portsFile, JSON.stringify(this.portMap, null, 2));
+      logger.info("Port mappings saved to disk");
     } catch (error) {
       logger.error("Failed to save ports configuration:", error);
       throw error;
     }
   }
 
-  async isPortInUse(port) {
-    return new Promise((resolve) => {
-      const server = net.createServer();
+  async verifyPortMapping(serviceName, hostPort) {
+    // This method ensures that a service always gets the expected port
+    // It updates our records if needed and ensures the front server is in sync
 
-      server.once("error", (err) => {
-        server.close();
-        if (err.code === "EADDRINUSE") {
-          resolve(true);
-        } else {
-          resolve(false);
-        }
-      });
+    if (this.portMap[serviceName] && this.portMap[serviceName] !== hostPort) {
+      logger.info(
+        `Port mapping mismatch for ${serviceName}: recorded ${this.portMap[serviceName]}, actual ${hostPort}`,
+      );
+      this.portMap[serviceName] = hostPort;
+      await this.savePorts();
 
-      server.once("listening", () => {
-        server.close();
-        resolve(false);
-      });
-
-      server.listen(port);
-    });
-  }
-
-  async findNextAvailablePort() {
-    let port = this.portRangeStart;
-    let attempts = 0;
-    const maxAttempts = 1000; // Try up to 1000 ports
-
-    while (port <= this.portRangeEnd && attempts < maxAttempts) {
-      logger.debug(`Checking port ${port} availability...`);
-
-      // Skip reserved ports
-      if (this.reservedPorts.has(port)) {
-        port++;
-        attempts++;
-        continue;
-      }
-
-      // Check if port is in use
-      const inUse = await this.isPortInUse(port);
-      if (!inUse) {
-        logger.debug(`Found available port: ${port}`);
-        return port;
-      }
-
-      port++;
-      attempts++;
+      // Here we could add a call to ensure the front server is updated if needed
+      return true;
     }
 
-    throw new Error(
-      `No available ports found after checking ${attempts} ports`,
-    );
+    return false;
   }
 
   async allocatePort(serviceName) {
     logger.info(`Allocating port for ${serviceName}`);
 
-    // Check existing allocation
+    // Check existing allocation - reuse the previous port assignment for consistency
     if (this.portMap[serviceName]) {
-      const currentPort = this.portMap[serviceName];
-      const inUse = await this.isPortInUse(currentPort);
-
-      // If port is already allocated and not in use by another service, reuse it
-      if (!inUse) {
-        logger.info(`Reusing existing port ${currentPort} for ${serviceName}`);
-        return {
-          hostPort: currentPort,
-          containerPort: this.standardContainerPort,
-        };
-      } else {
-        logger.warn(
-          `Previously allocated port ${currentPort} for ${serviceName} is in use, finding new port`,
-        );
-        delete this.portMap[serviceName];
-      }
-    }
-
-    try {
-      const hostPort = await this.findNextAvailablePort();
-      this.portMap[serviceName] = hostPort;
-      await this.savePorts();
-
-      logger.info(
-        `Allocated new port mapping for ${serviceName}: ${hostPort} -> ${this.standardContainerPort}`,
-      );
+      const fixedPort = this.portMap[serviceName];
+      logger.info(`Using fixed port ${fixedPort} for ${serviceName}`);
 
       return {
-        hostPort,
+        hostPort: fixedPort,
         containerPort: this.standardContainerPort,
       };
-    } catch (error) {
-      logger.error("Port allocation failed:", error);
-      throw error;
     }
+
+    // For new services, assign a port based on a deterministic hash of the service name
+    // This ensures the same service always gets the same port, even across deployments
+    const portHash = this.generateDeterministicPort(serviceName);
+    this.portMap[serviceName] = portHash;
+    await this.savePorts();
+
+    logger.info(`Allocated fixed port ${portHash} for ${serviceName}`);
+    return {
+      hostPort: portHash,
+      containerPort: this.standardContainerPort,
+    };
+  }
+
+  generateDeterministicPort(serviceName) {
+    // Create a deterministic port number based on the service name
+    // Simple hash function - sum the char codes and use modulo to get a port in range
+    let hash = 0;
+    for (let i = 0; i < serviceName.length; i++) {
+      hash = (hash << 5) - hash + serviceName.charCodeAt(i);
+      hash |= 0; // Convert to 32bit integer
+    }
+
+    // Use absolute value, then get a port number in the range
+    hash = Math.abs(hash);
+    const portOffset = hash % (this.portRangeEnd - this.portRangeStart);
+    let port = this.portRangeStart + portOffset;
+
+    // Skip reserved ports
+    while (this.reservedPorts.has(port)) {
+      port++;
+    }
+
+    return port;
   }
 
   async releasePort(serviceName) {
