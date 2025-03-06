@@ -591,49 +591,98 @@ class ZeroDowntimeDeployer {
     ws,
   }) {
     try {
-      // First, stop and remove any existing container with the same service name
-      // This is critical to free up the port before starting the new container
-      const { stdout: existingId } = await executeCommand("docker", [
-        "ps",
-        "-a",
-        "-q",
-        "--filter",
-        `name=^/${serviceName}$`,
-      ]);
+      // First, aggressively clean up any containers using our service name
+      logger.info(
+        `Cleaning up any existing containers with name ${serviceName}`,
+      );
 
-      if (existingId && existingId.trim()) {
-        logger.info(
-          `Found existing container ${serviceName} (${existingId.trim()}). Stopping and removing it...`,
-        );
-        // Stop the container first to ensure a clean shutdown
-        await executeCommand("docker", ["stop", existingId.trim()]);
-        // Then remove it after it's stopped
-        await executeCommand("docker", ["rm", existingId.trim()]);
-
-        // Add a small delay to ensure the port is fully released
-        logger.info(`Waiting for port to be released...`);
-        await new Promise((resolve) => setTimeout(resolve, 2000));
-      }
-
-      // Check if the port is actually free now
       try {
-        const { stdout: portCheck } = await executeCommand("lsof", [
-          "-i",
-          `:${hostPort}`,
+        // Find ALL containers (including stopped ones) with this service name
+        const { stdout: containerList } = await executeCommand("docker", [
+          "ps",
+          "-a",
+          "--format",
+          "{{.ID}}",
+          "--filter",
+          `name=${serviceName}`,
         ]);
 
-        if (portCheck.trim()) {
-          logger.warn(
-            `Port ${hostPort} is still in use after container removal. Details: ${portCheck}`,
+        const containerIds = containerList.trim().split("\n").filter(Boolean);
+
+        if (containerIds.length > 0) {
+          logger.info(
+            `Found ${containerIds.length} containers to clean up: ${containerIds.join(", ")}`,
           );
-          // We might need to force kill processes using this port or pick a different port
+
+          // Force stop and remove each container
+          for (const id of containerIds) {
+            try {
+              await executeCommand("docker", ["stop", "-t", "0", id]); // Force immediate stop
+              await executeCommand("docker", ["rm", "-f", id]); // Force removal
+            } catch (cleanupError) {
+              logger.warn(
+                `Error during container cleanup: ${cleanupError.message}`,
+              );
+            }
+          }
+
+          // Add a delay to ensure Docker networking fully releases the port
+          logger.info("Waiting for port resources to be fully released...");
+          await new Promise((resolve) => setTimeout(resolve, 3000));
+        } else {
+          logger.info("No existing containers found with this service name.");
         }
-      } catch (portCheckError) {
-        // lsof returning nothing is actually good - it means the port is free
-        logger.info(`Port ${hostPort} is available for use`);
+      } catch (listError) {
+        logger.warn(`Error while listing containers: ${listError.message}`);
       }
 
-      // Generate the deployment files from templates
+      // Check if the assigned port is truly available
+      let portAvailable = false;
+      let retries = 0;
+      const maxRetries = 3;
+
+      while (!portAvailable && retries < maxRetries) {
+        try {
+          const { stdout: portCheck } = await executeCommand("lsof", [
+            "-i",
+            `:${hostPort}`,
+          ]);
+
+          if (portCheck.trim()) {
+            logger.warn(
+              `Port ${hostPort} is still in use after cleanup. Details: ${portCheck}`,
+            );
+
+            if (retries < maxRetries - 1) {
+              retries++;
+              logger.info(
+                `Retrying port check in 3 seconds... (Attempt ${retries}/${maxRetries})`,
+              );
+              await new Promise((resolve) => setTimeout(resolve, 3000));
+            } else {
+              // Find an alternative port as last resort
+              logger.info(
+                `Port ${hostPort} still unavailable, finding an alternative port...`,
+              );
+              const portManager = require("../utils/portManager");
+              hostPort = await portManager.findFreePort(10000, 30000, hostPort);
+              logger.info(`Using alternative port: ${hostPort}`);
+              portAvailable = true;
+            }
+          } else {
+            logger.info(`Port ${hostPort} is available`);
+            portAvailable = true;
+          }
+        } catch (portCheckError) {
+          // lsof error usually means port is available
+          logger.info(
+            `Port ${hostPort} appears to be available (no process using it)`,
+          );
+          portAvailable = true;
+        }
+      }
+
+      // Now generate deployment files with updated port if necessary
       if (!this.templateHandler) {
         this.templateHandler = new TemplateHandler(
           this.templatesDir,
@@ -645,7 +694,7 @@ class ZeroDowntimeDeployer {
         appType: payload.appType,
         appName: serviceName,
         environment,
-        hostPort,
+        hostPort, // This may be a new port if we had to find an alternative
         containerPort,
         domain,
         envFile: path.basename(envFilePath),
@@ -658,6 +707,7 @@ class ZeroDowntimeDeployer {
         },
       });
 
+      // Write the files
       await Promise.all([
         fs.writeFile(path.join(deployDir, "Dockerfile"), files.dockerfile),
         fs.writeFile(
@@ -666,22 +716,41 @@ class ZeroDowntimeDeployer {
         ),
       ]);
 
-      // Build and start the new container
+      // Build and start the container
+      logger.info(`Building container with project name ${projectName}...`);
       await executeCommand(
         "docker-compose",
         ["-p", projectName, "build", "--no-cache"],
         { cwd: deployDir },
       );
 
+      logger.info(`Starting container on port ${hostPort}...`);
       await executeCommand("docker-compose", ["-p", projectName, "up", "-d"], {
         cwd: deployDir,
       });
 
+      // Get the new container ID
       const { stdout: newContainerId } = await executeCommand(
         "docker-compose",
         ["-p", projectName, "ps", "-q", serviceName],
         { cwd: deployDir },
       );
+
+      if (!newContainerId.trim()) {
+        throw new Error(
+          "Failed to get new container ID - container may not have started properly",
+        );
+      }
+
+      logger.info(
+        `Container started successfully with ID: ${newContainerId.trim()}`,
+      );
+
+      // If we used an alternative port, update the port manager's records
+      if (hostPort !== containerPort) {
+        const portManager = require("../utils/portManager");
+        await portManager.verifyPortMapping(serviceName, hostPort);
+      }
 
       return {
         id: newContainerId.trim(),
@@ -693,6 +762,7 @@ class ZeroDowntimeDeployer {
       throw new Error(`Failed to build/start container: ${error.message}`);
     }
   }
+
   async performRollback(oldContainer, newContainer, domain) {
     try {
       if (newContainer) {

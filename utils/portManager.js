@@ -61,6 +61,64 @@ class PortManager {
     return false;
   }
 
+  async findFreePort(startPort = 10000, endPort = 30000, excludedPort = null) {
+    logger.info(
+      `Finding free port between ${startPort} and ${endPort}, excluding ${excludedPort}`,
+    );
+
+    // Get a list of all used ports by Docker containers
+    const { stdout: usedPortsOutput } = await executeCommand("docker", [
+      "ps",
+      "--format",
+      "{{.Ports}}",
+    ]);
+
+    // Parse the port output and create a set of used ports
+    const usedPorts = new Set();
+    usedPortsOutput
+      .split("\n")
+      .filter(Boolean)
+      .forEach((portMapping) => {
+        const portMatches = portMapping.match(/0\.0\.0\.0:(\d+)/g);
+        if (portMatches) {
+          portMatches.forEach((match) => {
+            const port = parseInt(match.split(":")[1], 10);
+            usedPorts.add(port);
+          });
+        }
+      });
+
+    // Add our reserved ports and the excluded port
+    this.reservedPorts.forEach((port) => usedPorts.add(port));
+    if (excludedPort) usedPorts.add(excludedPort);
+
+    // Find the first available port in our range
+    for (let port = startPort; port <= endPort; port++) {
+      if (!usedPorts.has(port)) {
+        // Verify the port is truly available at the OS level
+        try {
+          const { stdout: lsofOutput } = await executeCommand("lsof", [
+            "-i",
+            `:${port}`,
+          ]);
+
+          if (!lsofOutput.trim()) {
+            logger.info(`Found free port: ${port}`);
+            return port;
+          }
+        } catch (error) {
+          // lsof throwing an error usually means no process is using this port
+          logger.info(`Found free port: ${port}`);
+          return port;
+        }
+      }
+    }
+
+    throw new Error(
+      `No free ports available between ${startPort} and ${endPort}`,
+    );
+  }
+
   async allocatePort(serviceName) {
     logger.info(`Allocating port for ${serviceName}`);
 
