@@ -591,7 +591,8 @@ class ZeroDowntimeDeployer {
     ws,
   }) {
     try {
-      // Check for any existing container with the same service name
+      // First, stop and remove any existing container with the same service name
+      // This is critical to free up the port before starting the new container
       const { stdout: existingId } = await executeCommand("docker", [
         "ps",
         "-a",
@@ -599,41 +600,47 @@ class ZeroDowntimeDeployer {
         "--filter",
         `name=^/${serviceName}$`,
       ]);
+
       if (existingId && existingId.trim()) {
         logger.info(
-          `Found existing container ${serviceName} (${existingId.trim()}). Removing it...`,
+          `Found existing container ${serviceName} (${existingId.trim()}). Stopping and removing it...`,
         );
-        await executeCommand("docker", ["rm", "-f", existingId.trim()]);
+        // Stop the container first to ensure a clean shutdown
+        await executeCommand("docker", ["stop", existingId.trim()]);
+        // Then remove it after it's stopped
+        await executeCommand("docker", ["rm", existingId.trim()]);
+
+        // Add a small delay to ensure the port is fully released
+        logger.info(`Waiting for port to be released...`);
+        await new Promise((resolve) => setTimeout(resolve, 2000));
       }
 
-      // Alternatively, if you're using docker-compose to manage the container,
-      // ensure that docker-compose down removes any leftover container:
-      const existingContainers = await executeCommand("docker-compose", [
-        "-p",
-        projectName,
-        "ps",
-        "-q",
-        serviceName,
-      ]);
-      const containerIds = existingContainers.stdout
-        .trim()
-        .split("\n")
-        .filter((id) => id);
-      for (const id of containerIds) {
-        await executeCommand("docker-compose", [
-          "-p",
-          projectName,
-          "down",
-          "-v",
+      // Check if the port is actually free now
+      try {
+        const { stdout: portCheck } = await executeCommand("lsof", [
+          "-i",
+          `:${hostPort}`,
         ]);
+
+        if (portCheck.trim()) {
+          logger.warn(
+            `Port ${hostPort} is still in use after container removal. Details: ${portCheck}`,
+          );
+          // We might need to force kill processes using this port or pick a different port
+        }
+      } catch (portCheckError) {
+        // lsof returning nothing is actually good - it means the port is free
+        logger.info(`Port ${hostPort} is available for use`);
       }
 
+      // Generate the deployment files from templates
       if (!this.templateHandler) {
         this.templateHandler = new TemplateHandler(
           this.templatesDir,
           require("../deployConfig.json"),
         );
       }
+
       const files = await this.templateHandler.generateDeploymentFiles({
         appType: payload.appType,
         appName: serviceName,
@@ -650,6 +657,7 @@ class ZeroDowntimeDeployer {
           start_period: "40s",
         },
       });
+
       await Promise.all([
         fs.writeFile(path.join(deployDir, "Dockerfile"), files.dockerfile),
         fs.writeFile(
@@ -657,19 +665,24 @@ class ZeroDowntimeDeployer {
           files.dockerCompose,
         ),
       ]);
+
+      // Build and start the new container
       await executeCommand(
         "docker-compose",
         ["-p", projectName, "build", "--no-cache"],
         { cwd: deployDir },
       );
+
       await executeCommand("docker-compose", ["-p", projectName, "up", "-d"], {
         cwd: deployDir,
       });
+
       const { stdout: newContainerId } = await executeCommand(
         "docker-compose",
         ["-p", projectName, "ps", "-q", serviceName],
         { cwd: deployDir },
       );
+
       return {
         id: newContainerId.trim(),
         name: serviceName,
@@ -680,7 +693,6 @@ class ZeroDowntimeDeployer {
       throw new Error(`Failed to build/start container: ${error.message}`);
     }
   }
-
   async performRollback(oldContainer, newContainer, domain) {
     try {
       if (newContainer) {
