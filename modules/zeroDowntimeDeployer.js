@@ -103,8 +103,15 @@ class ZeroDowntimeDeployer {
 
     const payload =
       appType.toLowerCase() === "mongo"
-        ? { subdomain: serviceName, targetIp: targetUrl.split(":")[0] }
-        : { subdomain: serviceName, targetUrl };
+        ? {
+            subdomain: serviceName,
+            targetIp: targetUrl.split(":")[0],
+          }
+        : {
+            subdomain: serviceName,
+            targetUrl: targetUrl,
+            protocol: "http",
+          };
 
     const maxRetries = 5;
     const initialDelay = 1000; // 1 second
