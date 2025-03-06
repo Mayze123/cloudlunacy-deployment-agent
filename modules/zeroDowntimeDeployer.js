@@ -122,6 +122,8 @@ class ZeroDowntimeDeployer {
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
+        logger.info(`Register attempt ${attempt}: ${JSON.stringify(payload)}`);
+
         const response = await axios.post(endpoint, payload, {
           headers: {
             "Content-Type": "application/json",
@@ -134,6 +136,46 @@ class ZeroDowntimeDeployer {
           `Service registration successful on attempt ${attempt}:`,
           response.data,
         );
+
+        // Try to verify if the registration was successful by fetching the current config
+        try {
+          const configResponse = await axios.get(
+            `${frontApiUrl}/api/frontdoor/config`,
+            {
+              headers: {
+                Authorization: `Bearer ${token}`,
+              },
+              timeout: 5000,
+            },
+          );
+
+          if (configResponse.data.success && configResponse.data.config) {
+            const { http, tcp } = configResponse.data.config;
+            logger.info(
+              `Current front server config has ${Object.keys(http?.routers || {}).length} HTTP routers and ${Object.keys(tcp?.routers || {}).length} TCP routers`,
+            );
+
+            // Check if our service is in the config
+            if (http?.routers && http.routers[serviceName]) {
+              logger.info(
+                `Service ${serviceName} is registered in the HTTP routers`,
+              );
+            } else if (tcp?.routers && tcp.routers[serviceName]) {
+              logger.info(
+                `Service ${serviceName} is registered in the TCP routers`,
+              );
+            } else {
+              logger.warn(
+                `Service ${serviceName} not found in the current front server config after registration!`,
+              );
+            }
+          }
+        } catch (configError) {
+          logger.warn(
+            `Could not verify config after registration: ${configError.message}`,
+          );
+        }
+
         return response.data;
       } catch (error) {
         const statusCode = error.response?.status;
@@ -197,7 +239,7 @@ class ZeroDowntimeDeployer {
         });
 
         logger.info(
-          `Service at ${domain} is accessible (Status: ${response.status})`,
+          `Service at ${domain} is accessible (Status: ${response.status}, Response: ${response.data.substring(0, 100)}...)`,
         );
         return true;
       } catch (domainError) {
@@ -223,8 +265,44 @@ class ZeroDowntimeDeployer {
             });
 
             logger.info(
-              `Direct port check successful (Status: ${directResponse.status})`,
+              `Direct port check successful (Status: ${directResponse.status}, Response: ${directResponse.data.substring(0, 100)}...)`,
             );
+
+            // Check if Traefik is running and accessible
+            try {
+              const traefikResponse = await axios.get(
+                "http://localhost:8080/api/http/routers",
+                {
+                  timeout: 3000,
+                  validateStatus: (status) => status < 500,
+                  auth: {
+                    username: "admin",
+                    password: "password", // Update with your actual admin password
+                  },
+                },
+              );
+              logger.info(
+                `Traefik API is accessible, found ${traefikResponse.data.length} routers`,
+              );
+
+              // Check if our router exists
+              const ourRouter = traefikResponse.data.find(
+                (router) => router.rule && router.rule.includes(domain),
+              );
+
+              if (ourRouter) {
+                logger.info(
+                  `Router for ${domain} found in Traefik configuration`,
+                );
+              } else {
+                logger.warn(
+                  `No router found for ${domain} in Traefik configuration`,
+                );
+              }
+            } catch (traefikError) {
+              logger.warn(`Traefik API check failed: ${traefikError.message}`);
+            }
+
             logger.warn(
               `Service is accessible directly but not via domain. DNS or front server issue likely.`,
             );
@@ -250,6 +328,82 @@ class ZeroDowntimeDeployer {
     }
 
     return false;
+  }
+
+  async diagnoseTraefikConfig() {
+    try {
+      logger.info("Running Traefik configuration diagnostics...");
+
+      // Check if Traefik container is running
+      const { stdout: containerStatus } = await executeCommand("docker", [
+        "ps",
+        "-a",
+        "--filter",
+        "name=traefik",
+        "--format",
+        "{{.Status}}",
+      ]);
+
+      if (!containerStatus.includes("Up")) {
+        logger.error("Traefik container is not running!");
+
+        // Try to get the logs to see why it failed
+        try {
+          const { stdout: traefikLogs } = await executeCommand("docker", [
+            "logs",
+            "--tail",
+            "50",
+            "traefik",
+          ]);
+          logger.error("Last 50 lines of Traefik logs:");
+          traefikLogs.split("\n").forEach((line) => logger.error(`  ${line}`));
+        } catch (logError) {
+          logger.error(`Could not get Traefik logs: ${logError.message}`);
+        }
+
+        return false;
+      }
+
+      logger.info("Traefik container is running");
+
+      // Check if port 80 is open and accessible
+      try {
+        await executeCommand("nc", ["-z", "-v", "-w5", "localhost", "80"]);
+        logger.info("Port 80 is accessible");
+      } catch (portError) {
+        logger.error(`Port 80 is not accessible: ${portError.message}`);
+      }
+
+      // Check dynamic configuration
+      try {
+        const { stdout: catOutput } = await executeCommand("docker", [
+          "exec",
+          "traefik",
+          "cat",
+          "/config/dynamic.yml",
+        ]);
+        logger.info("Current dynamic.yml content:");
+        catOutput.split("\n").forEach((line) => logger.info(`  ${line}`));
+      } catch (catError) {
+        logger.error(`Could not read dynamic.yml: ${catError.message}`);
+      }
+
+      // Check Traefik API (if enabled)
+      try {
+        await axios.get("http://localhost:8080/api/overview", {
+          timeout: 3000,
+          validateStatus: () => true,
+        });
+        logger.info("Traefik API is accessible");
+      } catch (apiError) {
+        logger.error(`Traefik API is not accessible: ${apiError.message}`);
+      }
+
+      return true;
+    } catch (error) {
+      logger.error(`Traefik diagnostics failed: ${error.message}`);
+      return false;
+    }
   }
 
   async deploy(payload, ws) {
@@ -457,16 +611,62 @@ class ZeroDowntimeDeployer {
   }
 
   async gracefulContainerRemoval(container, deployDir, projectName) {
+    if (!container) {
+      logger.info("No container to remove");
+      return;
+    }
+
     try {
-      await executeCommand(
-        "docker-compose",
-        ["-p", projectName, "down", "-v"],
-        { cwd: deployDir },
-      );
+      logger.info(`Gracefully removing container ${container.name}`);
+
+      // First try to stop the container
+      try {
+        await executeCommand("docker", ["stop", "--time=30", container.id]);
+        logger.info(`Container ${container.name} stopped successfully`);
+      } catch (stopError) {
+        logger.warn(
+          `Failed to stop container gracefully: ${stopError.message}`,
+        );
+        // Continue with the removal anyway
+      }
+
+      // Remove the container using docker-compose
+      try {
+        await executeCommand(
+          "docker-compose",
+          ["-p", projectName, "down", "-v"],
+          { cwd: deployDir },
+        );
+        logger.info(
+          `Container ${container.name} removed successfully using docker-compose`,
+        );
+      } catch (composeError) {
+        logger.warn(
+          `Failed to remove container using docker-compose: ${composeError.message}`,
+        );
+
+        // Fallback to direct docker rm
+        try {
+          await executeCommand("docker", ["rm", "-f", container.id]);
+          logger.info(
+            `Container ${container.name} forcefully removed using docker rm`,
+          );
+        } catch (rmError) {
+          throw new Error(
+            `Failed to remove container ${container.name}: ${rmError.message}`,
+          );
+        }
+      }
+
+      // Clean up any dangling images to save disk space
+      try {
+        await executeCommand("docker", ["image", "prune", "-f"]);
+        logger.debug("Cleaned up dangling images");
+      } catch (pruneError) {
+        logger.warn(`Failed to prune images: ${pruneError.message}`);
+      }
     } catch (error) {
-      throw new Error(
-        `Failed to remove container ${container.name}: ${error.message}`,
-      );
+      throw new Error(`Container removal failed: ${error.message}`);
     }
   }
 
@@ -595,7 +795,68 @@ class ZeroDowntimeDeployer {
   }
 
   async switchTraffic(oldContainer, newContainer, domain) {
-    await new Promise((resolve) => setTimeout(resolve, 5000));
+    try {
+      logger.info(
+        `Switching traffic from ${oldContainer ? oldContainer.name : "none"} to ${newContainer.name}`,
+      );
+
+      // If this is a first deployment (no old container), just register the new container
+      if (!oldContainer) {
+        logger.info(`First deployment for ${domain}, no traffic switch needed`);
+        return;
+      }
+
+      // 1. Update the registration with Traefik front server to point to the new container
+      const LOCAL_IP = require("child_process")
+        .execSync("hostname -I | awk '{print $1}'")
+        .toString()
+        .trim();
+
+      const resolvedTargetUrl = `http://${LOCAL_IP}:${this.portMap[newContainer.name.split("-")[0]]}`;
+
+      // Extract service name from container name (remove blue/green suffix)
+      const serviceName = newContainer.name.replace(/-blue$|-green$/, "");
+
+      // Register the new container with the front server
+      try {
+        logger.info(
+          `Updating front server registration for ${serviceName} to point to ${resolvedTargetUrl}`,
+        );
+        await this.registerWithFrontServer(
+          serviceName,
+          resolvedTargetUrl,
+          "app",
+        );
+
+        // Wait a bit for the front server to update its configuration
+        logger.info(
+          `Waiting for front server to apply configuration changes...`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, 10000));
+
+        // Verify the service is accessible
+        const isAccessible = await this.verifyServiceAccessibility(domain);
+        if (isAccessible) {
+          logger.info(
+            `Service at ${domain} is accessible after traffic switch`,
+          );
+        } else {
+          logger.warn(
+            `Service at ${domain} is not accessible after traffic switch, but continuing...`,
+          );
+        }
+      } catch (error) {
+        logger.error(
+          `Failed to update front server registration: ${error.message}`,
+        );
+        logger.warn(
+          `Traffic switch may not be complete, but continuing with deployment`,
+        );
+      }
+    } catch (error) {
+      logger.error(`Error during traffic switch: ${error.message}`);
+      // Continue despite errors to prevent deployment failure
+    }
   }
 
   async buildAndStartContainer({
