@@ -47,7 +47,6 @@ class ZeroDowntimeDeployer {
         "--format",
         "{{.Name}}",
       ]);
-
       if (!networks.includes("traefik-network")) {
         logger.info("Creating traefik-network as it doesn't exist");
         await executeCommand("docker", [
@@ -63,10 +62,6 @@ class ZeroDowntimeDeployer {
     }
   }
 
-  /**
-   * Enhanced function for registering services with the front server
-   * Ensures front server is always in sync with the actual port being used
-   */
   async registerWithFrontServer(serviceName, targetUrl, appType) {
     const token = process.env.AGENT_JWT;
     const frontApiUrl = process.env.FRONT_API_URL;
@@ -76,7 +71,6 @@ class ZeroDowntimeDeployer {
         "AGENT_JWT is not set - agent not properly registered with front server",
       );
     }
-
     if (!frontApiUrl) {
       throw new Error(
         "FRONT_API_URL is not set - cannot communicate with front server",
@@ -87,14 +81,11 @@ class ZeroDowntimeDeployer {
       `Registering service ${serviceName} with front server at ${frontApiUrl}`,
     );
 
-    // Extract port from target URL to ensure consistency
+    // Extract port from target URL
     let actualPort = null;
     try {
       const urlObj = new URL(targetUrl);
       actualPort = parseInt(urlObj.port, 10);
-
-      // Update our port manager to reflect the actual port being used
-      // This ensures our port allocation is in sync with reality
       if (actualPort && !isNaN(actualPort)) {
         await portManager.verifyPortMapping(serviceName, actualPort);
       }
@@ -104,103 +95,51 @@ class ZeroDowntimeDeployer {
       );
     }
 
-    // Determine the correct endpoint based on app type
+    // Determine the endpoint based on app type
     const endpoint =
       appType.toLowerCase() === "mongo"
         ? `${frontApiUrl}/api/frontdoor/add-subdomain`
         : `${frontApiUrl}/api/frontdoor/add-app`;
 
-    // Prepare request payload
     const payload =
       appType.toLowerCase() === "mongo"
         ? { subdomain: serviceName, targetIp: targetUrl.split(":")[0] }
         : { subdomain: serviceName, targetUrl };
 
-    // Add retry logic for resilience
     const maxRetries = 5;
     const initialDelay = 1000; // 1 second
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
-        logger.info(`Register attempt ${attempt}: ${JSON.stringify(payload)}`);
-
         const response = await axios.post(endpoint, payload, {
           headers: {
             "Content-Type": "application/json",
             Authorization: `Bearer ${token}`,
           },
-          timeout: 10000, // 10 seconds
+          timeout: 10000,
         });
-
         logger.info(
           `Service registration successful on attempt ${attempt}:`,
           response.data,
         );
-
-        // Try to verify if the registration was successful by fetching the current config
-        try {
-          const configResponse = await axios.get(
-            `${frontApiUrl}/api/frontdoor/config`,
-            {
-              headers: {
-                Authorization: `Bearer ${token}`,
-              },
-              timeout: 5000,
-            },
-          );
-
-          if (configResponse.data.success && configResponse.data.config) {
-            const { http, tcp } = configResponse.data.config;
-            logger.info(
-              `Current front server config has ${Object.keys(http?.routers || {}).length} HTTP routers and ${Object.keys(tcp?.routers || {}).length} TCP routers`,
-            );
-
-            // Check if our service is in the config
-            if (http?.routers && http.routers[serviceName]) {
-              logger.info(
-                `Service ${serviceName} is registered in the HTTP routers`,
-              );
-            } else if (tcp?.routers && tcp.routers[serviceName]) {
-              logger.info(
-                `Service ${serviceName} is registered in the TCP routers`,
-              );
-            } else {
-              logger.warn(
-                `Service ${serviceName} not found in the current front server config after registration!`,
-              );
-            }
-          }
-        } catch (configError) {
-          logger.warn(
-            `Could not verify config after registration: ${configError.message}`,
-          );
-        }
-
         return response.data;
       } catch (error) {
         const statusCode = error.response?.status;
         const errorData = error.response?.data;
-
         logger.error(`Registration attempt ${attempt} failed:`, {
           statusCode,
           error: errorData || error.message,
         });
-
-        // Don't retry if it's an authentication or validation error
-        if (statusCode === 401 || statusCode === 403 || statusCode === 400) {
+        if ([400, 401, 403].includes(statusCode)) {
           throw new Error(
             `Service registration failed: ${errorData?.message || error.message}`,
           );
         }
-
-        // Last attempt failed, give up
         if (attempt === maxRetries) {
           throw new Error(
             `Service registration failed after ${maxRetries} attempts`,
           );
         }
-
-        // Exponential backoff for retries
         const delay = initialDelay * Math.pow(2, attempt - 1);
         logger.info(`Retrying in ${delay}ms...`);
         await new Promise((resolve) => setTimeout(resolve, delay));
@@ -208,21 +147,12 @@ class ZeroDowntimeDeployer {
     }
   }
 
-  /**
-   * Function to verify service accessibility after registration
-   * Enhanced with better logging and direct port checking
-   */
   async verifyServiceAccessibility(domain, protocol = "http") {
     logger.info(`Verifying service accessibility at ${protocol}://${domain}`);
-
     const maxAttempts = 10;
-    const retryDelay = 5000; // 5 seconds
-
-    // Extract service name from domain for port checking
+    const retryDelay = 5000;
     const serviceName = domain.split(".")[0];
     let directPortCheck = false;
-
-    // Check if we have a port mapping for this service for direct checking
     let directPort = null;
     if (this.portMap && this.portMap[serviceName]) {
       directPort = this.portMap[serviceName];
@@ -232,82 +162,35 @@ class ZeroDowntimeDeployer {
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
-        // Try accessing via domain
         const response = await axios.get(`${protocol}://${domain}`, {
           timeout: 5000,
-          validateStatus: (status) => status < 500, // Any non-server error is OK for verification
+          validateStatus: (status) => status < 500,
         });
-
         logger.info(
-          `Service at ${domain} is accessible (Status: ${response.status}, Response: ${response.data.substring(0, 100)}...)`,
+          `Service at ${domain} is accessible (Status: ${response.status})`,
         );
         return true;
       } catch (domainError) {
         logger.warn(
-          `Attempt ${attempt}/${maxAttempts}: Service at ${domain} not accessible yet via domain: ${domainError.message}`,
+          `Attempt ${attempt}/${maxAttempts}: Service at ${domain} not accessible via domain: ${domainError.message}`,
         );
-
-        // If domain check failed and we have a direct port to check, try that
         if (directPortCheck && directPort) {
           try {
-            // Get the server's local IP
-            const LOCAL_IP = require("child_process")
-              .execSync("hostname -I | awk '{print $1}'")
+            const LOCAL_IP = execSync("hostname -I | awk '{print $1}'")
               .toString()
               .trim();
-
             const directUrl = `http://${LOCAL_IP}:${directPort}`;
             logger.info(`Attempting direct port check: ${directUrl}`);
-
             const directResponse = await axios.get(directUrl, {
               timeout: 3000,
               validateStatus: (status) => status < 500,
             });
-
             logger.info(
-              `Direct port check successful (Status: ${directResponse.status}, Response: ${directResponse.data.substring(0, 100)}...)`,
+              `Direct port check successful (Status: ${directResponse.status})`,
             );
-
-            // Check if Traefik is running and accessible
-            try {
-              const traefikResponse = await axios.get(
-                "http://localhost:8080/api/http/routers",
-                {
-                  timeout: 3000,
-                  validateStatus: (status) => status < 500,
-                  auth: {
-                    username: "admin",
-                    password: "password", // Update with your actual admin password
-                  },
-                },
-              );
-              logger.info(
-                `Traefik API is accessible, found ${traefikResponse.data.length} routers`,
-              );
-
-              // Check if our router exists
-              const ourRouter = traefikResponse.data.find(
-                (router) => router.rule && router.rule.includes(domain),
-              );
-
-              if (ourRouter) {
-                logger.info(
-                  `Router for ${domain} found in Traefik configuration`,
-                );
-              } else {
-                logger.warn(
-                  `No router found for ${domain} in Traefik configuration`,
-                );
-              }
-            } catch (traefikError) {
-              logger.warn(`Traefik API check failed: ${traefikError.message}`);
-            }
-
             logger.warn(
-              `Service is accessible directly but not via domain. DNS or front server issue likely.`,
+              "Service is accessible directly but not via domain. DNS or front server issue likely.",
             );
-
-            // Return true if direct check works - service is running but routing may have issues
             return true;
           } catch (directError) {
             logger.warn(
@@ -315,94 +198,44 @@ class ZeroDowntimeDeployer {
             );
           }
         }
-
         if (attempt === maxAttempts) {
           logger.error(
             `Service verification failed after ${maxAttempts} attempts`,
           );
           return false;
         }
-
         await new Promise((resolve) => setTimeout(resolve, retryDelay));
       }
     }
-
     return false;
   }
 
-  async diagnoseTraefikConfig() {
+  /**
+   * Switch traffic from the old container to the new container by re-registering
+   * the service with the updated target URL. This will update the dynamic configuration
+   * and trigger Traefik to route traffic to the new container.
+   */
+  async switchTraffic(oldContainer, newContainer, domain) {
+    const LOCAL_IP = execSync("hostname -I | awk '{print $1}'")
+      .toString()
+      .trim();
+    const newTargetUrl = `http://${LOCAL_IP}:${newContainer.hostPort}`;
     try {
-      logger.info("Running Traefik configuration diagnostics...");
-
-      // Check if Traefik container is running
-      const { stdout: containerStatus } = await executeCommand("docker", [
-        "ps",
-        "-a",
-        "--filter",
-        "name=traefik",
-        "--format",
-        "{{.Status}}",
-      ]);
-
-      if (!containerStatus.includes("Up")) {
-        logger.error("Traefik container is not running!");
-
-        // Try to get the logs to see why it failed
-        try {
-          const { stdout: traefikLogs } = await executeCommand("docker", [
-            "logs",
-            "--tail",
-            "50",
-            "traefik",
-          ]);
-          logger.error("Last 50 lines of Traefik logs:");
-          traefikLogs.split("\n").forEach((line) => logger.error(`  ${line}`));
-        } catch (logError) {
-          logger.error(`Could not get Traefik logs: ${logError.message}`);
-        }
-
-        return false;
-      }
-
-      logger.info("Traefik container is running");
-
-      // Check if port 80 is open and accessible
-      try {
-        await executeCommand("nc", ["-z", "-v", "-w5", "localhost", "80"]);
-        logger.info("Port 80 is accessible");
-      } catch (portError) {
-        logger.error(`Port 80 is not accessible: ${portError.message}`);
-      }
-
-      // Check dynamic configuration
-      try {
-        const { stdout: catOutput } = await executeCommand("docker", [
-          "exec",
-          "traefik",
-          "cat",
-          "/config/dynamic.yml",
-        ]);
-        logger.info("Current dynamic.yml content:");
-        catOutput.split("\n").forEach((line) => logger.info(`  ${line}`));
-      } catch (catError) {
-        logger.error(`Could not read dynamic.yml: ${catError.message}`);
-      }
-
-      // Check Traefik API (if enabled)
-      try {
-        await axios.get("http://localhost:8080/api/overview", {
-          timeout: 3000,
-          validateStatus: () => true,
-        });
-        logger.info("Traefik API is accessible");
-      } catch (apiError) {
-        logger.error(`Traefik API is not accessible: ${apiError.message}`);
-      }
-
-      return true;
+      logger.info(
+        `Switching traffic to new container ${newContainer.name} with URL ${newTargetUrl}`,
+      );
+      // Re-register the service with the updated target URL.
+      await this.registerWithFrontServer(
+        newContainer.name,
+        newTargetUrl,
+        "app",
+      );
+      logger.info(
+        `Traffic successfully switched to container ${newContainer.name}`,
+      );
     } catch (error) {
-      logger.error(`Traefik diagnostics failed: ${error.message}`);
-      return false;
+      logger.error(`Traffic switch failed: ${error.message}`);
+      throw new Error("Traffic switch failed");
     }
   }
 
@@ -447,26 +280,17 @@ class ZeroDowntimeDeployer {
       envVarsToken,
       targetUrl,
     } = value;
-    console.log("🚀 ~ ZeroDowntimeDeployer ~ deploy ~ value:", value);
+    logger.info("Deploying with payload:", value);
 
     const LOCAL_IP = execSync("hostname -I | awk '{print $1}'")
       .toString()
       .trim();
     let finalDomain = domain;
 
-    // Initialize port manager
+    // Initialize port manager and allocate a host port for this service
     await portManager.initialize();
-
-    // Allocate a host port for this service
     const { hostPort, containerPort } =
       await portManager.allocatePort(serviceName);
-
-    const token = process.env.AGENT_JWT;
-    console.log("🚀 ~ ZeroDowntimeDeployer ~ deploy ~ token:", token);
-    console.log(
-      "🚀 ~ ZeroDowntimeDeployer ~ deploy ~ appType.toLowerCase():",
-      appType.toLowerCase(),
-    );
 
     if (appType.toLowerCase() === "mongo") {
       finalDomain = `${serviceName}.${process.env.MONGO_DOMAIN}`;
@@ -475,14 +299,11 @@ class ZeroDowntimeDeployer {
       const resolvedTargetUrl = `http://${LOCAL_IP}:${hostPort}`;
 
       try {
-        // Register the service with robust error handling
         await this.registerWithFrontServer(
           serviceName,
           resolvedTargetUrl,
           appType,
         );
-
-        // Verify that the service is accessible (optional but recommended)
         const isAccessible = await this.verifyServiceAccessibility(finalDomain);
         if (!isAccessible) {
           logger.warn(
@@ -498,7 +319,6 @@ class ZeroDowntimeDeployer {
           `Failed to register service with front server: ${err.message}`,
         );
         logger.warn("Continuing deployment despite front API error");
-        // Don't throw the error - just continue with deployment
       }
     }
 
@@ -555,22 +375,25 @@ class ZeroDowntimeDeployer {
         domain: finalDomain,
         envFilePath,
         environment,
-        hostPort, // Pass the host port
-        containerPort, // Pass the fixed container port
+        hostPort,
+        containerPort,
         payload: value,
         ws,
       });
 
       await envManager.verifyEnvironmentSetup(newContainer.name);
-      await this.performHealthCheck(newContainer, finalDomain);
+      await this.performHealthCheck(newContainer);
+
+      // Switch traffic from the old container (if any) to the new container.
       await this.switchTraffic(oldContainer, newContainer, finalDomain);
 
-      if (oldContainer)
+      if (oldContainer) {
         await this.gracefulContainerRemoval(
           oldContainer,
           deployDir,
           projectName,
         );
+      }
 
       if (newContainer) {
         logger.info(`Verifying service accessibility at ${finalDomain}...`);
@@ -611,62 +434,16 @@ class ZeroDowntimeDeployer {
   }
 
   async gracefulContainerRemoval(container, deployDir, projectName) {
-    if (!container) {
-      logger.info("No container to remove");
-      return;
-    }
-
     try {
-      logger.info(`Gracefully removing container ${container.name}`);
-
-      // First try to stop the container
-      try {
-        await executeCommand("docker", ["stop", "--time=30", container.id]);
-        logger.info(`Container ${container.name} stopped successfully`);
-      } catch (stopError) {
-        logger.warn(
-          `Failed to stop container gracefully: ${stopError.message}`,
-        );
-        // Continue with the removal anyway
-      }
-
-      // Remove the container using docker-compose
-      try {
-        await executeCommand(
-          "docker-compose",
-          ["-p", projectName, "down", "-v"],
-          { cwd: deployDir },
-        );
-        logger.info(
-          `Container ${container.name} removed successfully using docker-compose`,
-        );
-      } catch (composeError) {
-        logger.warn(
-          `Failed to remove container using docker-compose: ${composeError.message}`,
-        );
-
-        // Fallback to direct docker rm
-        try {
-          await executeCommand("docker", ["rm", "-f", container.id]);
-          logger.info(
-            `Container ${container.name} forcefully removed using docker rm`,
-          );
-        } catch (rmError) {
-          throw new Error(
-            `Failed to remove container ${container.name}: ${rmError.message}`,
-          );
-        }
-      }
-
-      // Clean up any dangling images to save disk space
-      try {
-        await executeCommand("docker", ["image", "prune", "-f"]);
-        logger.debug("Cleaned up dangling images");
-      } catch (pruneError) {
-        logger.warn(`Failed to prune images: ${pruneError.message}`);
-      }
+      await executeCommand(
+        "docker-compose",
+        ["-p", projectName, "down", "-v"],
+        { cwd: deployDir },
+      );
     } catch (error) {
-      throw new Error(`Container removal failed: ${error.message}`);
+      throw new Error(
+        `Failed to remove container ${container.name}: ${error.message}`,
+      );
     }
   }
 
@@ -678,6 +455,7 @@ class ZeroDowntimeDeployer {
       );
       return response.data.variables;
     } catch (error) {
+      logger.warn(`Could not fetch environment variables: ${error.message}`);
       return null;
     }
   }
@@ -697,7 +475,6 @@ class ZeroDowntimeDeployer {
       path.dirname(deployDir),
       `${path.basename(deployDir)}_temp_${Date.now()}`,
     );
-
     try {
       await executeCommand("git", [
         "clone",
@@ -720,8 +497,9 @@ class ZeroDowntimeDeployer {
         }
       }
     } finally {
-      if (await this.directoryExists(tempDir))
+      if (await this.directoryExists(tempDir)) {
         await fs.rm(tempDir, { recursive: true, force: true });
+      }
     }
   }
 
@@ -743,7 +521,9 @@ class ZeroDowntimeDeployer {
         path.join(backupDir, "backup-metadata.json"),
         JSON.stringify(backupMetadata, null, 2),
       );
-    } catch (error) {}
+    } catch (error) {
+      logger.warn(`Backup failed: ${error.message}`);
+    }
   }
 
   async getCurrentContainer(serviceName) {
@@ -794,71 +574,10 @@ class ZeroDowntimeDeployer {
     if (!healthy) throw new Error("Container failed health checks");
   }
 
-  async switchTraffic(oldContainer, newContainer, domain) {
-    try {
-      logger.info(
-        `Switching traffic from ${oldContainer ? oldContainer.name : "none"} to ${newContainer.name}`,
-      );
-
-      // If this is a first deployment (no old container), just register the new container
-      if (!oldContainer) {
-        logger.info(`First deployment for ${domain}, no traffic switch needed`);
-        return;
-      }
-
-      // 1. Update the registration with Traefik front server to point to the new container
-      const LOCAL_IP = require("child_process")
-        .execSync("hostname -I | awk '{print $1}'")
-        .toString()
-        .trim();
-
-      const resolvedTargetUrl = `http://${LOCAL_IP}:${this.portMap[newContainer.name.split("-")[0]]}`;
-
-      // Extract service name from container name (remove blue/green suffix)
-      const serviceName = newContainer.name.replace(/-blue$|-green$/, "");
-
-      // Register the new container with the front server
-      try {
-        logger.info(
-          `Updating front server registration for ${serviceName} to point to ${resolvedTargetUrl}`,
-        );
-        await this.registerWithFrontServer(
-          serviceName,
-          resolvedTargetUrl,
-          "app",
-        );
-
-        // Wait a bit for the front server to update its configuration
-        logger.info(
-          `Waiting for front server to apply configuration changes...`,
-        );
-        await new Promise((resolve) => setTimeout(resolve, 10000));
-
-        // Verify the service is accessible
-        const isAccessible = await this.verifyServiceAccessibility(domain);
-        if (isAccessible) {
-          logger.info(
-            `Service at ${domain} is accessible after traffic switch`,
-          );
-        } else {
-          logger.warn(
-            `Service at ${domain} is not accessible after traffic switch, but continuing...`,
-          );
-        }
-      } catch (error) {
-        logger.error(
-          `Failed to update front server registration: ${error.message}`,
-        );
-        logger.warn(
-          `Traffic switch may not be complete, but continuing with deployment`,
-        );
-      }
-    } catch (error) {
-      logger.error(`Error during traffic switch: ${error.message}`);
-      // Continue despite errors to prevent deployment failure
-    }
-  }
-
+  /**
+   * Build and start the container, returning an object with additional properties
+   * (hostPort and containerPort) needed for traffic switching.
+   */
   async buildAndStartContainer({
     projectName,
     serviceName,
@@ -883,21 +602,20 @@ class ZeroDowntimeDeployer {
         .trim()
         .split("\n")
         .filter((id) => id);
-      for (const id of containerIds)
+      for (const id of containerIds) {
         await executeCommand("docker-compose", [
           "-p",
           projectName,
           "down",
           "-v",
         ]);
-
+      }
       if (!this.templateHandler) {
         this.templateHandler = new TemplateHandler(
           this.templatesDir,
           require("../deployConfig.json"),
         );
       }
-
       const files = await this.templateHandler.generateDeploymentFiles({
         appType: payload.appType,
         appName: serviceName,
@@ -914,7 +632,6 @@ class ZeroDowntimeDeployer {
           start_period: "40s",
         },
       });
-
       await Promise.all([
         fs.writeFile(path.join(deployDir, "Dockerfile"), files.dockerfile),
         fs.writeFile(
@@ -922,7 +639,6 @@ class ZeroDowntimeDeployer {
           files.dockerCompose,
         ),
       ]);
-
       await executeCommand(
         "docker-compose",
         ["-p", projectName, "build", "--no-cache"],
@@ -931,13 +647,17 @@ class ZeroDowntimeDeployer {
       await executeCommand("docker-compose", ["-p", projectName, "up", "-d"], {
         cwd: deployDir,
       });
-
       const { stdout: newContainerId } = await executeCommand(
         "docker-compose",
         ["-p", projectName, "ps", "-q", serviceName],
         { cwd: deployDir },
       );
-      return { id: newContainerId.trim(), name: serviceName };
+      return {
+        id: newContainerId.trim(),
+        name: serviceName,
+        hostPort,
+        containerPort,
+      };
     } catch (error) {
       throw new Error(`Failed to build/start container: ${error.message}`);
     }
@@ -945,13 +665,14 @@ class ZeroDowntimeDeployer {
 
   async performRollback(oldContainer, newContainer, domain) {
     try {
-      if (newContainer)
+      if (newContainer) {
         await executeCommand("docker-compose", [
           "-p",
           newContainer.name,
           "down",
           "-v",
         ]);
+      }
       if (oldContainer) {
         const backupMetadataPath = path.join(
           "/opt/cloudlunacy/deployments",
@@ -1016,10 +737,13 @@ class ZeroDowntimeDeployer {
     try {
       if (!keepBackup) {
         const backupDir = path.join(deployDir, "backup");
-        if (await this.directoryExists(backupDir))
+        if (await this.directoryExists(backupDir)) {
           await fs.rm(backupDir, { recursive: true, force: true });
+        }
       }
-    } catch (error) {}
+    } catch (error) {
+      logger.warn(`Cleanup error: ${error.message}`);
+    }
   }
 
   async directoryExists(dir) {
