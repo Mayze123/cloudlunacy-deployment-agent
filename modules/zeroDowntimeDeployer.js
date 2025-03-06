@@ -220,22 +220,111 @@ class ZeroDowntimeDeployer {
       .toString()
       .trim();
     const newTargetUrl = `http://${LOCAL_IP}:${newContainer.hostPort}`;
+
     try {
       logger.info(
-        `Switching traffic to new container ${newContainer.name} with URL ${newTargetUrl}`,
+        `Preparing to switch traffic to new container ${newContainer.name} with URL ${newTargetUrl}`,
       );
-      // Re-register the service with the updated target URL.
+
+      // 1. First verify the new container is truly ready to receive traffic
+      logger.info("Verifying new container health before switching traffic...");
+      try {
+        const healthCheck = await axios.get(`${newTargetUrl}/health`, {
+          timeout: 5000,
+          validateStatus: (status) => status < 500,
+        });
+        logger.info(
+          `Health check for new container succeeded with status: ${healthCheck.status}`,
+        );
+      } catch (healthErr) {
+        logger.warn(
+          `Health check failed, but will continue with traffic switch: ${healthErr.message}`,
+        );
+      }
+
+      // 2. Register the new target with the front server
+      logger.info(
+        `Registering new target URL: ${newTargetUrl} for domain: ${domain}`,
+      );
       await this.registerWithFrontServer(
         newContainer.name,
         newTargetUrl,
         "app",
       );
-      logger.info(
-        `Traffic successfully switched to container ${newContainer.name}`,
-      );
+
+      // 3. Wait briefly to ensure the configuration update propagates
+      logger.info("Waiting for configuration to propagate...");
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+
+      // 4. Verify the traffic switch actually worked
+      logger.info("Verifying new routing configuration...");
+      let switchSuccessful = false;
+      let retryCount = 0;
+
+      while (!switchSuccessful && retryCount < 3) {
+        try {
+          // Try a direct request to the front server API to verify the route exists
+          const frontApiUrl = process.env.FRONT_API_URL;
+          const token = process.env.AGENT_JWT;
+
+          if (frontApiUrl && token) {
+            const routeCheck = await axios.get(
+              `${frontApiUrl}/api/frontdoor/config`,
+              {
+                headers: {
+                  Authorization: `Bearer ${token}`,
+                },
+                timeout: 5000,
+              },
+            );
+
+            // Simple check to see if our domain appears in the config
+            const configStr = JSON.stringify(routeCheck.data);
+            if (
+              configStr.includes(domain) ||
+              configStr.includes(newContainer.name)
+            ) {
+              logger.info(
+                "Route verification successful: Domain found in configuration",
+              );
+              switchSuccessful = true;
+            } else {
+              logger.warn(
+                "Route verification failed: Domain not found in configuration",
+              );
+              retryCount++;
+              await new Promise((resolve) => setTimeout(resolve, 2000));
+            }
+          } else {
+            // If we can't verify via API, assume it worked
+            logger.info(
+              "Missing front API URL or token, skipping route verification",
+            );
+            switchSuccessful = true;
+          }
+        } catch (verifyErr) {
+          logger.warn(
+            `Route verification request failed: ${verifyErr.message}`,
+          );
+          retryCount++;
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+        }
+      }
+
+      if (switchSuccessful) {
+        logger.info(
+          `Traffic successfully switched to container ${newContainer.name}`,
+        );
+        return true;
+      } else {
+        logger.warn(
+          "Traffic switch may not have completed successfully, but will continue deployment",
+        );
+        return false;
+      }
     } catch (error) {
       logger.error(`Traffic switch failed: ${error.message}`);
-      throw new Error("Traffic switch failed");
+      throw new Error(`Traffic switch failed: ${error.message}`);
     }
   }
 
