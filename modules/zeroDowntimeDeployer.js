@@ -591,6 +591,23 @@ class ZeroDowntimeDeployer {
     ws,
   }) {
     try {
+      // Check for any existing container with the same service name
+      const { stdout: existingId } = await executeCommand("docker", [
+        "ps",
+        "-a",
+        "-q",
+        "--filter",
+        `name=^/${serviceName}$`,
+      ]);
+      if (existingId && existingId.trim()) {
+        logger.info(
+          `Found existing container ${serviceName} (${existingId.trim()}). Removing it...`,
+        );
+        await executeCommand("docker", ["rm", "-f", existingId.trim()]);
+      }
+
+      // Alternatively, if you're using docker-compose to manage the container,
+      // ensure that docker-compose down removes any leftover container:
       const existingContainers = await executeCommand("docker-compose", [
         "-p",
         projectName,
@@ -610,6 +627,7 @@ class ZeroDowntimeDeployer {
           "-v",
         ]);
       }
+
       if (!this.templateHandler) {
         this.templateHandler = new TemplateHandler(
           this.templatesDir,
