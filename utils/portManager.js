@@ -1,4 +1,4 @@
-// utils/portManager.js - Improved port detection and allocation
+// utils/portManager.js - Fixed with verifyPortMapping function
 
 const fs = require("fs").promises;
 const path = require("path");
@@ -42,6 +42,32 @@ class PortManager {
       logger.error("Failed to save ports configuration:", error);
       throw error;
     }
+  }
+
+  // Add the missing verifyPortMapping function
+  async verifyPortMapping(serviceName, hostPort) {
+    // This method ensures that a service always gets the expected port
+    // It updates our records if needed and ensures the front server is in sync
+    logger.info(`Verifying port mapping for ${serviceName}: ${hostPort}`);
+
+    if (this.portMap[serviceName] && this.portMap[serviceName] !== hostPort) {
+      logger.info(
+        `Port mapping mismatch for ${serviceName}: recorded ${this.portMap[serviceName]}, actual ${hostPort}`,
+      );
+      this.portMap[serviceName] = hostPort;
+      await this.savePorts();
+      return true;
+    }
+
+    // If no mapping exists for this service, create one
+    if (!this.portMap[serviceName]) {
+      logger.info(`Creating new port mapping for ${serviceName}: ${hostPort}`);
+      this.portMap[serviceName] = hostPort;
+      await this.savePorts();
+      return true;
+    }
+
+    return false;
   }
 
   // More accurate port check - uses Docker directly
@@ -294,6 +320,59 @@ class PortManager {
       await this.savePorts();
       logger.info(`Released port ${port} for ${serviceName}`);
     }
+  }
+
+  // Find a free port in a specific range
+  async findFreePort(startPort = 10000, endPort = 30000, excludedPort = null) {
+    logger.info(
+      `Finding free port between ${startPort} and ${endPort}, excluding ${excludedPort}`,
+    );
+
+    // Get a list of all used ports by Docker containers
+    const { stdout: usedPortsOutput } = await executeCommand("docker", [
+      "ps",
+      "--format",
+      "{{.Ports}}",
+    ]);
+
+    // Parse the port output and create a set of used ports
+    const usedPorts = new Set();
+    usedPortsOutput
+      .split("\n")
+      .filter(Boolean)
+      .forEach((portMapping) => {
+        const portMatches = portMapping.match(/0\.0\.0\.0:(\d+)/g);
+        if (portMatches) {
+          portMatches.forEach((match) => {
+            const port = parseInt(match.split(":")[1], 10);
+            usedPorts.add(port);
+          });
+        }
+      });
+
+    // Add our reserved ports and the excluded port
+    this.reservedPorts.forEach((port) => usedPorts.add(port));
+    if (excludedPort) usedPorts.add(excludedPort);
+
+    // Find the first available port in our range
+    for (let port = startPort; port <= endPort; port++) {
+      if (!usedPorts.has(port)) {
+        // Verify the port is truly available at the OS level
+        try {
+          const isAvailable = await this.isPortAvailable(port);
+          if (isAvailable) {
+            logger.info(`Found free port: ${port}`);
+            return port;
+          }
+        } catch (error) {
+          logger.warn(`Error checking port ${port}: ${error.message}`);
+        }
+      }
+    }
+
+    throw new Error(
+      `No free ports available between ${startPort} and ${endPort}`,
+    );
   }
 }
 
