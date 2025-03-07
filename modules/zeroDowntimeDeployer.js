@@ -387,6 +387,7 @@ class ZeroDowntimeDeployer {
     await portManager.initialize();
     const { hostPort, containerPort } =
       await portManager.allocatePort(serviceName);
+    console.log("🚀 ~ ZeroDowntimeDeployer ~ deploy ~ hostPort:", hostPort);
 
     if (appType.toLowerCase() === "mongo") {
       finalDomain = `${serviceName}.${process.env.MONGO_DOMAIN}`;
