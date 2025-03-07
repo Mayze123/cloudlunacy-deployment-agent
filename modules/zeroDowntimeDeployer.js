@@ -217,12 +217,7 @@ class ZeroDowntimeDeployer {
     return false;
   }
 
-  /**
-   * Switch traffic from the old container to the new container by re-registering
-   * the service with the updated target URL. This will update the dynamic configuration
-   * and trigger Traefik to route traffic to the new container.
-   */
-  async switchTraffic(oldContainer, newContainer, domain) {
+  async switchTraffic(oldContainer, newContainer, baseServiceName) {
     const LOCAL_IP = execSync("hostname -I | awk '{print $1}'")
       .toString()
       .trim();
@@ -230,10 +225,10 @@ class ZeroDowntimeDeployer {
 
     try {
       logger.info(
-        `Preparing to switch traffic to new container ${newContainer.name} with URL ${newTargetUrl}`,
+        `Preparing to switch traffic to new container with target URL ${newTargetUrl} using base name ${baseServiceName}`,
       );
 
-      // 1. First verify the new container is truly ready to receive traffic
+      // 1. Verify the new container’s health before switching traffic
       logger.info("Verifying new container health before switching traffic...");
       try {
         const healthCheck = await axios.get(`${newTargetUrl}/health`, {
@@ -249,15 +244,11 @@ class ZeroDowntimeDeployer {
         );
       }
 
-      // 2. Register the new target with the front server
+      // 2. Register the new target with the front server using the base service name
       logger.info(
-        `Registering new target URL: ${newTargetUrl} for domain: ${domain}`,
+        `Registering new target URL: ${newTargetUrl} for base service name: ${baseServiceName}`,
       );
-      await this.registerWithFrontServer(
-        newContainer.name,
-        newTargetUrl,
-        "app",
-      );
+      await this.registerWithFrontServer(baseServiceName, newTargetUrl, "app");
 
       // 3. Wait briefly to ensure the configuration update propagates
       logger.info("Waiting for configuration to propagate...");
@@ -267,47 +258,38 @@ class ZeroDowntimeDeployer {
       logger.info("Verifying new routing configuration...");
       let switchSuccessful = false;
       let retryCount = 0;
-
       while (!switchSuccessful && retryCount < 3) {
         try {
-          // Try a direct request to the front server API to verify the route exists
           const frontApiUrl = process.env.FRONT_API_URL;
           const token = process.env.AGENT_JWT;
-
           if (frontApiUrl && token) {
             const routeCheck = await axios.get(
               `${frontApiUrl}/api/frontdoor/config`,
               {
-                headers: {
-                  Authorization: `Bearer ${token}`,
-                },
+                headers: { Authorization: `Bearer ${token}` },
                 timeout: 5000,
               },
             );
-
-            // Simple check to see if our domain appears in the config
             const configStr = JSON.stringify(routeCheck.data);
-            if (
-              configStr.includes(domain) ||
-              configStr.includes(newContainer.name)
-            ) {
+            if (configStr.includes(baseServiceName)) {
               logger.info(
-                "Route verification successful: Domain found in configuration",
+                "Route verification successful: base service name found in configuration",
               );
               switchSuccessful = true;
+              break;
             } else {
               logger.warn(
-                "Route verification failed: Domain not found in configuration",
+                "Route verification failed: base service name not found in configuration",
               );
               retryCount++;
               await new Promise((resolve) => setTimeout(resolve, 2000));
             }
           } else {
-            // If we can't verify via API, assume it worked
             logger.info(
               "Missing front API URL or token, skipping route verification",
             );
             switchSuccessful = true;
+            break;
           }
         } catch (verifyErr) {
           logger.warn(
@@ -317,7 +299,6 @@ class ZeroDowntimeDeployer {
           await new Promise((resolve) => setTimeout(resolve, 2000));
         }
       }
-
       if (switchSuccessful) {
         logger.info(
           `Traffic successfully switched to container ${newContainer.name}`,
@@ -388,7 +369,6 @@ class ZeroDowntimeDeployer {
     const { hostPort, containerPort } =
       await portManager.allocatePort(serviceName);
     logger.info("🚀 ~ ZeroDowntimeDeployer ~ deploy ~ hostPort:", hostPort);
-    console.log("🚀 ~ ZeroDowntimeDeployer ~ deploy ~ hostPort:", hostPort);
 
     if (appType.toLowerCase() === "mongo") {
       finalDomain = `${serviceName}.${process.env.MONGO_DOMAIN}`;
@@ -396,10 +376,6 @@ class ZeroDowntimeDeployer {
       finalDomain = `${serviceName}.${process.env.APP_DOMAIN}`;
       const resolvedTargetUrl = `http://${LOCAL_IP}:${hostPort}`;
       logger.info(
-        "🚀 ~ ZeroDowntimeDeployer ~ deploy ~ resolvedTargetUrl:",
-        resolvedTargetUrl,
-      );
-      console.log(
         "🚀 ~ ZeroDowntimeDeployer ~ deploy ~ resolvedTargetUrl:",
         resolvedTargetUrl,
       );
@@ -490,7 +466,7 @@ class ZeroDowntimeDeployer {
       await this.performHealthCheck(newContainer);
 
       // Switch traffic from the old container (if any) to the new container.
-      await this.switchTraffic(oldContainer, newContainer, finalDomain);
+      await this.switchTraffic(oldContainer, newContainer, serviceName);
 
       if (oldContainer) {
         await this.gracefulContainerRemoval(
