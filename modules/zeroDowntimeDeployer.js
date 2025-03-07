@@ -387,6 +387,7 @@ class ZeroDowntimeDeployer {
     await portManager.initialize();
     const { hostPort, containerPort } =
       await portManager.allocatePort(serviceName);
+    logger.info("🚀 ~ ZeroDowntimeDeployer ~ deploy ~ hostPort:", hostPort);
     console.log("🚀 ~ ZeroDowntimeDeployer ~ deploy ~ hostPort:", hostPort);
 
     if (appType.toLowerCase() === "mongo") {
@@ -394,7 +395,14 @@ class ZeroDowntimeDeployer {
     } else {
       finalDomain = `${serviceName}.${process.env.APP_DOMAIN}`;
       const resolvedTargetUrl = `http://${LOCAL_IP}:${hostPort}`;
-
+      logger.info(
+        "🚀 ~ ZeroDowntimeDeployer ~ deploy ~ resolvedTargetUrl:",
+        resolvedTargetUrl,
+      );
+      console.log(
+        "🚀 ~ ZeroDowntimeDeployer ~ deploy ~ resolvedTargetUrl:",
+        resolvedTargetUrl,
+      );
       try {
         await this.registerWithFrontServer(
           serviceName,
