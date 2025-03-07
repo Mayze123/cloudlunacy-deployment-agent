@@ -517,11 +517,14 @@ class ZeroDowntimeDeployer {
       // Switch traffic from the old container (if any) to the new container.
       await this.switchTraffic(oldContainer, newContainer, serviceName);
 
-      if (oldContainer) {
-        await this.gracefulContainerRemoval(
-          oldContainer,
-          deployDir,
-          projectName,
+      if (oldContainer && oldContainer.id !== newContainer.id) {
+        logger.info(
+          `Removing old container ${oldContainer.name} (${oldContainer.id})`,
+        );
+        await this.gracefulContainerRemoval(oldContainer);
+      } else {
+        logger.info(
+          "No old container to remove or old container is the same as new",
         );
       }
 
@@ -565,18 +568,23 @@ class ZeroDowntimeDeployer {
 
   async gracefulContainerRemoval(container, deployDir, projectName) {
     try {
-      await executeCommand(
-        "docker-compose",
-        ["-p", projectName, "down", "-v"],
-        { cwd: deployDir },
+      logger.info(
+        `Gracefully removing old container ${container.name} (${container.id})`,
       );
+
+      // Remove ONLY the specified container, not the entire project
+      await executeCommand("docker", ["stop", container.id]);
+      await executeCommand("docker", ["rm", container.id]);
+
+      logger.info(`Successfully removed old container ${container.name}`);
+      return true;
     } catch (error) {
-      throw new Error(
+      logger.warn(
         `Failed to remove container ${container.name}: ${error.message}`,
       );
+      return false;
     }
   }
-
   async fetchEnvironmentVariables(deploymentId, envVarsToken) {
     try {
       const response = await apiClient.post(
