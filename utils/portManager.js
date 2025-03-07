@@ -50,24 +50,71 @@ class PortManager {
     // It updates our records if needed and ensures the front server is in sync
     logger.info(`Verifying port mapping for ${serviceName}: ${hostPort}`);
 
-    if (this.portMap[serviceName] && this.portMap[serviceName] !== hostPort) {
-      logger.info(
-        `Port mapping mismatch for ${serviceName}: recorded ${this.portMap[serviceName]}, actual ${hostPort}`,
+    // Handle case where port is not a number
+    if (typeof hostPort !== "number" || isNaN(hostPort)) {
+      logger.error(
+        `Invalid port value provided for ${serviceName}: ${hostPort}`,
       );
-      this.portMap[serviceName] = hostPort;
-      await this.savePorts();
-      return true;
+      throw new Error(`Invalid port value: ${hostPort}`);
+    }
+
+    let portChanged = false;
+
+    // Check if this is a blue/green deployment
+    const baseServiceName = serviceName.replace(/-blue$|-green$/, "");
+
+    // First check if we have a mapping for the base service name
+    // (without blue/green suffix)
+    if (
+      this.portMap[baseServiceName] &&
+      this.portMap[baseServiceName] !== hostPort
+    ) {
+      logger.warn(
+        `Port mapping mismatch for ${baseServiceName}: recorded ${this.portMap[baseServiceName]}, actual ${hostPort}`,
+      );
+      this.portMap[baseServiceName] = hostPort;
+      portChanged = true;
+    }
+
+    // Also check for the specific service name (with blue/green suffix)
+    if (baseServiceName !== serviceName) {
+      if (this.portMap[serviceName] && this.portMap[serviceName] !== hostPort) {
+        logger.warn(
+          `Port mapping mismatch for ${serviceName}: recorded ${this.portMap[serviceName]}, actual ${hostPort}`,
+        );
+        this.portMap[serviceName] = hostPort;
+        portChanged = true;
+      }
     }
 
     // If no mapping exists for this service, create one
-    if (!this.portMap[serviceName]) {
-      logger.info(`Creating new port mapping for ${serviceName}: ${hostPort}`);
-      this.portMap[serviceName] = hostPort;
-      await this.savePorts();
-      return true;
+    if (!this.portMap[baseServiceName]) {
+      logger.info(
+        `Creating new port mapping for ${baseServiceName}: ${hostPort}`,
+      );
+      this.portMap[baseServiceName] = hostPort;
+      portChanged = true;
     }
 
-    return false;
+    // If we have the specific service name variant, add it too
+    if (baseServiceName !== serviceName && !this.portMap[serviceName]) {
+      logger.info(
+        `Creating additional port mapping for ${serviceName}: ${hostPort}`,
+      );
+      this.portMap[serviceName] = hostPort;
+      portChanged = true;
+    }
+
+    // Save changes to disk if any changes were made
+    if (portChanged) {
+      await this.savePorts();
+      logger.info(`Updated port mappings saved to disk`);
+    }
+
+    return {
+      portMapping: hostPort,
+      updated: portChanged,
+    };
   }
 
   // More accurate port check - uses Docker directly

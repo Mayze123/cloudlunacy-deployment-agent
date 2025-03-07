@@ -80,14 +80,28 @@ class ZeroDowntimeDeployer {
     logger.info(
       `Registering service ${serviceName} with front server at ${frontApiUrl}`,
     );
+    logger.info(`Using target URL: ${targetUrl}`);
 
     // Extract port from target URL
     let actualPort = null;
+    let targetHost = null;
     try {
       const urlObj = new URL(targetUrl);
       actualPort = parseInt(urlObj.port, 10);
+      targetHost = urlObj.host; // this will be hostname:port
+
+      // Log the extracted values
+      logger.info(
+        `Extracted from URL - host: ${targetHost}, port: ${actualPort}`,
+      );
+
       if (actualPort && !isNaN(actualPort)) {
-        await portManager.verifyPortMapping(serviceName, actualPort);
+        // Update the port mapping for the base service name (without -blue/-green suffix)
+        const baseServiceName = serviceName.replace(/-blue$|-green$/, "");
+        await portManager.verifyPortMapping(baseServiceName, actualPort);
+        logger.info(
+          `Updated port mapping for ${baseServiceName} to ${actualPort}`,
+        );
       }
     } catch (err) {
       logger.warn(
@@ -118,6 +132,9 @@ class ZeroDowntimeDeployer {
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
+        // Log the exact request being sent
+        logger.info(`Sending registration to ${endpoint}`, payload);
+
         const response = await axios.post(endpoint, payload, {
           headers: {
             "Content-Type": "application/json",
@@ -125,6 +142,7 @@ class ZeroDowntimeDeployer {
           },
           timeout: 10000,
         });
+
         logger.info(
           `Service registration successful on attempt ${attempt}:`,
           response.data,
@@ -137,16 +155,19 @@ class ZeroDowntimeDeployer {
           statusCode,
           error: errorData || error.message,
         });
+
         if ([400, 401, 403].includes(statusCode)) {
           throw new Error(
             `Service registration failed: ${errorData?.message || error.message}`,
           );
         }
+
         if (attempt === maxRetries) {
           throw new Error(
             `Service registration failed after ${maxRetries} attempts`,
           );
         }
+
         const delay = initialDelay * Math.pow(2, attempt - 1);
         logger.info(`Retrying in ${delay}ms...`);
         await new Promise((resolve) => setTimeout(resolve, delay));
@@ -221,6 +242,21 @@ class ZeroDowntimeDeployer {
     const LOCAL_IP = execSync("hostname -I | awk '{print $1}'")
       .toString()
       .trim();
+
+    // Log the container objects to help with debugging
+    logger.info(`Old container: ${JSON.stringify(oldContainer || {})}`);
+    logger.info(`New container: ${JSON.stringify(newContainer || {})}`);
+
+    // Ensure we have the hostPort property and it's a number
+    if (!newContainer || typeof newContainer.hostPort !== "number") {
+      logger.error(
+        `Invalid new container object or missing hostPort: ${JSON.stringify(newContainer)}`,
+      );
+      throw new Error(
+        "Cannot switch traffic: new container is invalid or missing port information",
+      );
+    }
+
     const newTargetUrl = `http://${LOCAL_IP}:${newContainer.hostPort}`;
 
     try {
@@ -228,7 +264,7 @@ class ZeroDowntimeDeployer {
         `Preparing to switch traffic to new container with target URL ${newTargetUrl} using base name ${baseServiceName}`,
       );
 
-      // 1. Verify the new container’s health before switching traffic
+      // 1. Verify the new container's health before switching traffic
       logger.info("Verifying new container health before switching traffic...");
       try {
         const healthCheck = await axios.get(`${newTargetUrl}/health`, {
@@ -243,6 +279,19 @@ class ZeroDowntimeDeployer {
           `Health check failed, but will continue with traffic switch: ${healthErr.message}`,
         );
       }
+
+      // Verify we have the actual port
+      const baseServiceNameWithoutSuffix = baseServiceName.replace(
+        /-blue$|-green$/,
+        "",
+      );
+      const { portMapping } = await portManager.verifyPortMapping(
+        baseServiceNameWithoutSuffix,
+        newContainer.hostPort,
+      );
+      logger.info(
+        `Verified port mapping for ${baseServiceNameWithoutSuffix}: ${portMapping}`,
+      );
 
       // 2. Register the new target with the front server using the base service name
       logger.info(
@@ -301,7 +350,7 @@ class ZeroDowntimeDeployer {
       }
       if (switchSuccessful) {
         logger.info(
-          `Traffic successfully switched to container ${newContainer.name}`,
+          `Traffic successfully switched to container ${newContainer.name} on port ${newContainer.hostPort}`,
         );
         return true;
       } else {
@@ -745,7 +794,6 @@ class ZeroDowntimeDeployer {
               logger.info(
                 `Port ${hostPort} still unavailable, finding an alternative port...`,
               );
-              const portManager = require("../utils/portManager");
               hostPort = await portManager.findFreePort(10000, 30000, hostPort);
               logger.info(`Using alternative port: ${hostPort}`);
               portAvailable = true;
@@ -827,16 +875,48 @@ class ZeroDowntimeDeployer {
         `Container started successfully with ID: ${newContainerId.trim()}`,
       );
 
-      // If we used an alternative port, update the port manager's records
-      if (hostPort !== containerPort) {
-        const portManager = require("../utils/portManager");
-        await portManager.verifyPortMapping(serviceName, hostPort);
+      // Verify the actual port used by the container
+      logger.info(
+        `Verifying actual port for container ${newContainerId.trim()}`,
+      );
+      try {
+        const { stdout: portMappings } = await executeCommand("docker", [
+          "port",
+          newContainerId.trim(),
+        ]);
+
+        logger.info(`Container port mappings: ${portMappings}`);
+
+        // Parse the port mappings to find the actual port
+        const hostPortMatch = portMappings.match(/0\.0\.0\.0:(\d+)/);
+        if (hostPortMatch && hostPortMatch[1]) {
+          const actualPort = parseInt(hostPortMatch[1], 10);
+
+          if (actualPort !== hostPort) {
+            logger.warn(
+              `Port mismatch detected! Expected ${hostPort} but container is using ${actualPort}`,
+            );
+
+            // Update port manager with actual port
+            await portManager.verifyPortMapping(
+              serviceName.replace(/-blue$|-green$/, ""),
+              actualPort,
+            );
+
+            // Use the actual port instead of the expected one
+            hostPort = actualPort;
+          }
+        }
+      } catch (portCheckError) {
+        logger.warn(
+          `Error checking container port mappings: ${portCheckError.message}`,
+        );
       }
 
       return {
         id: newContainerId.trim(),
         name: serviceName,
-        hostPort,
+        hostPort, // This is now guaranteed to be the actual port used
         containerPort,
       };
     } catch (error) {
