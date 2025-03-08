@@ -21,7 +21,7 @@ BASE_DIR="/opt/cloudlunacy"
 : "${FRONT_API_URL:=http://138.199.165.36:3005}"
 : "${NODE_PORT:=3005}"
 : "${MONGO_PORT:=27017}"
-
+: "${SHARED_NETWORK:=cloudlunacy-network}"
 
 # ----------------------------
 # Function Definitions
@@ -206,27 +206,43 @@ install_node() {
   log "Node.js installed successfully."
 }
 
+setup_docker_network() {
+  log "Setting up Docker network..."
+  # Check if network exists
+  if docker network ls | grep -q "$SHARED_NETWORK"; then
+    log "Network '$SHARED_NETWORK' already exists."
+  else
+    log "Creating Docker network '$SHARED_NETWORK'..."
+    docker network create $SHARED_NETWORK
+  fi
+}
 
 # ------------------------------------------------------------------------------
-# New Function: Install MongoDB as a Docker Container
+# New Function: Install MongoDB as a Docker Container with network
 # ------------------------------------------------------------------------------
 install_mongo() {
   log "Installing MongoDB container..."
   # Check if a container named "mongodb-agent" exists
   if docker ps -a --format '{{.Names}}' | grep -q '^mongodb-agent$'; then
-    log "MongoDB container already exists. Removing it to re-create with proper port mapping..."
-    docker rm -f mongodb-agent || { log_error "Failed to remove existing MongoDB container"; exit 1; }
+    log "MongoDB container already exists. Removing it to re-create with proper networking..."
+    docker rm -f mongodb-agent || {
+      log_error "Failed to remove existing MongoDB container"
+      exit 1
+    }
   fi
 
   log "Creating and starting MongoDB container..."
   docker run -d \
     --name mongodb-agent \
-    -p ${MONGO_PORT}:27017 \
+    --network $SHARED_NETWORK \
     -e MONGO_INITDB_ROOT_USERNAME=admin \
     -e MONGO_INITDB_ROOT_PASSWORD=adminpassword \
-    mongo:latest || { log_error "Failed to start MongoDB container"; exit 1; }
-  
-  log "MongoDB container is running."
+    mongo:latest || {
+    log_error "Failed to start MongoDB container"
+    exit 1
+  }
+
+  log "MongoDB container is running on network $SHARED_NETWORK (not exposed to host)."
 }
 
 # ------------------------------------------------------------------------------
@@ -238,11 +254,11 @@ register_agent() {
   LOCAL_IP=$(hostname -I | awk '{print $1}')
   log "register_agent ~ FRONT_API_URL, $FRONT_API_URL"
   log "register_agent ~ LOCAL_IP:, $LOCAL_IP"
-  
+
   RESPONSE=$(curl -s -X POST "${FRONT_API_URL}/api/agent/register" \
     -H "Content-Type: application/json" \
     -d "{\"agentId\": \"${SERVER_ID}\" }")
-  
+
   if echo "$RESPONSE" | grep -q "token"; then
     log "Agent registered successfully. Response: $RESPONSE"
     # Save the JWT to a file (separate from any static AGENT_API_TOKEN)
@@ -262,12 +278,12 @@ register_agent() {
 configure_env() {
   log "Configuring environment variables..."
   ENV_FILE="$BASE_DIR/.env"
-  
+
   # Generate a global JWT secret if not already set
   if [ -z "${JWT_SECRET:-}" ]; then
     JWT_SECRET=$(openssl rand -base64 32)
   fi
-  
+
   cat > "$ENV_FILE" << EOL
 BACKEND_URL="${BACKEND_URL}"
 FRONT_API_URL="${FRONT_API_URL}"
@@ -277,8 +293,10 @@ NODE_ENV=production
 JWT_SECRET=${JWT_SECRET}
 MONGO_MANAGER_USERNAME=admin
 MONGO_MANAGER_PASSWORD=adminpassword
+MONGO_HOST=mongodb-agent
 MONGO_DOMAIN=mongodb.cloudlunacy.uk
 APP_DOMAIN=apps.cloudlunacy.uk
+SHARED_NETWORK=${SHARED_NETWORK}
 EOL
 
   chown "$USERNAME:$USERNAME" "$ENV_FILE"
@@ -308,16 +326,25 @@ download_agent() {
   # Remove existing directory if it exists
   if [ -d "$BASE_DIR" ]; then
     log "Directory $BASE_DIR already exists. Removing it for a fresh clone..."
-    rm -rf "$BASE_DIR" || { log_error "Failed to remove directory $BASE_DIR"; exit 1; }
+    rm -rf "$BASE_DIR" || {
+      log_error "Failed to remove directory $BASE_DIR"
+      exit 1
+    }
   fi
 
   # Clone the repository as root (since root can write to /opt)
   git clone https://github.com/Mayze123/cloudlunacy-deployment-agent.git "$BASE_DIR" \
-    || { log_error "Failed to clone repository"; exit 1; }
+    || {
+      log_error "Failed to clone repository"
+      exit 1
+    }
 
   # Change ownership of the cloned repository to the dedicated user
   chown -R "$USERNAME":"$USERNAME" "$BASE_DIR" \
-    || { log_error "Failed to set ownership on $BASE_DIR"; exit 1; }
+    || {
+      log_error "Failed to set ownership on $BASE_DIR"
+      exit 1
+    }
 
   log "Agent repository is freshly cloned at $BASE_DIR."
 }
@@ -334,6 +361,40 @@ setup_docker_permissions() {
   usermod -aG docker "$USERNAME"
   chmod 666 /var/run/docker.sock
   log "Docker permissions configured successfully."
+}
+
+create_ensure_network_script() {
+  log "Creating script to ensure container connects to network..."
+  SCRIPT_PATH="$BASE_DIR/ensure-network.sh"
+
+  cat > "$SCRIPT_PATH" << 'EOF'
+#!/bin/bash
+# This script ensures the agent container connects to the shared network
+# Give containers a moment to start
+sleep 5
+
+# Get shared network name from env
+SHARED_NETWORK=${SHARED_NETWORK:-cloudlunacy-network}
+
+# Get agent container ID - adjust filter pattern as needed
+CONTAINER_ID=$(docker ps --filter "name=cloudlunacy" -q)
+
+if [ -n "$CONTAINER_ID" ]; then
+  # Check if already connected
+  if ! docker network inspect $SHARED_NETWORK | grep -q "$CONTAINER_ID"; then
+    echo "Connecting agent container $CONTAINER_ID to $SHARED_NETWORK"
+    docker network connect $SHARED_NETWORK $CONTAINER_ID
+  else
+    echo "Container already connected to $SHARED_NETWORK"
+  fi
+else
+  echo "Agent container not found - may not be running yet"
+fi
+EOF
+
+  chmod +x "$SCRIPT_PATH"
+  chown "$USERNAME:$USERNAME" "$SCRIPT_PATH"
+  log "Network connection script created at $SCRIPT_PATH"
 }
 
 setup_service() {
@@ -358,6 +419,7 @@ Group=docker
 WorkingDirectory=$BASE_DIR
 EnvironmentFile=$BASE_DIR/.env
 ExecStart=/usr/bin/node --trace-warnings $BASE_DIR/agent.js
+ExecStartPost=$BASE_DIR/ensure-network.sh
 Restart=always
 RestartSec=10
 StandardOutput=append:$LOG_DIR/app.log
@@ -385,7 +447,7 @@ verify_installation() {
 }
 
 main() {
- check_root
+  check_root
   display_info
   check_args "$@"
 
@@ -401,11 +463,13 @@ main() {
   install_node
   setup_user_directories
   stop_conflicting_containers
+  setup_docker_network
   download_agent
   install_agent_dependencies
   setup_docker_permissions
   install_mongo
   configure_env
+  create_ensure_network_script
   setup_service
   verify_installation
   register_agent
