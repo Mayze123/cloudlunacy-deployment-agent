@@ -21,8 +21,8 @@ BASE_DIR="/opt/cloudlunacy"
 : "${FRONT_API_URL:=http://138.199.165.36:3005}"
 : "${NODE_PORT:=3005}"
 : "${MONGO_PORT:=27017}"
+: "${MONGO_DOMAIN:=mongodb.cloudlunacy.uk}"
 : "${SHARED_NETWORK:=cloudlunacy-network}"
-
 # ----------------------------
 # Function Definitions
 # ----------------------------
