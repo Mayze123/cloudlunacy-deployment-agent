@@ -231,10 +231,15 @@ install_mongo() {
     }
   fi
 
+  # Get the server's public IP
+  PUBLIC_IP=$(hostname -I | awk '{print $1}')
+  log "Using server IP: ${PUBLIC_IP} for MongoDB container"
+
   log "Creating and starting MongoDB container..."
   docker run -d \
     --name mongodb-agent \
     --network $SHARED_NETWORK \
+    -p 27017:27017 \
     -e MONGO_INITDB_ROOT_USERNAME=admin \
     -e MONGO_INITDB_ROOT_PASSWORD=adminpassword \
     mongo:latest || {
@@ -242,7 +247,8 @@ install_mongo() {
     exit 1
   }
 
-  log "MongoDB container is running on network $SHARED_NETWORK (not exposed to host)."
+  log "MongoDB container is running on network $SHARED_NETWORK and exposed on port 27017"
+  log "MongoDB will be accessible at ${SERVER_ID}.${MONGO_DOMAIN} after registration"
 }
 
 # ------------------------------------------------------------------------------
@@ -252,15 +258,24 @@ register_agent() {
   log "Registering agent with front server..."
   # Get primary IP address of the VPS
   LOCAL_IP=$(hostname -I | awk '{print $1}')
-  log "register_agent ~ FRONT_API_URL, $FRONT_API_URL"
-  log "register_agent ~ LOCAL_IP:, $LOCAL_IP"
+  log "register_agent ~ FRONT_API_URL: $FRONT_API_URL"
+  log "register_agent ~ LOCAL_IP: $LOCAL_IP"
+  log "register_agent ~ SERVER_ID: $SERVER_ID"
 
   RESPONSE=$(curl -s -X POST "${FRONT_API_URL}/api/agent/register" \
     -H "Content-Type: application/json" \
+    -H "X-Agent-IP: ${LOCAL_IP}" \
     -d "{\"agentId\": \"${SERVER_ID}\" }")
 
   if echo "$RESPONSE" | grep -q "token"; then
     log "Agent registered successfully. Response: $RESPONSE"
+
+    # Extract MongoDB URL from response if available
+    MONGO_URL=$(echo "$RESPONSE" | grep -o '"mongodbUrl":"[^"]*"' | cut -d'"' -f4 || echo "")
+    if [ -n "$MONGO_URL" ]; then
+      log "MongoDB will be accessible at: $MONGO_URL"
+    fi
+
     # Save the JWT to a file (separate from any static AGENT_API_TOKEN)
     JWT_FILE="/opt/cloudlunacy/.agent_jwt.json"
     echo "$RESPONSE" | jq . > "$JWT_FILE"

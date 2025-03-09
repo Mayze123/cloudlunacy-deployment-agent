@@ -366,12 +366,84 @@ async function init() {
 
     // Connect to the backend.
     await authenticateAndConnect();
+
+    // Register MongoDB with front server if not already registered
+    try {
+      // Only attempt this if we have the necessary environment variables
+      if (FRONT_API_URL && AGENT_JWT) {
+        logger.info("Checking MongoDB registration with front server...");
+
+        // Get the local IP address for MongoDB registration
+        const LOCAL_IP = await getPublicIp();
+
+        // Attempt to register MongoDB
+        const response = await axios.post(
+          `${FRONT_API_URL}/api/frontdoor/add-subdomain`,
+          {
+            subdomain: "mongodb", // Using "mongodb" will trigger the agentId.mongodb.domain pattern
+            targetIp: LOCAL_IP,
+          },
+          {
+            headers: {
+              Authorization: `Bearer ${AGENT_JWT}`,
+              "Content-Type": "application/json",
+            },
+          },
+        );
+
+        if (response.data && response.data.success) {
+          logger.info("MongoDB successfully registered with front server", {
+            domain: response.data.details.domain,
+          });
+        } else {
+          logger.warn("Unexpected response when registering MongoDB", {
+            response: response.data,
+          });
+        }
+      } else {
+        logger.warn(
+          "Missing FRONT_API_URL or AGENT_JWT, cannot register MongoDB",
+        );
+      }
+    } catch (mongoRegErr) {
+      logger.error(
+        "Error registering MongoDB with front server:",
+        mongoRegErr.message,
+      );
+      logger.info(
+        "Continuing agent initialization despite MongoDB registration issue",
+      );
+    }
+
     setInterval(collectMetrics, METRICS_INTERVAL);
 
     logger.info("CloudLunacy Deployment Agent initialized successfully");
   } catch (error) {
     logger.error("Initialization failed:", error.message);
     process.exit(1);
+  }
+}
+
+/**
+ * Get the public/local IP address of this server.
+ * @returns {string} IP address
+ */
+async function getPublicIp() {
+  try {
+    // First try to get the server's own IP address
+    const { stdout } = await executeCommand("hostname", ["-I"]);
+    const localIp = stdout.trim().split(" ")[0];
+    if (localIp) {
+      return localIp;
+    }
+
+    // If local command fails, try external service
+    const response = await axios.get("https://api.ipify.org?format=json");
+    return response.data.ip;
+  } catch (error) {
+    logger.error("Failed to determine IP address:", error.message);
+    // Fallback to localhost as a last resort
+    return "127.0.0.1";
   }
 }
 
