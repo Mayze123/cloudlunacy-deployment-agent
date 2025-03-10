@@ -371,12 +371,14 @@ async function init() {
     try {
       // Only attempt this if we have the necessary environment variables
       if (FRONT_API_URL && AGENT_JWT) {
-        logger.info("Checking MongoDB registration with front server...");
+        logger.info(
+          "Registering MongoDB with front server for TLS termination...",
+        );
 
         // Get the local IP address for MongoDB registration
         const LOCAL_IP = await getPublicIp();
 
-        // Attempt to register MongoDB
+        // Attempt to register MongoDB with the front server (which will handle TLS)
         const response = await axios.post(
           `${FRONT_API_URL}/api/frontdoor/add-subdomain`,
           {
@@ -392,9 +394,12 @@ async function init() {
         );
 
         if (response.data && response.data.success) {
-          logger.info("MongoDB successfully registered with front server", {
-            domain: response.data.details.domain,
-          });
+          logger.info(
+            "MongoDB successfully registered with front server for TLS termination",
+            {
+              domain: response.data.details.domain,
+            },
+          );
         } else {
           logger.warn("Unexpected response when registering MongoDB", {
             response: response.data,
@@ -402,7 +407,7 @@ async function init() {
         }
       } else {
         logger.warn(
-          "Missing FRONT_API_URL or AGENT_JWT, cannot register MongoDB",
+          "Missing FRONT_API_URL or AGENT_JWT, cannot register MongoDB for TLS termination",
         );
       }
     } catch (mongoRegErr) {

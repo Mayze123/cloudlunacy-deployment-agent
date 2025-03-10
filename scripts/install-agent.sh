@@ -218,37 +218,57 @@ setup_docker_network() {
 }
 
 # ------------------------------------------------------------------------------
-# New Function: Install MongoDB as a Docker Container with network
+# Function: Install MongoDB with security enhancements but no TLS
 # ------------------------------------------------------------------------------
 install_mongo() {
-  log "Installing MongoDB container..."
+  log "Installing MongoDB container with security enhancements..."
   # Check if a container named "mongodb-agent" exists
   if docker ps -a --format '{{.Names}}' | grep -q '^mongodb-agent$'; then
-    log "MongoDB container already exists. Removing it to re-create with proper networking..."
+    log "MongoDB container already exists. Removing it to re-create with proper configuration..."
     docker rm -f mongodb-agent || {
       log_error "Failed to remove existing MongoDB container"
       exit 1
     }
   fi
 
+  # Create a secure MongoDB configuration
+  MONGO_CONFIG_DIR="/opt/cloudlunacy/mongodb"
+  mkdir -p $MONGO_CONFIG_DIR
+
+  # Create MongoDB configuration file with security settings
+  cat > $MONGO_CONFIG_DIR/mongod.conf << EOL
+security:
+  authorization: enabled
+net:
+  bindIp: 0.0.0.0
+  maxIncomingConnections: 100
+setParameter:
+  failIndexKeyTooLong: false
+  authenticationMechanisms: SCRAM-SHA-1,SCRAM-SHA-256
+operationProfiling:
+  slowOpThresholdMs: 100
+  mode: slowOp
+EOL
+
   # Get the server's public IP
   PUBLIC_IP=$(hostname -I | awk '{print $1}')
   log "Using server IP: ${PUBLIC_IP} for MongoDB container"
 
-  log "Creating and starting MongoDB container..."
+  log "Creating and starting MongoDB container with security settings..."
   docker run -d \
     --name mongodb-agent \
     --network $SHARED_NETWORK \
     -p 27017:27017 \
     -e MONGO_INITDB_ROOT_USERNAME=admin \
     -e MONGO_INITDB_ROOT_PASSWORD=adminpassword \
-    mongo:latest || {
+    -v $MONGO_CONFIG_DIR/mongod.conf:/etc/mongod.conf \
+    mongo:latest --config /etc/mongod.conf || {
     log_error "Failed to start MongoDB container"
     exit 1
   }
 
   log "MongoDB container is running on network $SHARED_NETWORK and exposed on port 27017"
-  log "MongoDB will be accessible at ${SERVER_ID}.${MONGO_DOMAIN} after registration"
+  log "MongoDB will be accessible at ${SERVER_ID}.${MONGO_DOMAIN} with TLS termination at the front server"
 }
 
 # ------------------------------------------------------------------------------

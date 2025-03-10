@@ -137,13 +137,15 @@ class MongoManager {
       const client = await this.connect();
       const db = client.db(dbName);
 
+      // Create user with SCRAM-SHA-256 authentication
       await db.addUser(username, password, {
         roles: [{ role: "readWrite", db: dbName }],
         mechanisms: ["SCRAM-SHA-256"],
+        passwordDigestor: "server", // Use server-side hashing
       });
 
       logger.info(
-        `Database ${dbName} and user ${username} created successfully`,
+        `Database ${dbName} and user ${username} created successfully with enhanced security`,
       );
       return { dbName, username, password };
     } catch (error) {
