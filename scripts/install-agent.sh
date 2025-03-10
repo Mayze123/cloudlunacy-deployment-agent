@@ -21,8 +21,7 @@ BASE_DIR="/opt/cloudlunacy"
 : "${FRONT_API_URL:=http://138.199.165.36:3005}"
 : "${NODE_PORT:=3005}"
 : "${MONGO_PORT:=27017}"
-: "${MONGO_DOMAIN:=mongodb.cloudlunacy.uk}"
-: "${SHARED_NETWORK:=cloudlunacy-network}"
+
 # ----------------------------
 # Function Definitions
 # ----------------------------
@@ -206,43 +205,18 @@ install_node() {
   log "Node.js installed successfully."
 }
 
-setup_docker_network() {
-  log "Setting up Docker network..."
-  # Check if network exists
-  if docker network ls | grep -q "$SHARED_NETWORK"; then
-    log "Network '$SHARED_NETWORK' already exists."
-  else
-    log "Creating Docker network '$SHARED_NETWORK'..."
-    docker network create $SHARED_NETWORK
-  fi
-}
-
 # ------------------------------------------------------------------------------
-# Function: Install MongoDB with security enhancements but no TLS
+# New Function: Install MongoDB as a Docker Container
 # ------------------------------------------------------------------------------
 install_mongo() {
   log "Installing MongoDB container with security enhancements..."
   # Check if a container named "mongodb-agent" exists
   if docker ps -a --format '{{.Names}}' | grep -q '^mongodb-agent$'; then
-    log "MongoDB container already exists. Checking if it's running..."
-
-    if docker ps --format '{{.Names}}' | grep -q '^mongodb-agent$'; then
-      log "MongoDB container is already running. Skipping creation."
-      return 0
-    else
-      log "MongoDB container exists but is not running. Starting it..."
-      docker start mongodb-agent
-      if [ $? -eq 0 ]; then
-        log "MongoDB container started successfully."
-        return 0
-      else
-        log_warn "Failed to start existing MongoDB container. Removing and recreating it..."
-        docker rm -f mongodb-agent || {
-          log_error "Failed to remove existing MongoDB container"
-          exit 1
-        }
-      fi
-    fi
+    log "MongoDB container already exists. Removing it to re-create with proper port mapping..."
+    docker rm -f mongodb-agent || {
+      log_error "Failed to remove existing MongoDB container"
+      exit 1
+    }
   fi
 
   # Create a secure MongoDB configuration
@@ -272,56 +246,15 @@ EOL
   log "Creating and starting MongoDB container with security settings..."
   docker run -d \
     --name mongodb-agent \
-    --network cloudlunacy-network \
-    -p 27017:27017 \
+    -p ${MONGO_PORT}:27017 \
     -e MONGO_INITDB_ROOT_USERNAME=admin \
     -e MONGO_INITDB_ROOT_PASSWORD=adminpassword \
-    -v /opt/cloudlunacy/mongodb/mongod.conf:/mongodb/mongod.conf \
-    mongo:latest --config /mongodb/mongod.conf
+    mongo:latest || {
+    log_error "Failed to start MongoDB container"
+    exit 1
+  }
 
-  log "MongoDB container is running on network $SHARED_NETWORK and exposed on port 27017"
-
-  # Wait for MongoDB to initialize
-  log "Waiting for MongoDB to initialize..."
-  sleep 10
-
-  # Verify MongoDB is running properly
-  if docker exec mongodb-agent mongosh --eval "db.adminCommand('ping')" --quiet admin -u admin -p adminpassword &> /dev/null; then
-    log "MongoDB initialization verified successfully."
-  else
-    log_warn "Initial MongoDB verification failed. MongoDB might need more time to initialize."
-  fi
-}
-
-register_mongodb() {
-  local token="$1"
-  local ip="$2"
-  local server_id="$3"
-
-  log "Explicitly registering MongoDB with front server..."
-
-  # Wait for MongoDB to be ready
-  sleep 5
-
-  # Perform MongoDB registration
-  local mongo_response=$(curl -s -X POST "${FRONT_API_URL}/api/frontdoor/add-subdomain" \
-    -H "Content-Type: application/json" \
-    -H "Authorization: Bearer $token" \
-    -d "{\"subdomain\": \"$server_id\", \"targetIp\": \"$ip\"}")
-
-  if echo "$mongo_response" | grep -q "success"; then
-    log "MongoDB registration successful. Response: $mongo_response"
-
-    # Extract domain from response if available
-    MONGO_URL=$(echo "$mongo_response" | grep -o '"domain":"[^"]*"' | cut -d'"' -f4 || echo "")
-    if [ -n "$MONGO_URL" ]; then
-      log "MongoDB will be accessible at: $MONGO_URL"
-      echo "MONGODB_URL=$MONGO_URL" >> "$BASE_DIR/.env"
-    fi
-  else
-    log_warn "MongoDB registration failed. Response: $mongo_response"
-    # Continue despite failure - we don't want to stop the whole installation
-  fi
+  log "MongoDB container is running."
 }
 
 # ------------------------------------------------------------------------------
@@ -331,9 +264,8 @@ register_agent() {
   log "Registering agent with front server..."
   # Get primary IP address of the VPS
   LOCAL_IP=$(hostname -I | awk '{print $1}')
-  log "register_agent ~ FRONT_API_URL: $FRONT_API_URL"
-  log "register_agent ~ LOCAL_IP: $LOCAL_IP"
-  log "register_agent ~ SERVER_ID: $SERVER_ID"
+  log "register_agent ~ FRONT_API_URL, $FRONT_API_URL"
+  log "register_agent ~ LOCAL_IP:, $LOCAL_IP"
 
   RESPONSE=$(curl -s -X POST "${FRONT_API_URL}/api/agent/register" \
     -H "Content-Type: application/json" \
@@ -381,10 +313,8 @@ NODE_ENV=production
 JWT_SECRET=${JWT_SECRET}
 MONGO_MANAGER_USERNAME=admin
 MONGO_MANAGER_PASSWORD=adminpassword
-MONGO_HOST=mongodb-agent
 MONGO_DOMAIN=mongodb.cloudlunacy.uk
 APP_DOMAIN=apps.cloudlunacy.uk
-SHARED_NETWORK=${SHARED_NETWORK}
 EOL
 
   chown "$USERNAME:$USERNAME" "$ENV_FILE"
@@ -451,40 +381,6 @@ setup_docker_permissions() {
   log "Docker permissions configured successfully."
 }
 
-create_ensure_network_script() {
-  log "Creating script to ensure container connects to network..."
-  SCRIPT_PATH="$BASE_DIR/ensure-network.sh"
-
-  cat > "$SCRIPT_PATH" << 'EOF'
-#!/bin/bash
-# This script ensures the agent container connects to the shared network
-# Give containers a moment to start
-sleep 5
-
-# Get shared network name from env
-SHARED_NETWORK=${SHARED_NETWORK:-cloudlunacy-network}
-
-# Get agent container ID - adjust filter pattern as needed
-CONTAINER_ID=$(docker ps --filter "name=cloudlunacy" -q)
-
-if [ -n "$CONTAINER_ID" ]; then
-  # Check if already connected
-  if ! docker network inspect $SHARED_NETWORK | grep -q "$CONTAINER_ID"; then
-    echo "Connecting agent container $CONTAINER_ID to $SHARED_NETWORK"
-    docker network connect $SHARED_NETWORK $CONTAINER_ID
-  else
-    echo "Container already connected to $SHARED_NETWORK"
-  fi
-else
-  echo "Agent container not found - may not be running yet"
-fi
-EOF
-
-  chmod +x "$SCRIPT_PATH"
-  chown "$USERNAME:$USERNAME" "$SCRIPT_PATH"
-  log "Network connection script created at $SCRIPT_PATH"
-}
-
 setup_service() {
   log "Setting up CloudLunacy Deployment Agent as a systemd service..."
   SERVICE_FILE="/etc/systemd/system/cloudlunacy.service"
@@ -507,7 +403,6 @@ Group=docker
 WorkingDirectory=$BASE_DIR
 EnvironmentFile=$BASE_DIR/.env
 ExecStart=/usr/bin/node --trace-warnings $BASE_DIR/agent.js
-ExecStartPost=$BASE_DIR/ensure-network.sh
 Restart=always
 RestartSec=10
 StandardOutput=append:$LOG_DIR/app.log
@@ -551,13 +446,11 @@ main() {
   install_node
   setup_user_directories
   stop_conflicting_containers
-  setup_docker_network
   download_agent
   install_agent_dependencies
   setup_docker_permissions
   install_mongo
   configure_env
-  create_ensure_network_script
   setup_service
   verify_installation
   register_agent

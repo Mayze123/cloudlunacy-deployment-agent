@@ -9,8 +9,7 @@ class MongoManager {
     this.managerPassword = process.env.MONGO_MANAGER_PASSWORD;
 
     // MongoDB host and port (adjust as necessary)
-    // Now using container name for direct Docker network access
-    this.mongoHost = process.env.MONGO_HOST || "mongodb-agent";
+    this.mongoHost = process.env.MONGO_HOST || "mongodb";
     this.mongoPort = process.env.MONGO_PORT || "27017";
 
     this.client = null;
@@ -19,7 +18,6 @@ class MongoManager {
 
   async waitForMongoDB() {
     logger.info("Waiting for MongoDB to be ready...");
-    logger.info(`Using MongoDB at ${this.mongoHost}:${this.mongoPort}`);
     const maxAttempts = 10;
     const retryDelay = 5000;
 
@@ -28,7 +26,7 @@ class MongoManager {
         logger.info(`Connection attempt ${attempt}/${maxAttempts}`);
         const uri = `mongodb://${this.managerUsername}:${this.managerPassword}@${this.mongoHost}:${this.mongoPort}/admin`;
         const client = new MongoClient(uri, {
-          // No TLS options are used since we're using Docker networking
+          // No TLS options are used since our MongoDB container isn’t set up for TLS
           authSource: "admin",
           authMechanism: "SCRAM-SHA-256",
           directConnection: true,
@@ -72,8 +70,7 @@ class MongoManager {
     }
 
     try {
-      // Create a client using the provided credentials
-      // Now using Docker networking with container name
+      // Create a client using the provided credentials without TLS options
       const client = new MongoClient(
         `mongodb://${this.mongoHost}:${this.mongoPort}/admin`,
         {
@@ -109,7 +106,6 @@ class MongoManager {
       if (!this.client) {
         const username = encodeURIComponent(this.managerUsername);
         const password = encodeURIComponent(this.managerPassword);
-        // Using Docker networking - no need for complicated connection strings
         const uri = `mongodb://${username}:${password}@${this.mongoHost}:${this.mongoPort}/admin`;
 
         this.client = new MongoClient(uri, {
