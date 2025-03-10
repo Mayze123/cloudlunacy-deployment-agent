@@ -210,16 +210,17 @@ install_node() {
 # ------------------------------------------------------------------------------
 install_mongo() {
   log "Installing MongoDB container with security enhancements..."
+
   # Check if a container named "mongodb-agent" exists
   if docker ps -a --format '{{.Names}}' | grep -q '^mongodb-agent$'; then
-    log "MongoDB container already exists. Removing it to re-create with proper port mapping..."
+    log "MongoDB container already exists. Removing it to re-create with proper settings..."
     docker rm -f mongodb-agent || {
       log_error "Failed to remove existing MongoDB container"
       exit 1
     }
   fi
 
-  # Create a secure MongoDB configuration
+  # Create a secure MongoDB configuration directory
   MONGO_CONFIG_DIR="/opt/cloudlunacy/mongodb"
   mkdir -p $MONGO_CONFIG_DIR
 
@@ -243,18 +244,32 @@ EOL
   PUBLIC_IP=$(hostname -I | awk '{print $1}')
   log "Using server IP: ${PUBLIC_IP} for MongoDB container"
 
+  # Start MongoDB container without trying to mount the config file
+  # We'll use environment variables instead for basic security configuration
   log "Creating and starting MongoDB container with security settings..."
   docker run -d \
     --name mongodb-agent \
     -p ${MONGO_PORT}:27017 \
     -e MONGO_INITDB_ROOT_USERNAME=admin \
     -e MONGO_INITDB_ROOT_PASSWORD=adminpassword \
-    mongo:latest || {
+    mongo:latest \
+    --auth || {
     log_error "Failed to start MongoDB container"
     exit 1
   }
 
-  log "MongoDB container is running."
+  # Wait for MongoDB to start up
+  log "Waiting for MongoDB to start up..."
+  sleep 5
+
+  # Verify MongoDB is running
+  if docker ps | grep -q "mongodb-agent"; then
+    log "MongoDB container is running successfully."
+  else
+    log_error "MongoDB container failed to start properly."
+    docker logs mongodb-agent
+    exit 1
+  fi
 }
 
 # ------------------------------------------------------------------------------
