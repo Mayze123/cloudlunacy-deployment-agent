@@ -224,11 +224,25 @@ install_mongo() {
   log "Installing MongoDB container with security enhancements..."
   # Check if a container named "mongodb-agent" exists
   if docker ps -a --format '{{.Names}}' | grep -q '^mongodb-agent$'; then
-    log "MongoDB container already exists. Removing it to re-create with proper configuration..."
-    docker rm -f mongodb-agent || {
-      log_error "Failed to remove existing MongoDB container"
-      exit 1
-    }
+    log "MongoDB container already exists. Checking if it's running..."
+
+    if docker ps --format '{{.Names}}' | grep -q '^mongodb-agent$'; then
+      log "MongoDB container is already running. Skipping creation."
+      return 0
+    else
+      log "MongoDB container exists but is not running. Starting it..."
+      docker start mongodb-agent
+      if [ $? -eq 0 ]; then
+        log "MongoDB container started successfully."
+        return 0
+      else
+        log_warn "Failed to start existing MongoDB container. Removing and recreating it..."
+        docker rm -f mongodb-agent || {
+          log_error "Failed to remove existing MongoDB container"
+          exit 1
+        }
+      fi
+    fi
   fi
 
   # Create a secure MongoDB configuration
@@ -241,6 +255,7 @@ security:
   authorization: enabled
 net:
   bindIp: 0.0.0.0
+  port: 27017
   maxIncomingConnections: 100
 setParameter:
   failIndexKeyTooLong: false
@@ -268,7 +283,48 @@ EOL
   }
 
   log "MongoDB container is running on network $SHARED_NETWORK and exposed on port 27017"
-  log "MongoDB will be accessible at ${SERVER_ID}.${MONGO_DOMAIN} with TLS termination at the front server"
+
+  # Wait for MongoDB to initialize
+  log "Waiting for MongoDB to initialize..."
+  sleep 10
+
+  # Verify MongoDB is running properly
+  if docker exec mongodb-agent mongosh --eval "db.adminCommand('ping')" --quiet admin -u admin -p adminpassword &> /dev/null; then
+    log "MongoDB initialization verified successfully."
+  else
+    log_warn "Initial MongoDB verification failed. MongoDB might need more time to initialize."
+  fi
+}
+
+register_mongodb() {
+  local token="$1"
+  local ip="$2"
+  local server_id="$3"
+
+  log "Explicitly registering MongoDB with front server..."
+
+  # Wait for MongoDB to be ready
+  sleep 5
+
+  # Perform MongoDB registration
+  local mongo_response=$(curl -s -X POST "${FRONT_API_URL}/api/frontdoor/add-subdomain" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $token" \
+    -d "{\"subdomain\": \"$server_id\", \"targetIp\": \"$ip\"}")
+
+  if echo "$mongo_response" | grep -q "success"; then
+    log "MongoDB registration successful. Response: $mongo_response"
+
+    # Extract domain from response if available
+    MONGO_URL=$(echo "$mongo_response" | grep -o '"domain":"[^"]*"' | cut -d'"' -f4 || echo "")
+    if [ -n "$MONGO_URL" ]; then
+      log "MongoDB will be accessible at: $MONGO_URL"
+      echo "MONGODB_URL=$MONGO_URL" >> "$BASE_DIR/.env"
+    fi
+  else
+    log_warn "MongoDB registration failed. Response: $mongo_response"
+    # Continue despite failure - we don't want to stop the whole installation
+  fi
 }
 
 # ------------------------------------------------------------------------------
@@ -507,6 +563,7 @@ main() {
   create_ensure_network_script
   setup_service
   verify_installation
+  register_agent
   register_agent
 
   log "Installation completed successfully!"
