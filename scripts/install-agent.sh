@@ -272,15 +272,12 @@ EOL
   log "Creating and starting MongoDB container with security settings..."
   docker run -d \
     --name mongodb-agent \
-    --network $SHARED_NETWORK \
+    --network cloudlunacy-network \
     -p 27017:27017 \
     -e MONGO_INITDB_ROOT_USERNAME=admin \
     -e MONGO_INITDB_ROOT_PASSWORD=adminpassword \
-    -v $MONGO_CONFIG_DIR/mongod.conf:/etc/mongod.conf \
-    mongo:latest --config /etc/mongod.conf || {
-    log_error "Failed to start MongoDB container"
-    exit 1
-  }
+    -v /opt/cloudlunacy/mongodb/mongod.conf:/mongodb/mongod.conf \
+    mongo:latest --config /mongodb/mongod.conf
 
   log "MongoDB container is running on network $SHARED_NETWORK and exposed on port 27017"
 
