@@ -302,27 +302,37 @@ fetch_certificates() {
   # Save CA certificate
   echo "$CA_CERT_RESPONSE" > "${CERTS_DIR}/ca.crt"
 
-  # Fetch agent-specific certificates
+  # Fetch agent certificates
   log "Fetching agent certificates..."
-  AGENT_CERTS_RESPONSE=$(curl -s -H "Authorization: Bearer ${TOKEN}" "${FRONT_API_URL}/api/certificates/agent/${SERVER_ID}")
-
-  # Check if we got a valid JSON response
-  if ! echo "$AGENT_CERTS_RESPONSE" | jq . > /dev/null 2>&1; then
-    log_error "Invalid response when fetching agent certificates"
-    log_error "Response: $AGENT_CERTS_RESPONSE"
+  CERT_RESPONSE=$(curl -s -H "Authorization: Bearer $TOKEN" "${FRONT_API_URL}/api/certificates/agent/${SERVER_ID}")
+  if [ $? -ne 0 ] || [ -z "$CERT_RESPONSE" ]; then
+    log_error "Failed to fetch agent certificates"
     return 1
   fi
 
-  # Extract and save certificates
-  echo "$AGENT_CERTS_RESPONSE" | jq -r '.certificates.serverKey' > "${CERTS_DIR}/server.key"
-  echo "$AGENT_CERTS_RESPONSE" | jq -r '.certificates.serverCert' > "${CERTS_DIR}/server.crt"
+  # Extract certificates from JSON response
+  SERVER_KEY=$(echo "$CERT_RESPONSE" | jq -r '.certificates.serverKey')
+  SERVER_CERT=$(echo "$CERT_RESPONSE" | jq -r '.certificates.serverCert')
+
+  if [ "$SERVER_KEY" = "null" ] || [ "$SERVER_CERT" = "null" ]; then
+    log_error "Invalid certificate response"
+    return 1
+  fi
+
+  # Save certificates
+  echo "$SERVER_KEY" > "${CERTS_DIR}/server.key"
+  echo "$SERVER_CERT" > "${CERTS_DIR}/server.crt"
+
+  # Create combined PEM file for MongoDB
+  cat "${CERTS_DIR}/server.key" "${CERTS_DIR}/server.crt" > "${CERTS_DIR}/server.pem"
 
   # Set proper permissions
   chmod 600 "${CERTS_DIR}/server.key"
-  chmod 644 "${CERTS_DIR}/server.crt" "${CERTS_DIR}/ca.crt"
-  chown -R "$USERNAME:$USERNAME" "${CERTS_DIR}"
+  chmod 600 "${CERTS_DIR}/server.pem"
+  chmod 644 "${CERTS_DIR}/server.crt"
+  chmod 644 "${CERTS_DIR}/ca.crt"
 
-  log "TLS certificates installed successfully"
+  log "Certificates fetched and saved successfully"
   return 0
 }
 
@@ -605,16 +615,21 @@ main() {
   install_agent_dependencies
   setup_docker_permissions
 
+  # Register agent first to get JWT token
+  register_agent
+
   # Fetch certificates using the JWT token
   fetch_certificates
 
   # Install MongoDB with TLS support
   install_mongo_with_tls
 
+  # Configure environment with TLS settings
   configure_env
+
+  # Setup service and verify installation
   setup_service
   verify_installation
-  register_agent
 
   log "Installation completed successfully!"
 }
