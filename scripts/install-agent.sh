@@ -377,9 +377,13 @@ install_mongo_with_tls() {
 
   # Create combined PEM file for MongoDB
   cat $CERTS_DIR/server.key $CERTS_DIR/server.crt > $MONGO_CONFIG_DIR/certs/server.pem
-  chmod 600 $MONGO_CONFIG_DIR/certs/server.pem
 
-  # Check if a container named "mongodb-agent" exists
+  # Set proper permissions on the PEM file and adjust ownership
+  chmod 600 $MONGO_CONFIG_DIR/certs/server.pem
+  # Change ownership to UID and GID 999 (default mongodb user in the official image)
+  chown -R 999:999 $MONGO_CONFIG_DIR/certs
+
+  # Check if a container named "mongodb-agent" exists and remove it if needed
   if docker ps -a --format '{{.Names}}' | grep -q '^mongodb-agent$'; then
     log "MongoDB container already exists. Removing it to re-create with proper settings..."
     docker rm -f mongodb-agent || {
