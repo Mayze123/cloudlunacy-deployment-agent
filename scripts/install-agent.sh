@@ -276,23 +276,24 @@ EOL
 
 fetch_certificates() {
   log "Fetching TLS certificates from front server..."
-
+  
   # Create certificates directory
   mkdir -p "${CERTS_DIR}"
-
+  chmod 700 "${CERTS_DIR}"
+  
   # Get JWT token from the saved file
   JWT_FILE="${BASE_DIR}/.agent_jwt.json"
   if [ ! -f "$JWT_FILE" ]; then
     log_error "JWT file not found. Cannot fetch certificates."
     return 1
   fi
-
+  
   TOKEN=$(jq -r '.token' "$JWT_FILE")
   if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
     log_error "Invalid JWT token. Cannot fetch certificates."
     return 1
   fi
-
+  
   # Fetch CA certificate
   log "Fetching CA certificate..."
   CA_CERT_RESPONSE=$(curl -s "${FRONT_API_URL}/api/certificates/mongodb-ca")
@@ -300,43 +301,66 @@ fetch_certificates() {
     log_error "Failed to fetch CA certificate"
     return 1
   fi
-
+  
   # Save CA certificate
   echo "$CA_CERT_RESPONSE" > "${CERTS_DIR}/ca.crt"
-
+  
   # Fetch agent certificates
   log "Fetching agent certificates..."
   CERT_RESPONSE=$(curl -s -H "Authorization: Bearer $TOKEN" "${FRONT_API_URL}/api/certificates/agent/${SERVER_ID}")
-  if [ $? -ne 0 ] || [ -z "$CERT_RESPONSE" ]; then
-    log_error "Failed to fetch agent certificates"
+  
+  # Debug output
+  log "Certificate response: $(echo "$CERT_RESPONSE" | grep -v serverKey | grep -v serverCert)"
+  
+  # Check if response is valid JSON
+  if ! echo "$CERT_RESPONSE" | jq . > /dev/null 2>&1; then
+    log_error "Invalid JSON response from certificate endpoint"
+    log_error "Raw response: $CERT_RESPONSE"
     return 1
   fi
-
+  
+  # Check if the response indicates success
+  SUCCESS=$(echo "$CERT_RESPONSE" | jq -r '.success')
+  if [ "$SUCCESS" != "true" ]; then
+    ERROR_MSG=$(echo "$CERT_RESPONSE" | jq -r '.message')
+    log_error "Certificate request failed: $ERROR_MSG"
+    return 1
+  fi
+  
   # Extract certificates from JSON response
   SERVER_KEY=$(echo "$CERT_RESPONSE" | jq -r '.certificates.serverKey')
   SERVER_CERT=$(echo "$CERT_RESPONSE" | jq -r '.certificates.serverCert')
-
-  if [ "$SERVER_KEY" = "null" ] || [ "$SERVER_CERT" = "null" ]; then
-    log_error "Invalid certificate response"
+  
+  if [ "$SERVER_KEY" = "null" ] || [ "$SERVER_CERT" = "null" ] || [ -z "$SERVER_KEY" ] || [ -z "$SERVER_CERT" ]; then
+    log_error "Invalid certificate data in response"
     return 1
   fi
-
+  
   # Save certificates
   echo "$SERVER_KEY" > "${CERTS_DIR}/server.key"
   echo "$SERVER_CERT" > "${CERTS_DIR}/server.crt"
-
+  
   # Create combined PEM file for MongoDB
   cat "${CERTS_DIR}/server.key" "${CERTS_DIR}/server.crt" > "${CERTS_DIR}/server.pem"
-
+  
   # Set proper permissions
   chmod 600 "${CERTS_DIR}/server.key"
   chmod 600 "${CERTS_DIR}/server.pem"
   chmod 644 "${CERTS_DIR}/server.crt"
   chmod 644 "${CERTS_DIR}/ca.crt"
-
+  
+  # Verify certificates
+  log "Verifying certificates..."
+  if openssl x509 -in "${CERTS_DIR}/server.crt" -noout -text > /dev/null 2>&1; then
+    log "Server certificate is valid"
+  else
+    log_error "Server certificate verification failed"
+    return 1
+  ffi
+  
   log "Certificates fetched and saved successfully"
   return 0
-}
+} 
 
 # New function to install MongoDB with TLS support
 install_mongo_with_tls() {
