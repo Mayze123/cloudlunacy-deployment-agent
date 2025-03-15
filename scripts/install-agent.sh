@@ -362,18 +362,8 @@ fetch_certificates() {
   return 0
 }
 
-# New function to install MongoDB with TLS support
 install_mongo_with_tls() {
   log "Installing MongoDB container with TLS support..."
-
-  # Check if a container named "mongodb-agent" exists
-  if docker ps -a --format '{{.Names}}' | grep -q '^mongodb-agent$'; then
-    log "MongoDB container already exists. Removing it to re-create with proper settings..."
-    docker rm -f mongodb-agent || {
-      log_error "Failed to remove existing MongoDB container"
-      exit 1
-    }
-  fi
 
   # Create a secure MongoDB configuration directory
   MONGO_CONFIG_DIR="/opt/cloudlunacy/mongodb"
@@ -389,6 +379,15 @@ install_mongo_with_tls() {
   cat $CERTS_DIR/server.key $CERTS_DIR/server.crt > $MONGO_CONFIG_DIR/certs/server.pem
   chmod 600 $MONGO_CONFIG_DIR/certs/server.pem
 
+  # Check if a container named "mongodb-agent" exists
+  if docker ps -a --format '{{.Names}}' | grep -q '^mongodb-agent$'; then
+    log "MongoDB container already exists. Removing it to re-create with proper settings..."
+    docker rm -f mongodb-agent || {
+      log_error "Failed to remove existing MongoDB container"
+      exit 1
+    }
+  fi
+
   # Create MongoDB configuration file with TLS settings
   cat > $MONGO_CONFIG_DIR/mongod.conf << EOL
 security:
@@ -403,7 +402,6 @@ net:
     CAFile: /etc/mongodb/certs/ca.crt
     allowConnectionsWithoutCertificates: true
 setParameter:
-  failIndexKeyTooLong: false
   authenticationMechanisms: SCRAM-SHA-1,SCRAM-SHA-256
 operationProfiling:
   slowOpThresholdMs: 100
