@@ -378,7 +378,7 @@ install_mongo_with_tls() {
   # Create combined PEM file for MongoDB
   cat $CERTS_DIR/server.key $CERTS_DIR/server.crt > $MONGO_CONFIG_DIR/certs/server.pem
 
-  # Set proper permissions on the PEM file and adjust ownership
+  # Set proper permissions on the PEM file and adjust ownership.
   chmod 600 $MONGO_CONFIG_DIR/certs/server.pem
   # Change ownership to UID and GID 999 (default mongodb user in the official image)
   chown -R 999:999 $MONGO_CONFIG_DIR/certs
