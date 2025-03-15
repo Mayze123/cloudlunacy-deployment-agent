@@ -17,10 +17,12 @@ IFS=$'\n\t'
 # ----------------------------
 USERNAME="cloudlunacy"
 BASE_DIR="/opt/cloudlunacy"
+CERTS_DIR="${BASE_DIR}/certs"
 # Use the front server's IP as the default API URL.
 : "${FRONT_API_URL:=http://138.199.165.36:3005}"
 : "${NODE_PORT:=3005}"
 : "${MONGO_PORT:=27017}"
+: "${MONGO_USE_TLS:=true}"
 
 # ----------------------------
 # Function Definitions
