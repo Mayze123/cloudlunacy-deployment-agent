@@ -272,6 +272,142 @@ EOL
   fi
 }
 
+fetch_certificates() {
+  log "Fetching TLS certificates from front server..."
+
+  # Create certificates directory
+  mkdir -p "${CERTS_DIR}"
+
+  # Get JWT token from the saved file
+  JWT_FILE="${BASE_DIR}/.agent_jwt.json"
+  if [ ! -f "$JWT_FILE" ]; then
+    log_error "JWT file not found. Cannot fetch certificates."
+    return 1
+  fi
+
+  TOKEN=$(jq -r '.token' "$JWT_FILE")
+  if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
+    log_error "Invalid JWT token. Cannot fetch certificates."
+    return 1
+  fi
+
+  # Fetch CA certificate
+  log "Fetching CA certificate..."
+  CA_CERT_RESPONSE=$(curl -s "${FRONT_API_URL}/api/certificates/mongodb-ca")
+  if [ $? -ne 0 ] || [ -z "$CA_CERT_RESPONSE" ]; then
+    log_error "Failed to fetch CA certificate"
+    return 1
+  fi
+
+  # Save CA certificate
+  echo "$CA_CERT_RESPONSE" > "${CERTS_DIR}/ca.crt"
+
+  # Fetch agent-specific certificates
+  log "Fetching agent certificates..."
+  AGENT_CERTS_RESPONSE=$(curl -s -H "Authorization: Bearer ${TOKEN}" "${FRONT_API_URL}/api/certificates/agent/${SERVER_ID}")
+
+  # Check if we got a valid JSON response
+  if ! echo "$AGENT_CERTS_RESPONSE" | jq . > /dev/null 2>&1; then
+    log_error "Invalid response when fetching agent certificates"
+    log_error "Response: $AGENT_CERTS_RESPONSE"
+    return 1
+  fi
+
+  # Extract and save certificates
+  echo "$AGENT_CERTS_RESPONSE" | jq -r '.certificates.serverKey' > "${CERTS_DIR}/server.key"
+  echo "$AGENT_CERTS_RESPONSE" | jq -r '.certificates.serverCert' > "${CERTS_DIR}/server.crt"
+
+  # Set proper permissions
+  chmod 600 "${CERTS_DIR}/server.key"
+  chmod 644 "${CERTS_DIR}/server.crt" "${CERTS_DIR}/ca.crt"
+  chown -R "$USERNAME:$USERNAME" "${CERTS_DIR}"
+
+  log "TLS certificates installed successfully"
+  return 0
+}
+
+# New function to install MongoDB with TLS support
+install_mongo_with_tls() {
+  log "Installing MongoDB container with TLS support..."
+
+  # Check if a container named "mongodb-agent" exists
+  if docker ps -a --format '{{.Names}}' | grep -q '^mongodb-agent$'; then
+    log "MongoDB container already exists. Removing it to re-create with proper settings..."
+    docker rm -f mongodb-agent || {
+      log_error "Failed to remove existing MongoDB container"
+      exit 1
+    }
+  fi
+
+  # Create a secure MongoDB configuration directory
+  MONGO_CONFIG_DIR="/opt/cloudlunacy/mongodb"
+  mkdir -p $MONGO_CONFIG_DIR
+  mkdir -p $MONGO_CONFIG_DIR/certs
+
+  # Copy certificates to MongoDB config directory
+  cp $CERTS_DIR/ca.crt $MONGO_CONFIG_DIR/certs/
+  cp $CERTS_DIR/server.key $MONGO_CONFIG_DIR/certs/
+  cp $CERTS_DIR/server.crt $MONGO_CONFIG_DIR/certs/
+
+  # Create combined PEM file for MongoDB
+  cat $CERTS_DIR/server.key $CERTS_DIR/server.crt > $MONGO_CONFIG_DIR/certs/server.pem
+  chmod 600 $MONGO_CONFIG_DIR/certs/server.pem
+
+  # Create MongoDB configuration file with TLS settings
+  cat > $MONGO_CONFIG_DIR/mongod.conf << EOL
+security:
+  authorization: enabled
+net:
+  bindIp: 0.0.0.0
+  port: 27017
+  maxIncomingConnections: 100
+  tls:
+    mode: requireTLS
+    certificateKeyFile: /etc/mongodb/certs/server.pem
+    CAFile: /etc/mongodb/certs/ca.crt
+    allowConnectionsWithoutCertificates: true
+setParameter:
+  failIndexKeyTooLong: false
+  authenticationMechanisms: SCRAM-SHA-1,SCRAM-SHA-256
+operationProfiling:
+  slowOpThresholdMs: 100
+  mode: slowOp
+EOL
+
+  # Get the server's public IP
+  PUBLIC_IP=$(hostname -I | awk '{print $1}')
+  log "Using server IP: ${PUBLIC_IP} for MongoDB container"
+
+  # Start MongoDB container with TLS configuration
+  log "Creating and starting MongoDB container with TLS settings..."
+  docker run -d \
+    --name mongodb-agent \
+    -p ${MONGO_PORT}:27017 \
+    -v "${MONGO_CONFIG_DIR}/mongod.conf:/etc/mongod.conf" \
+    -v "${MONGO_CONFIG_DIR}/certs:/etc/mongodb/certs" \
+    -e MONGO_INITDB_ROOT_USERNAME=admin \
+    -e MONGO_INITDB_ROOT_PASSWORD=adminpassword \
+    mongo:latest \
+    --config /etc/mongod.conf \
+    --auth || {
+    log_error "Failed to start MongoDB container"
+    exit 1
+  }
+
+  # Wait for MongoDB to start up
+  log "Waiting for MongoDB to start up..."
+  sleep 5
+
+  # Verify MongoDB is running
+  if docker ps | grep -q "mongodb-agent"; then
+    log "MongoDB container is running successfully with TLS."
+  else
+    log_error "MongoDB container failed to start properly."
+    docker logs mongodb-agent
+    exit 1
+  fi
+}
+
 # ------------------------------------------------------------------------------
 # Register Agent with the Front Server
 # ------------------------------------------------------------------------------
@@ -330,6 +466,10 @@ MONGO_MANAGER_USERNAME=admin
 MONGO_MANAGER_PASSWORD=adminpassword
 MONGO_DOMAIN=mongodb.cloudlunacy.uk
 APP_DOMAIN=apps.cloudlunacy.uk
+MONGO_USE_TLS=true
+MONGO_CERT_PATH=${CERTS_DIR}/server.crt
+MONGO_KEY_PATH=${CERTS_DIR}/server.key
+MONGO_CA_PATH=${CERTS_DIR}/ca.crt
 EOL
 
   chown "$USERNAME:$USERNAME" "$ENV_FILE"
@@ -464,11 +604,16 @@ main() {
   download_agent
   install_agent_dependencies
   setup_docker_permissions
-  install_mongo
+
+  # Fetch certificates using the JWT token
+  fetch_certificates
+
+  # Install MongoDB with TLS support
+  install_mongo_with_tls
+
   configure_env
   setup_service
   verify_installation
-  register_agent
   register_agent
 
   log "Installation completed successfully!"
