@@ -8,9 +8,17 @@ class MongoManager {
     this.managerUsername = process.env.MONGO_MANAGER_USERNAME;
     this.managerPassword = process.env.MONGO_MANAGER_PASSWORD;
 
-    // MongoDB host and port (adjust as necessary)
+    // MongoDB host and port
     this.mongoHost = process.env.MONGO_HOST || "mongodb";
     this.mongoPort = process.env.MONGO_PORT || "27017";
+
+    // TLS configuration
+    this.useTls = process.env.MONGO_USE_TLS === "true";
+    this.tlsCertPath =
+      process.env.MONGO_CERT_PATH || "/etc/mongodb/certs/mongodb.crt";
+    this.tlsKeyPath =
+      process.env.MONGO_KEY_PATH || "/etc/mongodb/certs/mongodb.key";
+    this.tlsCAPath = process.env.MONGO_CA_PATH || "/etc/mongodb/certs/ca.crt";
 
     this.client = null;
     this.isInitialized = false;
@@ -106,15 +114,28 @@ class MongoManager {
       if (!this.client) {
         const username = encodeURIComponent(this.managerUsername);
         const password = encodeURIComponent(this.managerPassword);
-        const uri = `mongodb://${username}:${password}@${this.mongoHost}:${this.mongoPort}/admin`;
 
-        this.client = new MongoClient(uri, {
+        // Base connection options
+        const options = {
           authSource: "admin",
           authMechanism: "SCRAM-SHA-256",
           directConnection: true,
           serverSelectionTimeoutMS: 5000,
-        });
+        };
 
+        // Add TLS options if enabled
+        if (this.useTls) {
+          options.tls = true;
+          options.tlsCAFile = this.tlsCAPath;
+          options.tlsCertificateKeyFile = this.tlsKeyPath;
+          options.tlsAllowInvalidCertificates = true;
+          options.tlsAllowInvalidHostnames = true;
+        }
+
+        // Build connection string
+        const uri = `mongodb://${username}:${password}@${this.mongoHost}:${this.mongoPort}/admin`;
+
+        this.client = new MongoClient(uri, options);
         await this.client.connect();
         await this.client.db("admin").command({ ping: 1 });
         logger.info("Connected to MongoDB successfully");
