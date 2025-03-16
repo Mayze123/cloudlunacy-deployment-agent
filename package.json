@@ -1,8 +1,17 @@
 {
   "name": "cloudlunacy-deployment-agent",
   "version": "1.0.0",
-  "description": "curl -LO https://github.com/Mayze123/cloudlunacy-deployment-agent/releases/latest/download/install-agent.sh curl -LO https://github.com/Mayze123/cloudlunacy-deployment-agent/releases/latest/download/install-agent.sh.sha256",
+  "description": "CloudLunacy Deployment Agent",
   "main": "agent.js",
+  "scripts": {
+    "setup": "node setup-local-dev.js",
+    "dev": "docker-compose -f docker-compose.dev.yml up --build",
+    "dev:down": "docker-compose -f docker-compose.dev.yml down",
+    "dev:logs": "docker-compose -f docker-compose.dev.yml logs -f",
+    "dev:restart": "docker-compose -f docker-compose.dev.yml restart",
+    "dev:clean": "docker-compose -f docker-compose.dev.yml down -v",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
   "dependencies": {
     "axios": "^1.7.7",
     "bcryptjs": "^2.4.3",
@@ -17,13 +26,11 @@
     "winston": "^3.15.0",
     "ws": "^8.18.0"
   },
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "devDependencies": {
+    "nodemon": "^3.0.1",
     "prettier": "^3.4.2",
     "prettier-plugin-sh": "^0.14.0"
   }
