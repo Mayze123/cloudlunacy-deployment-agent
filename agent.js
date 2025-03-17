@@ -351,7 +351,10 @@ function getMemoryUsage() {
  */
 function getDiskUsage() {
   try {
-    const output = execSync("df / --output=pcent | tail -1").toString().trim();
+    // More compatible with Alpine Linux/BusyBox
+    const output = execSync("df / | tail -1 | awk '{print $5}'")
+      .toString()
+      .trim();
     return parseInt(output.replace("%", ""), 10);
   } catch (error) {
     logger.error("Error fetching disk usage:", error.message);
