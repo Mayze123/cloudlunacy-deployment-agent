@@ -2,7 +2,7 @@ version: "3.8"
 
 services:
   cloudlunacy-agent:
-    container_name: cloudlunacy-agent
+    container_name: cloudlunacy-agent-dev
     build:
       context: .
       dockerfile: Dockerfile.dev
@@ -10,8 +10,11 @@ services:
       - NODE_ENV=development
       - PORT=3005
       - HEALTH_PORT=9000
+      - BACKEND_URL=http://host.docker.internal:8080
+      - FRONT_API_URL=http://host.docker.internal:3005
+      - MONGO_USE_TLS=true
     ports:
-      - "3006:3006"
+      - "3006:3005"
       - "9000:9000"
     env_file:
       - ".env.dev"
@@ -22,10 +25,18 @@ services:
       - mongodb
     networks:
       - cloudlunacy-network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3005/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
   mongodb:
-    container_name: mongodb-agent
+    container_name: mongodb-agent-dev
     image: mongo:latest
     ports:
       - "27017:27017"

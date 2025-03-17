@@ -26,6 +26,9 @@ const { execSync } = require("child_process");
 // Load environment variables
 dotenv.config();
 
+// Near the top of agent.js, add this check for development mode
+const isDevelopment = process.env.NODE_ENV === "development";
+
 // --- Load the JWT token from the persisted file ---
 const path = require("path");
 const jwtFile = "/opt/cloudlunacy/.agent_jwt.json";
@@ -44,10 +47,12 @@ try {
 }
 
 // Configuration Constants
-const BACKEND_URL = process.env.BACKEND_URL;
-const AGENT_API_TOKEN = process.env.AGENT_API_TOKEN;
-const AGENT_JWT = process.env.AGENT_JWT; // JWT from registration
-const SERVER_ID = process.env.SERVER_ID;
+const BACKEND_URL = isDevelopment
+  ? "http://localhost:8080"
+  : process.env.BACKEND_URL;
+const AGENT_API_TOKEN = process.env.AGENT_API_TOKEN || "dev-token";
+const AGENT_JWT = process.env.AGENT_JWT || "dev-jwt"; // JWT from registration
+const SERVER_ID = process.env.SERVER_ID || "dev-server-id";
 const WS_RECONNECT_MAX_RETRIES = 5;
 const WS_INITIAL_RETRY_DELAY = 5000;
 const METRICS_INTERVAL = 60000;
@@ -74,6 +79,16 @@ const initializeMongoDB = () => {
  */
 async function authenticateAndConnect() {
   try {
+    // In development mode, skip the actual authentication
+    if (isDevelopment) {
+      logger.info("Development mode: Skipping backend authentication");
+      // Use a mock WebSocket URL for development that works with Docker
+      const wsUrl = "ws://host.docker.internal:8080/agent";
+      logger.info(`Using development WebSocket URL: ${wsUrl}`);
+      establishWebSocketConnection(wsUrl);
+      return;
+    }
+
     logger.info("Authenticating with backend...");
 
     const response = await axios.post(
@@ -369,8 +384,12 @@ async function init() {
 
     // Register MongoDB with front server if not already registered
     try {
+      // Skip in development mode
+      if (isDevelopment) {
+        logger.info("Development mode: Skipping MongoDB registration");
+      }
       // Only attempt this if we have the necessary environment variables
-      if (FRONT_API_URL && AGENT_JWT) {
+      else if (FRONT_API_URL && AGENT_JWT) {
         logger.info(
           "Registering MongoDB with front server for TLS termination...",
         );

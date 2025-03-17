@@ -3,6 +3,12 @@ FROM node:18-alpine
 # Install necessary packages
 RUN apk add --no-cache wget curl bash nano docker docker-compose
 
+# Create cloudlunacy user and directories
+RUN addgroup -S cloudlunacy && \
+    adduser -S cloudlunacy -G cloudlunacy && \
+    mkdir -p /opt/cloudlunacy/logs /opt/cloudlunacy/deployments && \
+    chown -R cloudlunacy:cloudlunacy /opt/cloudlunacy
+
 # Set working directory
 WORKDIR /app
 
@@ -16,8 +22,19 @@ RUN npm install -g nodemon
 # Copy the rest of the application code
 COPY . .
 
+# Create a JWT file for development
+RUN mkdir -p /opt/cloudlunacy && \
+    echo '{"token":"dev-token-for-testing"}' > /opt/cloudlunacy/.agent_jwt.json && \
+    chown -R cloudlunacy:cloudlunacy /opt/cloudlunacy
+
+# Create a symlink for the app directory
+RUN ln -s /app /opt/cloudlunacy/agent
+
 # Expose ports
 EXPOSE 3006 9000
 
+# Switch to cloudlunacy user for development
+USER cloudlunacy
+
 # Start the application directly
-CMD sh -c "node health-server.js & nodemon agent.js" 
+CMD sh -c "node health-server.js & SKIP_PERMISSION_CHECK=true nodemon agent.js" 
