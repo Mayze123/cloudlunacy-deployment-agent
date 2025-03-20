@@ -17,7 +17,8 @@
     "dev:prepare-mongo": "node scripts/prepare-mongo-certs.js",
     "test": "node scripts/test-agent.js",
     "test:agent": "node scripts/test-agent.js",
-    "test:mongo": "node scripts/test-mongo-connection.js"
+    "test:mongo": "node scripts/test-mongo-connection.js",
+    "test:mongo:all": "node scripts/test-mongo-connections.js"
   },
   "dependencies": {
     "axios": "^1.7.7",
