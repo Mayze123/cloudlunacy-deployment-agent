@@ -143,6 +143,44 @@ async function fetchCertificates(token) {
   }
 }
 
+// Add this function after the MongoDB setup (around line 188)
+async function connectMongoDBNetworks() {
+  console.log("Connecting MongoDB container to required networks...");
+
+  try {
+    // Check if MongoDB container is running
+    execSync("docker inspect mongodb-agent-dev", { stdio: "ignore" });
+
+    // Connect to traefik-network if not already connected
+    try {
+      execSync("docker network inspect traefik-network", { stdio: "ignore" });
+      execSync("docker network connect traefik-network mongodb-agent-dev", {
+        stdio: "ignore",
+      });
+      console.log("Connected MongoDB to traefik-network");
+    } catch (error) {
+      console.warn(
+        "Could not connect to traefik-network. It may not exist in development mode.",
+      );
+    }
+
+    // Connect to cloudlunacy-network if not already connected
+    try {
+      execSync("docker network connect cloudlunacy-network mongodb-agent-dev", {
+        stdio: "ignore",
+      });
+      console.log("Connected MongoDB to cloudlunacy-network");
+    } catch (error) {
+      console.warn("Could not connect to cloudlunacy-network:", error.message);
+    }
+  } catch (error) {
+    console.warn(
+      "MongoDB container not running, cannot connect to networks:",
+      error.message,
+    );
+  }
+}
+
 // Main function
 async function main() {
   console.log("Setting up development environment...");
@@ -185,6 +223,9 @@ async function main() {
     console.error("Failed to prepare MongoDB certificates:", error.message);
     process.exit(1);
   }
+
+  // Connect MongoDB to required networks
+  await connectMongoDBNetworks();
 
   console.log("Development environment setup completed successfully");
   console.log("Starting development environment...");

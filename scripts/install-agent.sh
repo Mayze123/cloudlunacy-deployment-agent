@@ -622,6 +622,36 @@ verify_installation() {
   fi
 }
 
+# Add this after the MongoDB installation section (around line 447)
+# Connect MongoDB to required networks
+connect_mongodb_networks() {
+  log "Connecting MongoDB container to required networks..."
+
+  # Check if traefik-network exists, create if not
+  if ! docker network ls | grep -q "traefik-network"; then
+    log "Creating traefik-network..."
+    docker network create traefik-network
+  fi
+
+  # Connect MongoDB to traefik-network if not already connected
+  if ! docker network inspect traefik-network | grep -q "mongodb-agent"; then
+    log "Connecting MongoDB to traefik-network..."
+    docker network connect traefik-network mongodb-agent
+  else
+    log "MongoDB already connected to traefik-network"
+  fi
+
+  # Connect MongoDB to cloudlunacy-network if not already connected
+  if ! docker network inspect cloudlunacy-network | grep -q "mongodb-agent"; then
+    log "Connecting MongoDB to cloudlunacy-network..."
+    docker network connect cloudlunacy-network mongodb-agent
+  else
+    log "MongoDB already connected to cloudlunacy-network"
+  fi
+
+  log "MongoDB network connections established"
+}
+
 main() {
   check_root
   display_info
@@ -651,6 +681,9 @@ main() {
 
   # Install MongoDB with TLS support
   install_mongo_with_tls
+
+  # Connect MongoDB to required networks
+  connect_mongodb_networks
 
   # Configure environment with TLS settings
   configure_env
