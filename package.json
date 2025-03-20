@@ -12,8 +12,12 @@
     "dev:logs": "docker-compose -f docker-compose.dev.yml logs -f",
     "dev:restart": "docker-compose -f docker-compose.dev.yml restart",
     "dev:clean": "docker-compose -f docker-compose.dev.yml down -v",
+    "dev:setup": "node scripts/setup-dev-environment.js",
+    "dev:full": "node scripts/setup-dev-environment.js",
+    "dev:prepare-mongo": "node scripts/prepare-mongo-certs.js",
     "test": "node scripts/test-agent.js",
-    "test:agent": "node scripts/test-agent.js"
+    "test:agent": "node scripts/test-agent.js",
+    "test:mongo": "node scripts/test-mongo-connection.js"
   },
   "dependencies": {
     "axios": "^1.7.7",

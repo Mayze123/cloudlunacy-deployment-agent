@@ -20,6 +20,7 @@ services:
       - ".env.dev"
     volumes:
       - ./:/app
+      - ./dev-cloudlunacy:/opt/cloudlunacy
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       - mongodb
@@ -38,6 +39,7 @@ services:
   mongodb:
     container_name: mongodb-agent-dev
     image: mongo:latest
+    command: --tlsMode preferTLS --tlsCertificateKeyFile /etc/mongodb/certs/server.pem --tlsCAFile /etc/mongodb/certs/ca.crt --tlsAllowConnectionsWithoutCertificates
     ports:
       - "27017:27017"
     environment:
@@ -45,6 +47,7 @@ services:
       - MONGO_INITDB_ROOT_PASSWORD=adminpassword
     volumes:
       - mongodb_data:/data/db
+      - ./dev-cloudlunacy/certs:/etc/mongodb/certs:ro
     networks:
       - cloudlunacy-network
     restart: unless-stopped
