@@ -392,14 +392,19 @@ install_mongo_with_tls() {
     }
   fi
 
-  # Create MongoDB configuration file with TLS settings
+  # Get the server's public IP
+  PUBLIC_IP=$(hostname -I | awk '{print $1}')
+  log "Using server IP: ${PUBLIC_IP} for MongoDB container"
+
+  # Create a mongod.conf file specifically designed to work with the entrypoint script
+  # The key is to include TLS settings in a way that won't be overridden
   cat > $MONGO_CONFIG_DIR/mongod.conf << EOL
+# MongoDB Configuration
 security:
   authorization: enabled
 net:
   bindIp: 0.0.0.0
   port: 27017
-  maxIncomingConnections: 100
   tls:
     mode: requireTLS
     certificateKeyFile: /etc/mongodb/certs/server.pem
@@ -407,30 +412,23 @@ net:
     allowConnectionsWithoutCertificates: true
 setParameter:
   authenticationMechanisms: SCRAM-SHA-1,SCRAM-SHA-256
-operationProfiling:
-  slowOpThresholdMs: 100
-  mode: slowOp
 EOL
 
-  # Get the server's public IP
-  PUBLIC_IP=$(hostname -I | awk '{print $1}')
-  log "Using server IP: ${PUBLIC_IP} for MongoDB container"
-
-  # Start MongoDB container with TLS configuration
+  # Start MongoDB container with a different approach - using environment variables
+  # to configure TLS instead of relying on the config file or command line arguments
   log "Creating and starting MongoDB container with TLS settings..."
   docker run -d \
     --name mongodb-agent \
     -p ${MONGO_PORT}:27017 \
-    -v "${MONGO_CONFIG_DIR}/mongod.conf:/etc/mongod.conf" \
-    -v "${MONGO_CONFIG_DIR}/certs:/etc/mongodb/certs" \
+    -v "${MONGO_CONFIG_DIR}/certs:/etc/mongodb/certs:ro" \
     -e MONGO_INITDB_ROOT_USERNAME=admin \
     -e MONGO_INITDB_ROOT_PASSWORD=adminpassword \
     mongo:latest \
-    --config /etc/mongod.conf \
-    --tlsMode=requireTLS \
+    mongod --tlsMode=requireTLS \
     --tlsCertificateKeyFile=/etc/mongodb/certs/server.pem \
     --tlsCAFile=/etc/mongodb/certs/ca.crt \
     --tlsAllowConnectionsWithoutCertificates \
+    --bind_ip_all \
     --auth || {
     log_error "Failed to start MongoDB container"
     exit 1
@@ -438,11 +436,18 @@ EOL
 
   # Wait for MongoDB to start up
   log "Waiting for MongoDB to start up..."
-  sleep 5
+  sleep 10 # Increase wait time to ensure MongoDB has enough time to initialize
 
   # Verify MongoDB is running
   if docker ps | grep -q "mongodb-agent"; then
-    log "MongoDB container is running successfully with TLS."
+    log "MongoDB container is running, checking TLS status..."
+    if docker logs mongodb-agent | grep -q "tls.*mode.*requireTLS" && docker logs mongodb-agent | grep -q "ssl.*on"; then
+      log "MongoDB is running successfully with TLS enabled."
+    else
+      log_error "MongoDB container is running but TLS might not be properly configured."
+      docker logs mongodb-agent | grep -E "tls|ssl"
+      exit 1
+    fi
   else
     log_error "MongoDB container failed to start properly."
     docker logs mongodb-agent
