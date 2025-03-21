@@ -6,7 +6,7 @@
 # Date: 2024-12-01
 #
 # Description:
-# This script installs and configures the CloudLunacy Deployment Agent on a VPS.
+# This script installs and configures the CloudLunacy Deployment Agent on a VPS
 # ------------------------------------------------------------------------------
 
 set -euo pipefail
