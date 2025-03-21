@@ -50,6 +50,7 @@ try {
 const BACKEND_URL = isDevelopment
   ? "http://localhost:8080"
   : process.env.BACKEND_URL;
+const FRONT_API_URL = process.env.FRONT_API_URL;
 const AGENT_API_TOKEN = process.env.AGENT_API_TOKEN || "dev-token";
 const AGENT_JWT = process.env.AGENT_JWT || "dev-jwt"; // JWT from registration
 const SERVER_ID = process.env.SERVER_ID || "dev-server-id";
@@ -400,32 +401,59 @@ async function init() {
         // Get the local IP address for MongoDB registration
         const LOCAL_IP = await getPublicIp();
 
-        // Attempt to register MongoDB with the front server (which will handle TLS)
-        const response = await axios.post(
-          `${FRONT_API_URL}/api/frontdoor/add-subdomain`,
-          {
-            subdomain: "mongodb", // Using "mongodb" will trigger the agentId.mongodb.domain pattern
-            targetIp: LOCAL_IP,
-          },
-          {
-            headers: {
-              Authorization: `Bearer ${AGENT_JWT}`,
-              "Content-Type": "application/json",
-            },
-          },
+        // Get agent ID from JWT file
+        let agentId = SERVER_ID;
+        try {
+          const jwtData = JSON.parse(fs.readFileSync(jwtFile, "utf8"));
+          if (jwtData && jwtData.agentId) {
+            agentId = jwtData.agentId;
+          }
+        } catch (err) {
+          logger.warn(`Could not read agentId from JWT file: ${err.message}`);
+        }
+
+        logger.info(
+          `Using agent ID: ${agentId} and IP: ${LOCAL_IP} for MongoDB registration`,
         );
 
-        if (response.data && response.data.success) {
-          logger.info(
-            "MongoDB successfully registered with front server for TLS termination",
+        // Use the frontdoor/add-subdomain endpoint which is designed for MongoDB registration
+        try {
+          const response = await axios.post(
+            `${FRONT_API_URL}/api/frontdoor/add-subdomain`,
             {
-              domain: response.data.details.domain,
+              subdomain: "mongodb",
+              targetIp: LOCAL_IP,
+              agentId,
+            },
+            {
+              headers: {
+                Authorization: `Bearer ${AGENT_JWT}`,
+                "Content-Type": "application/json",
+              },
             },
           );
-        } else {
-          logger.warn("Unexpected response when registering MongoDB", {
-            response: response.data,
-          });
+
+          if (response.data && response.data.success) {
+            logger.info(
+              "MongoDB successfully registered with front server for TLS termination",
+              {
+                domain: response.data.domain || response.data.details?.domain,
+                connectionString: response.data.connectionString,
+              },
+            );
+          } else {
+            logger.warn("Unexpected response when registering MongoDB", {
+              response: response.data,
+            });
+          }
+        } catch (err) {
+          logger.error(
+            "Error registering MongoDB with front server:",
+            err.message,
+          );
+          logger.info(
+            "Continuing agent initialization despite MongoDB registration issue",
+          );
         }
       } else {
         logger.warn(
@@ -457,14 +485,35 @@ async function init() {
  */
 async function getPublicIp() {
   try {
-    // First try to get the server's own IP address
-    const { stdout } = await executeCommand("hostname", ["-I"]);
-    const localIp = stdout.trim().split(" ")[0];
-    if (localIp) {
-      return localIp;
+    // First try to get the server's own IP address using execSync
+    try {
+      const localIp = execSync("hostname -I").toString().trim().split(" ")[0];
+      if (localIp) {
+        return localIp;
+      }
+    } catch (err) {
+      logger.warn("Failed to get local IP with hostname -I:", err.message);
     }
 
-    // If local command fails, try external service
+    // If local command fails, try network interfaces from os module
+    try {
+      const interfaces = os.networkInterfaces();
+      for (const name of Object.keys(interfaces)) {
+        for (const iface of interfaces[name]) {
+          // Skip internal interfaces and non-IPv4
+          if (iface.family === "IPv4" && !iface.internal) {
+            return iface.address;
+          }
+        }
+      }
+    } catch (err) {
+      logger.warn(
+        "Failed to get local IP from network interfaces:",
+        err.message,
+      );
+    }
+
+    // If all local methods fail, try external service
     const response = await axios.get("https://api.ipify.org?format=json");
     return response.data.ip;
   } catch (error) {
