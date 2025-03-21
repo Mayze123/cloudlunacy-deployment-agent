@@ -375,7 +375,7 @@ async function init() {
 
     // Initialize MongoDB manager (if used for administrative tasks).
     const mongoManager = require("./utils/mongoManager");
-    await mongoManager.initializeManagerUser();
+    await mongoManager.initialize();
 
     // Check deployment permissions.
     const permissionsOk = await ensureDeploymentPermissions();
