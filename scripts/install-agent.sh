@@ -427,6 +427,10 @@ EOL
     -e MONGO_INITDB_ROOT_PASSWORD=adminpassword \
     mongo:latest \
     --config /etc/mongod.conf \
+    --tlsMode=requireTLS \
+    --tlsCertificateKeyFile=/etc/mongodb/certs/server.pem \
+    --tlsCAFile=/etc/mongodb/certs/ca.crt \
+    --tlsAllowConnectionsWithoutCertificates \
     --auth || {
     log_error "Failed to start MongoDB container"
     exit 1
