@@ -47,18 +47,19 @@ class MongoConnection {
         ? `${this.username}:${this.password}@`
         : "";
 
-    // When using HAProxy, we connect via the agent subdomain
-    // This is important for SNI-based routing
-    const host =
-      this.host === "localhost" || this.host === "127.0.0.1"
-        ? `${this.serverId}.${this.mongoDomain}` // Use agent subdomain for local connections
-        : this.host; // Use direct IP for external connections
+    // IMPORTANT FIX: Always use the agent subdomain format for HAProxy routing
+    // This enables SNI-based routing to reach the correct MongoDB instance
+    const host = `${this.serverId}.${this.mongoDomain}`;
 
-    const tlsParam = this.useTls
-      ? "?tls=true&directConnection=true"
+    // Add proper TLS parameters for HAProxy-proxied connections
+    const tlsParams = this.useTls
+      ? "?tls=true&tlsAllowInvalidCertificates=true&directConnection=true"
       : "?directConnection=true";
 
-    return `mongodb://${credentials}${host}:${this.port}/${this.database}${tlsParam}`;
+    const uri = `mongodb://${credentials}${host}:${this.port}/${this.database}${tlsParams}`;
+    logger.debug(`Generated MongoDB URI: ${uri.replace(/:[^:]*@/, ":***@")}`);
+
+    return uri;
   }
 
   /**
@@ -98,9 +99,9 @@ class MongoConnection {
     };
 
     logger.info(
-      `Connecting to MongoDB through HAProxy at ${this.host}:${
-        this.port
-      } with TLS ${this.useTls ? "enabled" : "disabled"}`,
+      `Connecting to MongoDB through HAProxy at ${this.serverId}.${
+        this.mongoDomain
+      }:${this.port} with TLS ${this.useTls ? "enabled" : "disabled"}`,
     );
 
     try {
@@ -112,6 +113,25 @@ class MongoConnection {
       return this.client;
     } catch (error) {
       logger.error(`Failed to connect to MongoDB: ${error.message}`);
+
+      // Provide more detailed error information for troubleshooting
+      if (error.message.includes("ECONNREFUSED")) {
+        logger.error(
+          `Connection refused: Make sure HAProxy is running and listening on port ${this.port}`,
+        );
+        logger.error(
+          `Also verify that the HAProxy configuration has the MongoDB frontend enabled`,
+        );
+      } else if (error.message.includes("ETIMEDOUT")) {
+        logger.error(
+          `Connection timeout: Check network connectivity and firewall settings`,
+        );
+      } else if (error.message.includes("certificate")) {
+        logger.error(
+          `TLS certificate error: Check that certificates are properly installed`,
+        );
+      }
+
       throw error;
     }
   }

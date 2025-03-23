@@ -416,14 +416,15 @@ async function init() {
           `Using agent ID: ${agentId} and IP: ${LOCAL_IP} for MongoDB registration`,
         );
 
-        // Use the frontdoor/add-subdomain endpoint which is designed for MongoDB registration with HAProxy
+        // Use the MongoDB-specific subdomain registration endpoint
         try {
           const response = await axios.post(
-            `${FRONT_API_URL}/api/frontdoor/add-subdomain`,
+            `${FRONT_API_URL}/api/mongodb/register`,
             {
-              subdomain: "mongodb",
-              targetIp: LOCAL_IP,
               agentId,
+              targetIp: LOCAL_IP,
+              targetPort: process.env.MONGO_PORT || 27017,
+              useTls: process.env.MONGO_USE_TLS !== "false",
             },
             {
               headers: {
@@ -441,6 +442,24 @@ async function init() {
                 connectionString: response.data.connectionString,
               },
             );
+
+            // Test the connection to confirm it's working
+            try {
+              const testConnection = await mongoManager.testConnection();
+              if (testConnection.success) {
+                logger.info(
+                  "MongoDB connection test successful after registration",
+                );
+              } else {
+                logger.warn(
+                  `MongoDB connection test failed: ${testConnection.message}`,
+                );
+              }
+            } catch (testErr) {
+              logger.warn(
+                `Error testing MongoDB connection: ${testErr.message}`,
+              );
+            }
           } else {
             logger.warn("Unexpected response when registering MongoDB", {
               response: response.data,
@@ -451,6 +470,14 @@ async function init() {
             "Error registering MongoDB with HAProxy front server:",
             err.message,
           );
+
+          if (err.response) {
+            logger.error(
+              `Response status: ${err.response.status}, data:`,
+              err.response.data,
+            );
+          }
+
           logger.info(
             "Continuing agent initialization despite MongoDB registration issue",
           );
@@ -470,6 +497,7 @@ async function init() {
       );
     }
 
+    // Start collecting metrics
     setInterval(collectMetrics, METRICS_INTERVAL);
 
     logger.info("CloudLunacy Deployment Agent initialized successfully");

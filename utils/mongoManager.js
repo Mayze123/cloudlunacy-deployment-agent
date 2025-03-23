@@ -10,6 +10,10 @@ const logger = require("./logger");
 class MongoManager {
   constructor() {
     this.connection = mongoConnection;
+    this.initialized = false;
+    this.retryCount = 0;
+    this.maxRetries = 5;
+    this.retryDelay = 5000; // milliseconds
   }
 
   /**
@@ -17,17 +21,58 @@ class MongoManager {
    * @returns {Promise<boolean>} Success status
    */
   async initialize() {
+    if (this.initialized) {
+      return true;
+    }
+
     try {
       logger.info("Initializing MongoDB connection through HAProxy");
       await this.connection.connect();
+      this.initialized = true;
+      this.retryCount = 0;
       logger.info(
         "MongoDB connection through HAProxy initialized successfully",
       );
       return true;
     } catch (error) {
       logger.error(`MongoDB initialization failed: ${error.message}`);
+
+      // Add retry logic with exponential backoff
+      if (this.retryCount < this.maxRetries) {
+        this.retryCount++;
+        const delay = this.retryDelay * Math.pow(2, this.retryCount - 1);
+        logger.info(
+          `Retrying MongoDB connection in ${delay / 1000} seconds (attempt ${
+            this.retryCount
+          }/${this.maxRetries})`,
+        );
+
+        return new Promise((resolve) => {
+          setTimeout(async () => {
+            const result = await this.initialize();
+            resolve(result);
+          }, delay);
+        });
+      }
+
       return false;
     }
+  }
+
+  /**
+   * Get MongoDB database instance
+   * @returns {Promise<Object>} MongoDB database
+   */
+  async getDb() {
+    if (!this.initialized) {
+      await this.initialize();
+    }
+
+    if (!this.connection.db) {
+      await this.connection.connect();
+    }
+
+    return this.connection.db;
   }
 
   /**
@@ -45,7 +90,13 @@ class MongoManager {
       logger.info(
         `Creating user ${username} for database ${dbName} through HAProxy`,
       );
-      const db = await this.connection.getDb();
+
+      // Ensure we're connected
+      if (!this.initialized) {
+        await this.initialize();
+      }
+
+      const db = await this.getDb();
 
       await db.command({
         createUser: username,
@@ -61,6 +112,16 @@ class MongoManager {
       logger.error(
         `Failed to create user ${username} through HAProxy: ${error.message}`,
       );
+
+      // If connection error, try to reinitialize
+      if (
+        error.message.includes("ECONNREFUSED") ||
+        error.message.includes("ETIMEDOUT")
+      ) {
+        this.initialized = false;
+        logger.info("Reinitializing connection for next attempt");
+      }
+
       return false;
     }
   }
@@ -80,8 +141,13 @@ class MongoManager {
         `Creating database ${dbName} and user ${username} through HAProxy`,
       );
 
+      // Ensure we're connected
+      if (!this.initialized) {
+        await this.initialize();
+      }
+
       // Get admin DB
-      const db = await this.connection.getDb();
+      const db = await this.getDb();
 
       // Create the new database by accessing it (MongoDB creates it automatically)
       const newDb = this.connection.client.db(dbName);
@@ -107,7 +173,45 @@ class MongoManager {
       logger.error(
         `Failed to create database and user through HAProxy: ${error.message}`,
       );
+
+      // If connection error, try to reinitialize
+      if (
+        error.message.includes("ECONNREFUSED") ||
+        error.message.includes("ETIMEDOUT")
+      ) {
+        this.initialized = false;
+        logger.info("Reinitializing connection for next attempt");
+      }
+
       return false;
+    }
+  }
+
+  /**
+   * Test MongoDB connection through HAProxy
+   * @returns {Promise<{success: boolean, message: string}>} Test result
+   */
+  async testConnection() {
+    try {
+      // Ensure we're connected
+      if (!this.initialized) {
+        await this.initialize();
+      }
+
+      const db = await this.getDb();
+      const result = await db.admin().ping();
+
+      return {
+        success: true,
+        message: "MongoDB connection test successful",
+        details: result,
+      };
+    } catch (error) {
+      logger.error(`MongoDB connection test failed: ${error.message}`);
+      return {
+        success: false,
+        message: `MongoDB connection test failed: ${error.message}`,
+      };
     }
   }
 
@@ -115,7 +219,11 @@ class MongoManager {
    * Close MongoDB connection
    */
   async close() {
-    await this.connection.close();
+    if (this.connection.client) {
+      await this.connection.client.close();
+      this.initialized = false;
+      logger.info("MongoDB connection closed");
+    }
   }
 }
 
