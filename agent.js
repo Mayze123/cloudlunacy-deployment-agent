@@ -62,15 +62,15 @@ const METRICS_INTERVAL = 60000;
 let ws;
 
 /**
- * In the new architecture, MongoDB TLS termination is handled by the front server.
- * Thus, we no longer verify or require a TLS CA file for MongoDB in the agent.
+ * In the new architecture, MongoDB TLS termination is handled by HAProxy on the front server.
+ * The agent connects to MongoDB through HAProxy's SNI-based routing.
  */
 const initializeMongoDB = () => {
   // If your agent still needs to perform some MongoDB operations directly,
   // ensure that the environment variables (like MONGO_MANAGER_USERNAME, etc.)
   // are set properly. Otherwise, simply log that initialization is complete.
   logger.info(
-    "MongoDB initialization: TLS verification is handled by the front server.",
+    "MongoDB initialization: TLS verification is handled by HAProxy on the front server.",
   );
   return true;
 };
@@ -395,7 +395,7 @@ async function init() {
       // Only attempt this if we have the necessary environment variables
       else if (FRONT_API_URL && AGENT_JWT) {
         logger.info(
-          "Registering MongoDB with front server for TLS termination...",
+          "Registering MongoDB with HAProxy front server for TLS termination...",
         );
 
         // Get the local IP address for MongoDB registration
@@ -416,7 +416,7 @@ async function init() {
           `Using agent ID: ${agentId} and IP: ${LOCAL_IP} for MongoDB registration`,
         );
 
-        // Use the frontdoor/add-subdomain endpoint which is designed for MongoDB registration
+        // Use the frontdoor/add-subdomain endpoint which is designed for MongoDB registration with HAProxy
         try {
           const response = await axios.post(
             `${FRONT_API_URL}/api/frontdoor/add-subdomain`,
@@ -435,7 +435,7 @@ async function init() {
 
           if (response.data && response.data.success) {
             logger.info(
-              "MongoDB successfully registered with front server for TLS termination",
+              "MongoDB successfully registered with HAProxy front server for TLS termination",
               {
                 domain: response.data.domain || response.data.details?.domain,
                 connectionString: response.data.connectionString,
@@ -448,7 +448,7 @@ async function init() {
           }
         } catch (err) {
           logger.error(
-            "Error registering MongoDB with front server:",
+            "Error registering MongoDB with HAProxy front server:",
             err.message,
           );
           logger.info(
@@ -462,7 +462,7 @@ async function init() {
       }
     } catch (mongoRegErr) {
       logger.error(
-        "Error registering MongoDB with front server:",
+        "Error registering MongoDB with HAProxy front server:",
         mongoRegErr.message,
       );
       logger.info(

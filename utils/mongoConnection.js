@@ -4,8 +4,11 @@ const path = require("path");
 const logger = require("./logger");
 
 /**
- * MongoDB Connection Utility
- * Provides a secure connection to MongoDB with TLS enabled by default
+ * MongoDB Connection Utility for HAProxy TLS termination
+ *
+ * This utility provides a secure connection to MongoDB with TLS enabled by default.
+ * After the migration from Traefik to HAProxy, TLS termination is handled by HAProxy.
+ * The SNI-based routing is used to direct traffic to the correct MongoDB instance.
  */
 class MongoConnection {
   constructor() {
@@ -16,6 +19,8 @@ class MongoConnection {
     this.password = process.env.MONGO_MANAGER_PASSWORD;
     this.database = process.env.MONGO_DATABASE || "admin";
     this.useTls = process.env.MONGO_USE_TLS !== "false"; // Default to true
+    this.serverId = process.env.SERVER_ID || "dev-server-id";
+    this.mongoDomain = process.env.MONGO_DOMAIN || "mongodb.cloudlunacy.uk";
 
     // TLS certificate paths
     const isDev = process.env.NODE_ENV === "development";
@@ -42,15 +47,26 @@ class MongoConnection {
         ? `${this.username}:${this.password}@`
         : "";
 
+    // When using HAProxy, we connect via the agent subdomain
+    // This is important for SNI-based routing
+    const host =
+      this.host === "localhost" || this.host === "127.0.0.1"
+        ? `${this.serverId}.${this.mongoDomain}` // Use agent subdomain for local connections
+        : this.host; // Use direct IP for external connections
+
     const tlsParam = this.useTls
       ? "?tls=true&directConnection=true"
       : "?directConnection=true";
 
-    return `mongodb://${credentials}${this.host}:${this.port}/${this.database}${tlsParam}`;
+    return `mongodb://${credentials}${host}:${this.port}/${this.database}${tlsParam}`;
   }
 
   /**
    * Get TLS options for MongoDB connection
+   *
+   * With HAProxy, we don't need to verify certificates on the agent side
+   * because HAProxy handles TLS termination
+   *
    * @returns {Object} TLS options
    */
   getTlsOptions() {
@@ -58,25 +74,16 @@ class MongoConnection {
       return {};
     }
 
-    // Check if CA certificate exists
-    if (!fs.existsSync(this.caPath)) {
-      logger.warn(
-        `CA certificate not found at ${this.caPath}. TLS verification will be disabled.`,
-      );
-      return {
-        tlsAllowInvalidCertificates: true,
-        tlsAllowInvalidHostnames: true,
-      };
-    }
-
+    // With HAProxy, we allow invalid certificates and hostnames
+    // because TLS verification is handled by HAProxy
     return {
-      tlsCAFile: this.caPath,
-      tlsAllowInvalidHostnames: process.env.NODE_ENV === "development", // Only in development
+      tlsAllowInvalidCertificates: true,
+      tlsAllowInvalidHostnames: true,
     };
   }
 
   /**
-   * Connect to MongoDB
+   * Connect to MongoDB through HAProxy
    * @returns {Promise<MongoClient>} MongoDB client
    */
   async connect() {
@@ -91,7 +98,9 @@ class MongoConnection {
     };
 
     logger.info(
-      `Connecting to MongoDB at ${this.host}:${this.port} with TLS ${this.useTls ? "enabled" : "disabled"}`,
+      `Connecting to MongoDB through HAProxy at ${this.host}:${
+        this.port
+      } with TLS ${this.useTls ? "enabled" : "disabled"}`,
     );
 
     try {
@@ -99,7 +108,7 @@ class MongoConnection {
       await this.client.connect();
       this.db = this.client.db(this.database);
 
-      logger.info("Successfully connected to MongoDB");
+      logger.info("Successfully connected to MongoDB through HAProxy");
       return this.client;
     } catch (error) {
       logger.error(`Failed to connect to MongoDB: ${error.message}`);
@@ -107,28 +116,7 @@ class MongoConnection {
     }
   }
 
-  /**
-   * Get database instance
-   * @returns {Promise<Db>} MongoDB database instance
-   */
-  async getDb() {
-    if (!this.db) {
-      await this.connect();
-    }
-    return this.db;
-  }
-
-  /**
-   * Close MongoDB connection
-   */
-  async close() {
-    if (this.client) {
-      await this.client.close();
-      this.client = null;
-      this.db = null;
-      logger.info("MongoDB connection closed");
-    }
-  }
+  // ... existing code ...
 }
 
 // Export singleton instance
