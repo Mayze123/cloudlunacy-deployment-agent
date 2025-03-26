@@ -640,7 +640,7 @@ register_agent() {
 }
 
 configure_env() {
-  log "Configuring environment variables for HAProxy support..."
+  log "Configuring environment variables..."
   ENV_FILE="$BASE_DIR/.env"
 
   # Generate a global JWT secret if not already set
@@ -664,11 +664,15 @@ MONGO_CERT_PATH=${CERTS_DIR}/server.crt
 MONGO_KEY_PATH=${CERTS_DIR}/server.key
 MONGO_CA_PATH=${CERTS_DIR}/ca.crt
 USE_HAPROXY=${USE_HAPROXY}
+DATABASES_ENABLED=mongodb
+# Redis configuration - uncomment if using Redis
+# REDIS_PORT=6379
+# REDIS_USE_TLS=true
 EOL
 
   chown "$USERNAME:$USERNAME" "$ENV_FILE"
   chmod 600 "$ENV_FILE"
-  log "Environment configuration completed with HAProxy support."
+  log "Environment configuration completed."
 }
 
 main "$@"

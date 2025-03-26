@@ -419,12 +419,14 @@ async function init() {
         // Use the MongoDB-specific subdomain registration endpoint
         try {
           const response = await axios.post(
-            `${FRONT_API_URL}/api/mongodb/register`,
+            `${FRONT_API_URL}/api/databases/mongodb/register`,
             {
               agentId,
               targetIp: LOCAL_IP,
               targetPort: process.env.MONGO_PORT || 27017,
-              useTls: process.env.MONGO_USE_TLS !== "false",
+              options: {
+                useTls: process.env.MONGO_USE_TLS !== "false",
+              },
             },
             {
               headers: {
