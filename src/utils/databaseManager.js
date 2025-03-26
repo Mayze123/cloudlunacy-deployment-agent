@@ -273,13 +273,66 @@ class DatabaseManager {
       const mountPath = "/opt/cloudlunacy/mongodb";
       const certsPath = "/opt/cloudlunacy/certs";
 
-      // Create directories if they don't exist
-      execSync(`mkdir -p ${mountPath}/data/db`);
-      execSync(`mkdir -p ${certsPath}`);
+      // Create directories with proper error handling
+      try {
+        // Check if directories exist first
+        const dirExists = (dir) => {
+          try {
+            return fs.existsSync(dir);
+          } catch (e) {
+            return false;
+          }
+        };
+
+        // Create required directories if they don't exist
+        const dirs = [
+          mountPath,
+          `${mountPath}/data`,
+          `${mountPath}/data/db`,
+          certsPath,
+        ];
+
+        for (const dir of dirs) {
+          if (!dirExists(dir)) {
+            try {
+              fs.mkdirSync(dir, { recursive: true });
+              logger.info(`Created directory: ${dir}`);
+            } catch (err) {
+              // Handle permission errors with helpful messages
+              if (err.code === "EACCES" || err.code === "EPERM") {
+                logger.error(
+                  `Permission denied when creating directory: ${dir}`,
+                );
+                return {
+                  success: false,
+                  message:
+                    "Permission denied when creating MongoDB directories",
+                  error: err.message,
+                  help:
+                    "Run the following commands as root/sudo to create required directories:\n" +
+                    `sudo mkdir -p ${mountPath}/data/db\n` +
+                    `sudo mkdir -p ${certsPath}\n` +
+                    `sudo chown -R $USER:$USER /opt/cloudlunacy\n` +
+                    "Then try installing MongoDB again.",
+                };
+              }
+              throw err; // Re-throw other errors
+            }
+          }
+        }
+      } catch (dirError) {
+        logger.error(`Error creating directories: ${dirError.message}`);
+        return {
+          success: false,
+          message: `Failed to create required directories: ${dirError.message}`,
+          error: dirError.message,
+        };
+      }
 
       // Create docker-compose file for MongoDB
       const composeFile = `/opt/cloudlunacy/docker-compose.mongodb.yml`;
-      const composeContent = `
+      try {
+        const composeContent = `
 version: '3'
 
 services:
@@ -297,39 +350,95 @@ services:
       - ${mountPath}/data/db:/data/db
       - ${certsPath}:/etc/mongodb/certs:ro
 `;
-
-      fs.writeFileSync(composeFile, composeContent);
+        fs.writeFileSync(composeFile, composeContent);
+        logger.info("Created MongoDB docker-compose configuration");
+      } catch (fileError) {
+        logger.error(
+          `Error creating docker-compose file: ${fileError.message}`,
+        );
+        return {
+          success: false,
+          message: `Failed to create docker-compose file: ${fileError.message}`,
+          error: fileError.message,
+          help: "Ensure the application has write permissions to /opt/cloudlunacy",
+        };
+      }
 
       // Set up certificates if TLS is enabled
       if (config.useTls) {
-        // Run certificate generation script
-        execSync("npm run dev:prepare-mongo");
+        try {
+          // Run certificate generation script
+          execSync("npm run dev:prepare-mongo");
+          logger.info("Generated MongoDB certificates");
+        } catch (certError) {
+          logger.error(`Error generating certificates: ${certError.message}`);
+          return {
+            success: false,
+            message: `Failed to generate certificates: ${certError.message}`,
+            error: certError.message,
+          };
+        }
       }
 
       // Start MongoDB container
-      execSync(`docker-compose -f ${composeFile} up -d`);
+      try {
+        execSync(`docker-compose -f ${composeFile} up -d`);
+        logger.info("Started MongoDB container");
+      } catch (dockerError) {
+        logger.error(
+          `Error starting MongoDB container: ${dockerError.message}`,
+        );
+        return {
+          success: false,
+          message: `Failed to start MongoDB container: ${dockerError.message}`,
+          error: dockerError.message,
+          help: "Ensure Docker and docker-compose are installed and the user has permissions to run Docker commands",
+        };
+      }
 
       // Wait for MongoDB to start
+      logger.info("Waiting for MongoDB to initialize...");
       await new Promise((resolve) => setTimeout(resolve, 5000));
 
       // Initialize MongoDB manager
-      await this.supportedDatabases.mongodb.manager.initialize();
-
-      // Test connection
-      const testResult =
-        await this.supportedDatabases.mongodb.manager.testConnection();
-
-      if (testResult.success) {
-        return {
-          success: true,
-          message: "MongoDB installed and running successfully",
-          details: testResult,
-        };
-      } else {
+      try {
+        await this.supportedDatabases.mongodb.manager.initialize();
+        logger.info("MongoDB manager initialized");
+      } catch (initError) {
+        logger.error(
+          `Error initializing MongoDB manager: ${initError.message}`,
+        );
         return {
           success: false,
-          message: "MongoDB installed but connection test failed",
-          details: testResult,
+          message: `MongoDB container started but manager initialization failed: ${initError.message}`,
+          error: initError.message,
+        };
+      }
+
+      // Test connection
+      try {
+        const testResult =
+          await this.supportedDatabases.mongodb.manager.testConnection();
+
+        if (testResult.success) {
+          return {
+            success: true,
+            message: "MongoDB installed and running successfully",
+            details: testResult,
+          };
+        } else {
+          return {
+            success: false,
+            message: "MongoDB installed but connection test failed",
+            details: testResult,
+          };
+        }
+      } catch (testError) {
+        logger.error(`Error testing MongoDB connection: ${testError.message}`);
+        return {
+          success: false,
+          message: `MongoDB installed but connection test failed: ${testError.message}`,
+          error: testError.message,
         };
       }
     } catch (error) {
@@ -508,17 +617,74 @@ services:
       // For production, use Docker to install Redis
       const mountPath = "/opt/cloudlunacy/redis";
 
-      // Create directories if they don't exist
-      execSync(`mkdir -p ${mountPath}/data`);
+      // Create directories with proper error handling
+      try {
+        // Check if directories exist first
+        const dirExists = (dir) => {
+          try {
+            return fs.existsSync(dir);
+          } catch (e) {
+            return false;
+          }
+        };
+
+        // Create required directories if they don't exist
+        const dirs = [mountPath, `${mountPath}/data`];
+
+        for (const dir of dirs) {
+          if (!dirExists(dir)) {
+            try {
+              fs.mkdirSync(dir, { recursive: true });
+              logger.info(`Created directory: ${dir}`);
+            } catch (err) {
+              // Handle permission errors with helpful messages
+              if (err.code === "EACCES" || err.code === "EPERM") {
+                logger.error(
+                  `Permission denied when creating directory: ${dir}`,
+                );
+                return {
+                  success: false,
+                  message: "Permission denied when creating Redis directories",
+                  error: err.message,
+                  help:
+                    "Run the following commands as root/sudo to create required directories:\n" +
+                    `sudo mkdir -p ${mountPath}/data\n` +
+                    `sudo chown -R $USER:$USER /opt/cloudlunacy\n` +
+                    "Then try installing Redis again.",
+                };
+              }
+              throw err; // Re-throw other errors
+            }
+          }
+        }
+      } catch (dirError) {
+        logger.error(`Error creating directories: ${dirError.message}`);
+        return {
+          success: false,
+          message: `Failed to create required directories: ${dirError.message}`,
+          error: dirError.message,
+        };
+      }
 
       // Create password file for Redis if auth is enabled
       if (config.authEnabled && config.password) {
-        fs.writeFileSync(`${mountPath}/password.txt`, config.password);
+        try {
+          fs.writeFileSync(`${mountPath}/password.txt`, config.password);
+          logger.info("Created Redis password file");
+        } catch (pwError) {
+          logger.error(`Error creating password file: ${pwError.message}`);
+          return {
+            success: false,
+            message: `Failed to create Redis password file: ${pwError.message}`,
+            error: pwError.message,
+          };
+        }
       }
 
       // Create docker-compose file for Redis
       const composeFile = `/opt/cloudlunacy/docker-compose.redis.yml`;
-      const composeContent = `
+      try {
+        const composeContent = `
 version: '3'
 
 services:
@@ -533,28 +699,61 @@ services:
     command: redis-server ${config.authEnabled ? `--requirepass ${config.password || "redispassword"}` : ""}
 `;
 
-      fs.writeFileSync(composeFile, composeContent);
+        fs.writeFileSync(composeFile, composeContent);
+        logger.info("Created Redis docker-compose configuration");
+      } catch (fileError) {
+        logger.error(
+          `Error creating docker-compose file: ${fileError.message}`,
+        );
+        return {
+          success: false,
+          message: `Failed to create Redis docker-compose file: ${fileError.message}`,
+          error: fileError.message,
+          help: "Ensure the application has write permissions to /opt/cloudlunacy",
+        };
+      }
 
       // Start Redis container
-      execSync(`docker-compose -f ${composeFile} up -d`);
+      try {
+        execSync(`docker-compose -f ${composeFile} up -d`);
+        logger.info("Started Redis container");
+      } catch (dockerError) {
+        logger.error(`Error starting Redis container: ${dockerError.message}`);
+        return {
+          success: false,
+          message: `Failed to start Redis container: ${dockerError.message}`,
+          error: dockerError.message,
+          help: "Ensure Docker and docker-compose are installed and the user has permissions to run Docker commands",
+        };
+      }
 
       // Wait for Redis to start
+      logger.info("Waiting for Redis to initialize...");
       await new Promise((resolve) => setTimeout(resolve, 5000));
 
       // Test connection
-      const testResult = await this.testRedisConnection(config);
+      try {
+        const testResult = await this.testRedisConnection(config);
 
-      if (testResult.success) {
-        return {
-          success: true,
-          message: "Redis installed and running successfully",
-          details: testResult,
-        };
-      } else {
+        if (testResult.success) {
+          return {
+            success: true,
+            message: "Redis installed and running successfully",
+            details: testResult,
+          };
+        } else {
+          return {
+            success: false,
+            message: "Redis installed but connection test failed",
+            details: testResult,
+          };
+        }
+      } catch (testError) {
+        logger.error(`Error testing Redis connection: ${testError.message}`);
         return {
           success: false,
-          message: "Redis installed but connection test failed",
-          details: testResult,
+          message: `Redis installed but connection test failed: ${testError.message}`,
+          error: testError.message,
         };
       }
     } catch (error) {
