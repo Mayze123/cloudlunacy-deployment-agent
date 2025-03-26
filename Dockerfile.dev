@@ -1,40 +1,51 @@
 FROM node:18-alpine
 
-# Install necessary packages
-RUN apk add --no-cache wget curl bash nano docker docker-compose
+# Install dependencies needed by the agent
+RUN apk update && apk --no-cache add \
+    git \
+    openssh-client \
+    docker \
+    docker-compose \
+    curl \
+    bash \
+    python3 \
+    shadow \
+    coreutils \
+    openssl \
+    && rm -rf /var/cache/apk/*
 
-# Create cloudlunacy user and directories
-RUN addgroup -S cloudlunacy && \
-    adduser -S cloudlunacy -G cloudlunacy && \
-    mkdir -p /opt/cloudlunacy/logs /opt/cloudlunacy/deployments && \
-    chown -R cloudlunacy:cloudlunacy /opt/cloudlunacy
-
-# Set working directory
+# Setup environment
 WORKDIR /app
 
-# Copy package.json and package-lock.json
+# Copy package files and install dependencies
 COPY package*.json ./
-
-# Install dependencies
 RUN npm install
-RUN npm install -g nodemon
 
-# Copy the rest of the application code
+# Copy the application code
 COPY . .
 
-# Create a JWT file for development
-RUN mkdir -p /opt/cloudlunacy && \
-    echo '{"token":"dev-token-for-testing"}' > /opt/cloudlunacy/.agent_jwt.json && \
-    chown -R cloudlunacy:cloudlunacy /opt/cloudlunacy
+# Create directory structure
+RUN mkdir -p /opt/cloudlunacy/deployments \
+    /opt/cloudlunacy/templates \
+    /opt/cloudlunacy/certs \
+    /opt/cloudlunacy/logs
 
-# Create a symlink for the app directory
-RUN ln -s /app /opt/cloudlunacy/agent
+# Copy templates to volume mount
+RUN cp -r templates/* /opt/cloudlunacy/templates/
 
-# Expose ports
-EXPOSE 3006 9000
+# Set up permissions
+RUN chmod +x setup-local-dev.js
 
-# Switch to cloudlunacy user for development
-USER cloudlunacy
+# Setup development environment variables
+ENV NODE_ENV=development \
+    DEPLOY_BASE_DIR=/opt/cloudlunacy/deployments \
+    TEMPLATES_DIR=/opt/cloudlunacy/templates \
+    AGENT_API_TOKEN=dev-token \
+    SERVER_ID=dev-server-id \
+    HEALTH_PORT=8081
 
-# Start the application directly
-CMD sh -c "node health-server.js & SKIP_PERMISSION_CHECK=true nodemon agent.js" 
+EXPOSE 8081
+EXPOSE 27017
+
+# Start the agent in development mode
+CMD ["node", "src/index.js"] 

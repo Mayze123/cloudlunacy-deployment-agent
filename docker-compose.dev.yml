@@ -23,7 +23,9 @@ services:
       - ./dev-cloudlunacy:/opt/cloudlunacy
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
-      - mongodb
+      mongodb:
+        condition: service_started
+        required: false
     networks:
       - cloudlunacy-network
     extra_hosts:
@@ -36,6 +38,7 @@ services:
       retries: 3
       start_period: 10s
 
+  # MongoDB service can be enabled by adding 'mongodb' to DATABASES_ENABLED
   mongodb:
     container_name: mongodb-agent-dev
     image: mongo:latest
@@ -51,6 +54,9 @@ services:
     networks:
       - cloudlunacy-network
     restart: unless-stopped
+    profiles:
+      - mongodb
+      - default
 
 networks:
   cloudlunacy-network:

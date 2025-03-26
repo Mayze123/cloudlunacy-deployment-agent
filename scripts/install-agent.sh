@@ -7,7 +7,7 @@
 #
 # Description:
 # This script installs and configures the CloudLunacy Deployment Agent on a VPS
-# with HAProxy support for MongoDB TLS termination
+# with HAProxy support for TLS termination
 # ------------------------------------------------------------------------------
 
 set -euo pipefail
@@ -24,7 +24,6 @@ CERTS_DIR="${BASE_DIR}/certs"
 : "${NODE_PORT:=3005}"
 : "${MONGO_PORT:=27017}"
 : "${MONGO_USE_TLS:=true}"
-: "${USE_HAPROXY:=true}"
 
 # ----------------------------
 # Function Definitions
@@ -343,9 +342,6 @@ main() {
   # Fetch certificates using the JWT token
   fetch_certificates
 
-  # Install MongoDB with TLS support for HAProxy
-  install_mongo_with_tls
-
   # Configure environment with HAProxy TLS settings
   configure_env
 
@@ -354,76 +350,60 @@ main() {
   verify_installation
 
   log "Installation completed successfully with HAProxy support!"
+
+  # Show information about database management
+  echo ""
+  log "To install and manage databases:"
+  echo "  Install database:   npm run db:install -- <dbType> [options]"
+  echo "  Check status:       npm run db:status -- <dbType>"
+  echo "  Uninstall database: npm run db:uninstall -- <dbType>"
+  echo ""
+  log "Supported database types: mongodb, redis"
 }
 
 # ------------------------------------------------------------------------------
-# New Function: Install MongoDB as a Docker Container
+# Register Agent with the Front Server
 # ------------------------------------------------------------------------------
-install_mongo() {
-  log "Installing MongoDB container with security enhancements for HAProxy..."
+register_agent() {
+  log "Registering agent with front server..."
+  # Get primary IP address of the VPS
+  LOCAL_IP=$(hostname -I | awk '{print $1}')
+  log "register_agent ~ FRONT_API_URL, $FRONT_API_URL"
+  log "register_agent ~ LOCAL_IP:, $LOCAL_IP"
 
-  # Check if a container named "mongodb-agent" exists
-  if docker ps -a --format '{{.Names}}' | grep -q '^mongodb-agent$'; then
-    log "MongoDB container already exists. Removing it to re-create with proper settings..."
-    docker rm -f mongodb-agent || {
-      log_error "Failed to remove existing MongoDB container"
-      exit 1
-    }
-  fi
+  RESPONSE=$(curl -s -X POST "${FRONT_API_URL}/api/agent/register" \
+    -H "Content-Type: application/json" \
+    -H "X-Agent-IP: ${LOCAL_IP}" \
+    -d "{\"agentId\": \"${SERVER_ID}\"}")
 
-  # Create a secure MongoDB configuration directory
-  MONGO_CONFIG_DIR="/opt/cloudlunacy/mongodb"
-  mkdir -p $MONGO_CONFIG_DIR
+  if echo "$RESPONSE" | grep -q "token"; then
+    log "Agent registered successfully with front server. Response: $RESPONSE"
 
-  # Create MongoDB configuration file with security settings
-  cat > $MONGO_CONFIG_DIR/mongod.conf << EOL
-security:
-  authorization: enabled
-net:
-  bindIp: 0.0.0.0
-  port: 27017
-  maxIncomingConnections: 100
-setParameter:
-  failIndexKeyTooLong: false
-  authenticationMechanisms: SCRAM-SHA-1,SCRAM-SHA-256
-operationProfiling:
-  slowOpThresholdMs: 100
-  mode: slowOp
-EOL
+    # Extract MongoDB URL from response if available
+    MONGO_URL=$(echo "$RESPONSE" | grep -o '"mongodbUrl":"[^"]*"' | cut -d'"' -f4 || echo "")
+    if [ -n "$MONGO_URL" ]; then
+      log "MongoDB will be accessible via HAProxy at: $MONGO_URL"
+    fi
 
-  # Get the server's public IP
-  PUBLIC_IP=$(hostname -I | awk '{print $1}')
-  log "Using server IP: ${PUBLIC_IP} for MongoDB container"
-
-  # Start MongoDB container with enhanced security settings for HAProxy
-  log "Creating and starting MongoDB container with security settings optimized for HAProxy..."
-  docker run -d \
-    --name mongodb-agent \
-    -p ${MONGO_PORT}:27017 \
-    -e MONGO_INITDB_ROOT_USERNAME=admin \
-    -e MONGO_INITDB_ROOT_PASSWORD=adminpassword \
-    mongo:latest \
-    --auth || {
-    log_error "Failed to start MongoDB container"
-    exit 1
-  }
-
-  # Wait for MongoDB to start up
-  log "Waiting for MongoDB to start up..."
-  sleep 5
-
-  # Verify MongoDB is running
-  if docker ps | grep -q "mongodb-agent"; then
-    log "MongoDB container is running successfully with HAProxy-compatible settings."
+    # Save the JWT to a file (separate from any static AGENT_API_TOKEN)
+    JWT_FILE="/opt/cloudlunacy/.agent_jwt.json"
+    echo "$RESPONSE" | jq . > "$JWT_FILE"
+    chmod 600 "$JWT_FILE"
+    # Change ownership to the cloudlunacy user
+    chown $USERNAME:$USERNAME "$JWT_FILE"
+    log "JWT file permissions updated for $USERNAME user"
   else
-    log_error "MongoDB container failed to start properly."
-    docker logs mongodb-agent
+    log "Agent registration failed with front server. Response: $RESPONSE"
+    log_error "Agent registration failed with front server. Response: $RESPONSE"
     exit 1
   fi
 }
 
+# ------------------------------------------------------------------------------
+# Fetch TLS Certificates
+# ------------------------------------------------------------------------------
 fetch_certificates() {
-  log "Fetching TLS certificates from HAProxy front server..."
+  log "Fetching TLS certificates from front server..."
 
   # Create certificates directory
   mkdir -p "${CERTS_DIR}"
@@ -442,27 +422,27 @@ fetch_certificates() {
     return 1
   fi
 
-  # Fetch CA certificate with HAProxy endpoint
-  log "Fetching CA certificate from HAProxy endpoint..."
+  # Fetch CA certificate
+  log "Fetching CA certificate..."
   CA_CERT_RESPONSE=$(curl -s "${FRONT_API_URL}/api/certificates/mongodb-ca")
   if [ $? -ne 0 ] || [ -z "$CA_CERT_RESPONSE" ]; then
-    log_error "Failed to fetch CA certificate from HAProxy endpoint"
+    log_error "Failed to fetch CA certificate"
     return 1
   fi
 
   # Save CA certificate
   echo "$CA_CERT_RESPONSE" > "${CERTS_DIR}/ca.crt"
 
-  # Fetch agent certificates through HAProxy
-  log "Fetching agent certificates through HAProxy..."
+  # Fetch agent certificates
+  log "Fetching agent certificates..."
   CERT_RESPONSE=$(curl -s -H "Authorization: Bearer $TOKEN" "${FRONT_API_URL}/api/certificates/agent/${SERVER_ID}")
 
   # Debug output
-  log "Certificate response from HAProxy: $(echo "$CERT_RESPONSE" | grep -v serverKey | grep -v serverCert)"
+  log "Certificate response: $(echo "$CERT_RESPONSE" | grep -v serverKey | grep -v serverCert)"
 
   # Check if response is valid JSON
   if ! echo "$CERT_RESPONSE" | jq . > /dev/null 2>&1; then
-    log_error "Invalid JSON response from HAProxy certificate endpoint"
+    log_error "Invalid JSON response from certificate endpoint"
     log_error "Raw response: $CERT_RESPONSE"
     return 1
   fi
@@ -471,7 +451,7 @@ fetch_certificates() {
   SUCCESS=$(echo "$CERT_RESPONSE" | jq -r '.success')
   if [ "$SUCCESS" != "true" ]; then
     ERROR_MSG=$(echo "$CERT_RESPONSE" | jq -r '.message')
-    log_error "Certificate request failed through HAProxy: $ERROR_MSG"
+    log_error "Certificate request failed: $ERROR_MSG"
     return 1
   fi
 
@@ -480,7 +460,7 @@ fetch_certificates() {
   SERVER_CERT=$(echo "$CERT_RESPONSE" | jq -r '.certificates.serverCert')
 
   if [ "$SERVER_KEY" = "null" ] || [ "$SERVER_CERT" = "null" ] || [ -z "$SERVER_KEY" ] || [ -z "$SERVER_CERT" ]; then
-    log_error "Invalid certificate data in HAProxy response"
+    log_error "Invalid certificate data in response"
     return 1
   fi
 
@@ -488,7 +468,7 @@ fetch_certificates() {
   echo "$SERVER_KEY" > "${CERTS_DIR}/server.key"
   echo "$SERVER_CERT" > "${CERTS_DIR}/server.crt"
 
-  # Create combined PEM file for MongoDB (compatible with HAProxy TLS termination)
+  # Create combined PEM file for services that need it
   cat "${CERTS_DIR}/server.key" "${CERTS_DIR}/server.crt" > "${CERTS_DIR}/server.pem"
 
   # Set proper permissions
@@ -498,145 +478,16 @@ fetch_certificates() {
   chmod 644 "${CERTS_DIR}/ca.crt"
 
   # Verify certificates
-  log "Verifying certificates for HAProxy compatibility..."
+  log "Verifying certificates..."
   if openssl x509 -in "${CERTS_DIR}/server.crt" -noout -text > /dev/null 2>&1; then
-    log "Server certificate is valid for use with HAProxy"
+    log "Server certificate is valid"
   else
-    log_error "Server certificate verification failed for HAProxy compatibility"
+    log_error "Server certificate verification failed"
     return 1
   fi
 
-  log "Certificates fetched and saved successfully for HAProxy integration"
+  log "Certificates fetched and saved successfully"
   return 0
-}
-
-install_mongo_with_tls() {
-  log "Installing MongoDB container with TLS support for HAProxy..."
-
-  # Create a secure MongoDB configuration directory
-  MONGO_CONFIG_DIR="/opt/cloudlunacy/mongodb"
-  mkdir -p $MONGO_CONFIG_DIR
-  mkdir -p $MONGO_CONFIG_DIR/certs
-
-  # Copy certificates to MongoDB config directory
-  cp $CERTS_DIR/ca.crt $MONGO_CONFIG_DIR/certs/
-  cp $CERTS_DIR/server.key $MONGO_CONFIG_DIR/certs/
-  cp $CERTS_DIR/server.crt $MONGO_CONFIG_DIR/certs/
-
-  # Create combined PEM file for MongoDB
-  cat $CERTS_DIR/server.key $CERTS_DIR/server.crt > $MONGO_CONFIG_DIR/certs/server.pem
-
-  # Set proper permissions on the PEM file and adjust ownership.
-  chmod 600 $MONGO_CONFIG_DIR/certs/server.pem
-  # Change ownership to UID and GID 999 (default mongodb user in the official image)
-  chown -R 999:999 $MONGO_CONFIG_DIR/certs
-
-  # Check if a container named "mongodb-agent" exists and remove it if needed
-  if docker ps -a --format '{{.Names}}' | grep -q '^mongodb-agent$'; then
-    log "MongoDB container already exists. Removing it to re-create with HAProxy settings..."
-    docker rm -f mongodb-agent || {
-      log_error "Failed to remove existing MongoDB container"
-      exit 1
-    }
-  fi
-
-  # Get the server's public IP
-  PUBLIC_IP=$(hostname -I | awk '{print $1}')
-  log "Using server IP: ${PUBLIC_IP} for MongoDB container with HAProxy TLS termination"
-
-  # Create a mongod.conf file specifically designed to work with HAProxy TLS termination
-  cat > $MONGO_CONFIG_DIR/mongod.conf << EOL
-# MongoDB Configuration for HAProxy TLS termination
-security:
-  authorization: enabled
-net:
-  bindIp: 0.0.0.0
-  port: 27017
-  tls:
-    mode: requireTLS
-    certificateKeyFile: /etc/mongodb/certs/server.pem
-    CAFile: /etc/mongodb/certs/ca.crt
-    allowConnectionsWithoutCertificates: true
-setParameter:
-  authenticationMechanisms: SCRAM-SHA-1,SCRAM-SHA-256
-EOL
-
-  # Start MongoDB container optimized for HAProxy TLS termination
-  log "Creating and starting MongoDB container with HAProxy-compatible TLS settings..."
-  docker run -d \
-    --name mongodb-agent \
-    -p ${MONGO_PORT}:27017 \
-    -v "${MONGO_CONFIG_DIR}/certs:/etc/mongodb/certs:ro" \
-    -e MONGO_INITDB_ROOT_USERNAME=admin \
-    -e MONGO_INITDB_ROOT_PASSWORD=adminpassword \
-    mongo:latest \
-    mongod --tlsMode=requireTLS \
-    --tlsCertificateKeyFile=/etc/mongodb/certs/server.pem \
-    --tlsCAFile=/etc/mongodb/certs/ca.crt \
-    --tlsAllowConnectionsWithoutCertificates \
-    --bind_ip_all \
-    --auth || {
-    log_error "Failed to start MongoDB container with HAProxy TLS settings"
-    exit 1
-  }
-
-  # Wait for MongoDB to start up
-  log "Waiting for MongoDB to start up with HAProxy TLS configuration..."
-  sleep 10 # Increase wait time to ensure MongoDB has enough time to initialize
-
-  # Verify MongoDB is running with HAProxy compatibility
-  if docker ps | grep -q "mongodb-agent"; then
-    log "MongoDB container is running, checking TLS status for HAProxy compatibility..."
-    if docker logs mongodb-agent | grep -q "tls.*mode.*requireTLS" && docker logs mongodb-agent | grep -q "ssl.*on"; then
-      log "MongoDB is running successfully with TLS enabled and configured for HAProxy."
-    else
-      log_error "MongoDB container is running but TLS might not be properly configured for HAProxy."
-      docker logs mongodb-agent | grep -E "tls|ssl"
-      exit 1
-    fi
-  else
-    log_error "MongoDB container failed to start properly with HAProxy settings."
-    docker logs mongodb-agent
-    exit 1
-  fi
-}
-
-# ------------------------------------------------------------------------------
-# Register Agent with the Front Server (HAProxy-aware)
-# ------------------------------------------------------------------------------
-register_agent() {
-  log "Registering agent with HAProxy front server..."
-  # Get primary IP address of the VPS
-  LOCAL_IP=$(hostname -I | awk '{print $1}')
-  log "register_agent ~ FRONT_API_URL, $FRONT_API_URL"
-  log "register_agent ~ LOCAL_IP:, $LOCAL_IP"
-
-  RESPONSE=$(curl -s -X POST "${FRONT_API_URL}/api/agent/register" \
-    -H "Content-Type: application/json" \
-    -H "X-Agent-IP: ${LOCAL_IP}" \
-    -d "{\"agentId\": \"${SERVER_ID}\", \"useHaproxy\": ${USE_HAPROXY}}")
-
-  if echo "$RESPONSE" | grep -q "token"; then
-    log "Agent registered successfully with HAProxy front server. Response: $RESPONSE"
-
-    # Extract MongoDB URL from response if available
-    MONGO_URL=$(echo "$RESPONSE" | grep -o '"mongodbUrl":"[^"]*"' | cut -d'"' -f4 || echo "")
-    if [ -n "$MONGO_URL" ]; then
-      log "MongoDB will be accessible via HAProxy at: $MONGO_URL"
-    fi
-
-    # Save the JWT to a file (separate from any static AGENT_API_TOKEN)
-    JWT_FILE="/opt/cloudlunacy/.agent_jwt.json"
-    echo "$RESPONSE" | jq . > "$JWT_FILE"
-    chmod 600 "$JWT_FILE"
-    # Change ownership to the cloudlunacy user
-    chown $USERNAME:$USERNAME "$JWT_FILE"
-    log "JWT file permissions updated for $USERNAME user"
-  else
-    log "Agent registration failed with HAProxy front server. Response: $RESPONSE"
-    log_error "Agent registration failed with HAProxy front server. Response: $RESPONSE"
-    exit 1
-  fi
 }
 
 configure_env() {
@@ -655,19 +506,24 @@ AGENT_API_TOKEN="${AGENT_TOKEN}"
 SERVER_ID="${SERVER_ID}"
 NODE_ENV=production
 JWT_SECRET=${JWT_SECRET}
-MONGO_MANAGER_USERNAME=admin
-MONGO_MANAGER_PASSWORD=adminpassword
-MONGO_DOMAIN=mongodb.cloudlunacy.uk
 APP_DOMAIN=apps.cloudlunacy.uk
-MONGO_USE_TLS=true
-MONGO_CERT_PATH=${CERTS_DIR}/server.crt
-MONGO_KEY_PATH=${CERTS_DIR}/server.key
-MONGO_CA_PATH=${CERTS_DIR}/ca.crt
-USE_HAPROXY=${USE_HAPROXY}
-DATABASES_ENABLED=mongodb
-# Redis configuration - uncomment if using Redis
-# REDIS_PORT=6379
+
+# Database configurations will be added when databases are installed
+# Use 'npm run db:install -- <dbType>' to install and configure databases
+# The presence of database configuration determines if a database is used
+
+# Redis configuration example (added when redis is installed)
+# REDIS_PORT=6379 
 # REDIS_USE_TLS=true
+
+# MongoDB configuration example (added when mongodb is installed)
+# MONGO_MANAGER_USERNAME=admin
+# MONGO_MANAGER_PASSWORD=adminpassword
+# MONGO_DOMAIN=mongodb.cloudlunacy.uk
+# MONGO_USE_TLS=true
+# MONGO_CERT_PATH=${CERTS_DIR}/server.crt
+# MONGO_KEY_PATH=${CERTS_DIR}/server.key
+# MONGO_CA_PATH=${CERTS_DIR}/ca.crt
 EOL
 
   chown "$USERNAME:$USERNAME" "$ENV_FILE"

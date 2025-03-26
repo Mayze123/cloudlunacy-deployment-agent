@@ -56,6 +56,39 @@ async function setupLocalDev() {
     }
   }
 
+  // Check if MongoDB should be enabled based on the presence of MongoDB configuration
+  const enableMongoDB = process.env.MONGO_HOST || process.env.MONGO_PORT;
+
+  // MongoDB certificates generation
+  if (enableMongoDB) {
+    console.log(
+      "MongoDB configuration detected. Setting up MongoDB certificates...",
+    );
+    try {
+      // Check if the prepare-mongo-certs.js script exists
+      if (
+        fs.existsSync(path.join(__dirname, "scripts", "prepare-mongo-certs.js"))
+      ) {
+        execSync("npm run dev:prepare-mongo", { stdio: "inherit" });
+      } else {
+        console.log("MongoDB certificate preparation script not found.");
+
+        // Check if we need to create the certificates directory
+        const certsDir = path.join(__dirname, "dev-cloudlunacy", "certs");
+        if (!fs.existsSync(certsDir)) {
+          fs.mkdirSync(certsDir, { recursive: true });
+          console.log("Created certificates directory:", certsDir);
+        }
+      }
+    } catch (error) {
+      console.error("Failed to prepare MongoDB certificates:", error.message);
+    }
+  } else {
+    console.log(
+      "No MongoDB configuration detected. Skipping MongoDB certificates setup.",
+    );
+  }
+
   console.log("Local development environment setup complete!");
   console.log('Run "npm run dev" to start the development environment.');
 }

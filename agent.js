@@ -22,6 +22,7 @@ const ZeroDowntimeDeployer = require("./modules/zeroDowntimeDeployer");
 const fs = require("fs");
 const os = require("os");
 const { execSync } = require("child_process");
+const databaseManager = require("./utils/databaseManager");
 
 // Load environment variables
 dotenv.config();
@@ -229,6 +230,9 @@ function handleMessage(message) {
     case "create_database":
       createDatabase(message.payload);
       break;
+    case "manage_database":
+      handleDatabaseManagement(message.payload);
+      break;
     case "check_repository":
       checkRepositoryAccess(message.payload, ws);
       break;
@@ -283,6 +287,106 @@ async function createDatabase(payload) {
       databaseId,
       status: "failed",
       message: error.message || "Database creation failed.",
+    });
+  }
+}
+
+/**
+ * Handle database management commands (install, uninstall, status).
+ * @param {Object} payload Command payload.
+ */
+async function handleDatabaseManagement(payload) {
+  const { command, dbType, databaseId, options } = payload;
+
+  if (!command || !dbType) {
+    sendWebSocketMessage("database_management_failed", {
+      databaseId: databaseId || "unknown",
+      status: "failed",
+      message: "Missing required parameters: command and dbType",
+    });
+    return;
+  }
+
+  logger.info(`Executing ${command} command for ${dbType} database`);
+
+  try {
+    // Handle the database operation
+    const result = await databaseManager.handleDatabaseOperation(
+      command,
+      dbType,
+      options || {},
+    );
+
+    // If operation was successful and it was an install command, register with front server
+    if (result.success && command === "install") {
+      try {
+        // Get agent ID from JWT file
+        let agentId = SERVER_ID;
+        try {
+          const jwtData = JSON.parse(fs.readFileSync(jwtFile, "utf8"));
+          if (jwtData && jwtData.agentId) {
+            agentId = jwtData.agentId;
+          }
+        } catch (err) {
+          logger.warn(`Could not read agentId from JWT file: ${err.message}`);
+        }
+
+        // Get the IP address for database registration
+        const targetIp = await getPublicIp();
+        const targetPort =
+          options?.port ||
+          databaseManager.supportedDatabases[dbType].defaultPort;
+
+        // Register with front server
+        const registrationResult =
+          await databaseManager.registerWithFrontServer(
+            dbType,
+            agentId,
+            targetIp,
+            targetPort,
+            options || {},
+            AGENT_JWT,
+          );
+
+        if (registrationResult.success) {
+          result.registration = registrationResult;
+        } else {
+          logger.warn(
+            `Database registered locally but failed to register with front server: ${registrationResult.message}`,
+          );
+          result.registrationWarning = registrationResult.message;
+        }
+      } catch (regError) {
+        logger.warn(
+          `Error during database registration with front server: ${regError.message}`,
+        );
+        result.registrationWarning = regError.message;
+      }
+    }
+
+    // Send the result back to the client
+    sendWebSocketMessage(
+      result.success
+        ? "database_management_succeeded"
+        : "database_management_failed",
+      {
+        databaseId: databaseId || dbType,
+        status: result.success ? "success" : "failed",
+        command,
+        dbType,
+        message: result.message,
+        details: result,
+      },
+    );
+  } catch (error) {
+    logger.error(`Database management failed: ${error.message}`);
+    sendWebSocketMessage("database_management_failed", {
+      databaseId: databaseId || dbType,
+      status: "failed",
+      command,
+      dbType,
+      message: `Database management failed: ${error.message}`,
+      error: error.message,
     });
   }
 }
@@ -368,14 +472,139 @@ function getDiskUsage() {
  */
 async function init() {
   try {
-    // MongoDB initialization: No TLS CA verification needed on the agent side anymore.
-    if (!initializeMongoDB()) {
-      throw new Error("MongoDB initialization failed");
-    }
+    // Check if MongoDB is configured by looking for MongoDB-specific environment variables
+    const isMongoConfigured =
+      process.env.MONGO_HOST ||
+      process.env.MONGO_PORT ||
+      process.env.MONGO_MANAGER_USERNAME;
 
-    // Initialize MongoDB manager (if used for administrative tasks).
-    const mongoManager = require("./utils/mongoManager");
-    await mongoManager.initialize();
+    if (isMongoConfigured) {
+      // MongoDB initialization: No TLS CA verification needed on the agent side anymore.
+      if (!initializeMongoDB()) {
+        throw new Error("MongoDB initialization failed");
+      }
+
+      // Initialize MongoDB manager (if used for administrative tasks).
+      const mongoManager = require("./utils/mongoManager");
+      await mongoManager.initialize();
+
+      // Register MongoDB with front server if not already registered
+      try {
+        // Skip in development mode
+        if (isDevelopment) {
+          logger.info("Development mode: Skipping MongoDB registration");
+        }
+        // Only attempt this if we have the necessary environment variables
+        else if (FRONT_API_URL && AGENT_JWT) {
+          logger.info(
+            "Registering MongoDB with HAProxy front server for TLS termination...",
+          );
+
+          // Get the local IP address for MongoDB registration
+          const LOCAL_IP = await getPublicIp();
+
+          // Get agent ID from JWT file
+          let agentId = SERVER_ID;
+          try {
+            const jwtData = JSON.parse(fs.readFileSync(jwtFile, "utf8"));
+            if (jwtData && jwtData.agentId) {
+              agentId = jwtData.agentId;
+            }
+          } catch (err) {
+            logger.warn(`Could not read agentId from JWT file: ${err.message}`);
+          }
+
+          logger.info(
+            `Using agent ID: ${agentId} and IP: ${LOCAL_IP} for MongoDB registration`,
+          );
+
+          // Use the MongoDB-specific subdomain registration endpoint
+          try {
+            const response = await axios.post(
+              `${FRONT_API_URL}/api/databases/mongodb/register`,
+              {
+                agentId,
+                targetIp: LOCAL_IP,
+                targetPort: process.env.MONGO_PORT || 27017,
+                options: {
+                  useTls: process.env.MONGO_USE_TLS !== "false",
+                },
+              },
+              {
+                headers: {
+                  Authorization: `Bearer ${AGENT_JWT}`,
+                  "Content-Type": "application/json",
+                },
+              },
+            );
+
+            if (response.data && response.data.success) {
+              logger.info(
+                "MongoDB successfully registered with HAProxy front server for TLS termination",
+                {
+                  domain: response.data.domain || response.data.details?.domain,
+                  connectionString: response.data.connectionString,
+                },
+              );
+
+              // Test the connection to confirm it's working
+              try {
+                const testConnection = await mongoManager.testConnection();
+                if (testConnection.success) {
+                  logger.info(
+                    "MongoDB connection test successful after registration",
+                  );
+                } else {
+                  logger.warn(
+                    `MongoDB connection test failed: ${testConnection.message}`,
+                  );
+                }
+              } catch (testErr) {
+                logger.warn(
+                  `Error testing MongoDB connection: ${testErr.message}`,
+                );
+              }
+            } else {
+              logger.warn("Unexpected response when registering MongoDB", {
+                response: response.data,
+              });
+            }
+          } catch (err) {
+            logger.error(
+              "Error registering MongoDB with HAProxy front server:",
+              err.message,
+            );
+
+            if (err.response) {
+              logger.error(
+                `Response status: ${err.response.status}, data:`,
+                err.response.data,
+              );
+            }
+
+            logger.info(
+              "Continuing agent initialization despite MongoDB registration issue",
+            );
+          }
+        } else {
+          logger.warn(
+            "Missing FRONT_API_URL or AGENT_JWT, cannot register MongoDB for TLS termination",
+          );
+        }
+      } catch (mongoRegErr) {
+        logger.error(
+          "Error registering MongoDB with HAProxy front server:",
+          mongoRegErr.message,
+        );
+        logger.info(
+          "Continuing agent initialization despite MongoDB registration issue",
+        );
+      }
+    } else {
+      logger.info(
+        "MongoDB not configured in environment variables. Skipping MongoDB initialization and registration.",
+      );
+    }
 
     // Check deployment permissions.
     const permissionsOk = await ensureDeploymentPermissions();
@@ -385,119 +614,6 @@ async function init() {
 
     // Connect to the backend.
     await authenticateAndConnect();
-
-    // Register MongoDB with front server if not already registered
-    try {
-      // Skip in development mode
-      if (isDevelopment) {
-        logger.info("Development mode: Skipping MongoDB registration");
-      }
-      // Only attempt this if we have the necessary environment variables
-      else if (FRONT_API_URL && AGENT_JWT) {
-        logger.info(
-          "Registering MongoDB with HAProxy front server for TLS termination...",
-        );
-
-        // Get the local IP address for MongoDB registration
-        const LOCAL_IP = await getPublicIp();
-
-        // Get agent ID from JWT file
-        let agentId = SERVER_ID;
-        try {
-          const jwtData = JSON.parse(fs.readFileSync(jwtFile, "utf8"));
-          if (jwtData && jwtData.agentId) {
-            agentId = jwtData.agentId;
-          }
-        } catch (err) {
-          logger.warn(`Could not read agentId from JWT file: ${err.message}`);
-        }
-
-        logger.info(
-          `Using agent ID: ${agentId} and IP: ${LOCAL_IP} for MongoDB registration`,
-        );
-
-        // Use the MongoDB-specific subdomain registration endpoint
-        try {
-          const response = await axios.post(
-            `${FRONT_API_URL}/api/databases/mongodb/register`,
-            {
-              agentId,
-              targetIp: LOCAL_IP,
-              targetPort: process.env.MONGO_PORT || 27017,
-              options: {
-                useTls: process.env.MONGO_USE_TLS !== "false",
-              },
-            },
-            {
-              headers: {
-                Authorization: `Bearer ${AGENT_JWT}`,
-                "Content-Type": "application/json",
-              },
-            },
-          );
-
-          if (response.data && response.data.success) {
-            logger.info(
-              "MongoDB successfully registered with HAProxy front server for TLS termination",
-              {
-                domain: response.data.domain || response.data.details?.domain,
-                connectionString: response.data.connectionString,
-              },
-            );
-
-            // Test the connection to confirm it's working
-            try {
-              const testConnection = await mongoManager.testConnection();
-              if (testConnection.success) {
-                logger.info(
-                  "MongoDB connection test successful after registration",
-                );
-              } else {
-                logger.warn(
-                  `MongoDB connection test failed: ${testConnection.message}`,
-                );
-              }
-            } catch (testErr) {
-              logger.warn(
-                `Error testing MongoDB connection: ${testErr.message}`,
-              );
-            }
-          } else {
-            logger.warn("Unexpected response when registering MongoDB", {
-              response: response.data,
-            });
-          }
-        } catch (err) {
-          logger.error(
-            "Error registering MongoDB with HAProxy front server:",
-            err.message,
-          );
-
-          if (err.response) {
-            logger.error(
-              `Response status: ${err.response.status}, data:`,
-              err.response.data,
-            );
-          }
-
-          logger.info(
-            "Continuing agent initialization despite MongoDB registration issue",
-          );
-        }
-      } else {
-        logger.warn(
-          "Missing FRONT_API_URL or AGENT_JWT, cannot register MongoDB for TLS termination",
-        );
-      }
-    } catch (mongoRegErr) {
-      logger.error(
-        "Error registering MongoDB with HAProxy front server:",
-        mongoRegErr.message,
-      );
-      logger.info(
-        "Continuing agent initialization despite MongoDB registration issue",
-      );
-    }
 
     // Start collecting metrics
     setInterval(collectMetrics, METRICS_INTERVAL);
