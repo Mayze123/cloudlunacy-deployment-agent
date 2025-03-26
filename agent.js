@@ -223,6 +223,7 @@ function handleAuthenticationError(error) {
  * @param {Object} message The message object.
  */
 function handleMessage(message) {
+  logger.warn("Unknown message type:", message);
   switch (message.type) {
     case "deploy_app":
       handleDeployApp(message);
