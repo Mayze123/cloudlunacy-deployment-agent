@@ -309,7 +309,9 @@ class DatabaseManager {
                     "Permission denied when creating MongoDB directories",
                   error: err.message,
                   help:
-                    "Run the following commands as root/sudo to create required directories:\n" +
+                    "Run our setup script with sudo to fix permission issues:\n" +
+                    "sudo node setup-database-dirs.js\n\n" +
+                    "Or manually run these commands:\n" +
                     `sudo mkdir -p ${mountPath}/data/db\n` +
                     `sudo mkdir -p ${certsPath}\n` +
                     `sudo chown -R $USER:$USER /opt/cloudlunacy\n` +
@@ -647,7 +649,9 @@ services:
                   message: "Permission denied when creating Redis directories",
                   error: err.message,
                   help:
-                    "Run the following commands as root/sudo to create required directories:\n" +
+                    "Run our setup script with sudo to fix permission issues:\n" +
+                    "sudo node setup-database-dirs.js\n\n" +
+                    "Or manually run these commands:\n" +
                     `sudo mkdir -p ${mountPath}/data\n` +
                     `sudo chown -R $USER:$USER /opt/cloudlunacy\n` +
                     "Then try installing Redis again.",

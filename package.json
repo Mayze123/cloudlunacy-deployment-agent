@@ -5,6 +5,7 @@
   "main": "src/index.js",
   "scripts": {
     "setup": "node setup-local-dev.js",
+    "setup:db-dirs": "sudo node setup-database-dirs.js",
     "cleanup": "node scripts/cleanup.js",
     "start": "node src/index.js",
     "dev": "npm run cleanup && docker-compose -f docker-compose.dev.yml up",
