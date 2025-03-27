@@ -641,7 +641,7 @@ APP_DOMAIN=apps.cloudlunacy.uk
 
 # MongoDB configuration example (added when mongodb is installed)
 MONGO_MANAGER_USERNAME=admin
-MONGO_MANAGER_PASSWORD=adminpassword
+MONGO_MANAGER_PASSWORD=adminPassword
 MONGO_DOMAIN=mongodb.cloudlunacy.uk
 MONGO_USE_TLS=true
 MONGO_CERT_PATH=${CERTS_DIR}/server.crt

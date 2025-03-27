@@ -156,7 +156,7 @@ class DatabaseManager {
 MONGO_HOST=localhost
 MONGO_PORT=${config.port || 27017}
 MONGO_MANAGER_USERNAME=${config.username || "admin"}
-MONGO_MANAGER_PASSWORD=${config.password || "adminpassword"}
+MONGO_MANAGER_PASSWORD=${config.password || "adminPassword"}
 MONGO_USE_TLS=${config.useTls}
 `;
 
