@@ -475,9 +475,65 @@ services:
 
       // Set up certificates if TLS is enabled
       if (config.useTls) {
-        // Run certificate generation script
-        await executeCommand("npm", ["run", "dev:prepare-mongo"]);
-        logger.info("Generated MongoDB certificates");
+        const isDevelopment = process.env.NODE_ENV === "development";
+
+        if (isDevelopment) {
+          try {
+            // Run certificate generation script only in development mode
+            await executeCommand("npm", ["run", "dev:prepare-mongo"]);
+            logger.info("Generated MongoDB certificates");
+          } catch (certErr) {
+            logger.error(`Certificate preparation failed: ${certErr.message}`);
+            return {
+              success: false,
+              message: `Failed to prepare MongoDB certificates: ${certErr.message}`,
+              error: certErr.message,
+              help: "Run 'npm run dev:setup' first to fetch the certificates from the front server.",
+            };
+          }
+        } else {
+          // In production, certificates should already be available from agent installation
+          if (
+            !fs.existsSync(path.join(certsPath, "ca.crt")) ||
+            !fs.existsSync(path.join(certsPath, "server.key")) ||
+            !fs.existsSync(path.join(certsPath, "server.crt"))
+          ) {
+            logger.error(
+              "TLS certificates not found in production environment",
+            );
+            return {
+              success: false,
+              message: "TLS certificates not found in production environment",
+              error: "Missing certificates",
+              help: "Certificates should be in /opt/cloudlunacy/certs from agent installation",
+            };
+          }
+
+          // Ensure server.pem exists (combined key and cert)
+          if (!fs.existsSync(path.join(certsPath, "server.pem"))) {
+            try {
+              logger.info("Creating server.pem file in production environment");
+              const key = fs.readFileSync(path.join(certsPath, "server.key"));
+              const cert = fs.readFileSync(path.join(certsPath, "server.crt"));
+              fs.writeFileSync(
+                path.join(certsPath, "server.pem"),
+                Buffer.concat([key, cert]),
+              );
+              // Set proper permissions
+              execSync(`chmod 600 ${path.join(certsPath, "server.pem")}`);
+              logger.info("Created server.pem file successfully");
+            } catch (pemErr) {
+              logger.error(
+                `Failed to create server.pem file: ${pemErr.message}`,
+              );
+              return {
+                success: false,
+                message: `Failed to create server.pem file: ${pemErr.message}`,
+                error: pemErr.message,
+              };
+            }
+          }
+        }
       }
 
       // Start MongoDB container
