@@ -52,9 +52,10 @@ class MongoConnection {
     const host = `${this.serverId}.${this.mongoDomain}`;
 
     // Add proper TLS parameters for HAProxy-proxied connections
+    // Updated TLS parameters to fix connection issues
     const tlsParams = this.useTls
-      ? "?tls=true&tlsAllowInvalidCertificates=true&directConnection=true"
-      : "?directConnection=true";
+      ? "?tls=true&tlsAllowInvalidCertificates=true&retryWrites=false"
+      : "";
 
     const uri = `mongodb://${credentials}${host}:${this.port}/${this.database}${tlsParams}`;
     logger.debug(`Generated MongoDB URI: ${uri.replace(/:[^:]*@/, ":***@")}`);
@@ -80,6 +81,7 @@ class MongoConnection {
     return {
       tlsAllowInvalidCertificates: true,
       tlsAllowInvalidHostnames: true,
+      directConnection: false, // Change to false since we're going through HAProxy
     };
   }
 
@@ -94,9 +96,9 @@ class MongoConnection {
 
     const uri = this.getUri();
     const options = {
-      serverSelectionTimeoutMS: 5000,
-      socketTimeoutMS: 10000, // Increase socket timeout
-      connectTimeoutMS: 10000, // Increase connect timeout
+      serverSelectionTimeoutMS: 10000, // Increased from 5000
+      socketTimeoutMS: 15000, // Increased from 10000
+      connectTimeoutMS: 15000, // Increased from 10000
       maxPoolSize: 5, // Limit pool size for better management
       retryWrites: false, // Disable retry writes for initial connection
       ...this.getTlsOptions(),
@@ -114,7 +116,7 @@ class MongoConnection {
       const { execSync } = require("child_process");
       const hostname = `${this.serverId}.${this.mongoDomain}`;
       const dnsOutput = execSync(
-        `dig +short ${hostname} || echo "DNS resolution failed"`,
+        `dig +short ${hostname} || host ${hostname} || echo "DNS resolution failed"`,
       )
         .toString()
         .trim();
@@ -143,6 +145,17 @@ class MongoConnection {
     } catch (error) {
       logger.error(`Failed to connect to MongoDB: ${error.message}`);
 
+      // Close failed connection to prevent hanging resources
+      if (this.client) {
+        try {
+          await this.client.close(true);
+          this.client = null;
+          this.db = null;
+        } catch (closeErr) {
+          logger.warn(`Error closing MongoDB client: ${closeErr.message}`);
+        }
+      }
+
       // Provide more detailed error information for troubleshooting
       if (error.message.includes("ECONNREFUSED")) {
         logger.error(
@@ -168,12 +181,13 @@ class MongoConnection {
           logger.info("Attempting fallback connection without TLS...");
           try {
             // Set a flag for this connection attempt only
+            const originalTlsSetting = this.useTls;
             this.useTls = false;
             const noTlsUri = this.getUri();
             const noTlsOptions = {
-              serverSelectionTimeoutMS: 5000,
-              socketTimeoutMS: 10000,
-              connectTimeoutMS: 10000,
+              serverSelectionTimeoutMS: 10000,
+              socketTimeoutMS: 15000,
+              connectTimeoutMS: 15000,
             };
 
             const tempClient = new MongoClient(noTlsUri, noTlsOptions);
@@ -191,7 +205,7 @@ class MongoConnection {
             );
 
             // Reset the flag after the attempt
-            this.useTls = true;
+            this.useTls = originalTlsSetting;
           } catch (fallbackErr) {
             logger.error(
               `Fallback connection also failed: ${fallbackErr.message}`,
@@ -203,6 +217,23 @@ class MongoConnection {
       }
 
       throw error;
+    }
+  }
+
+  /**
+   * Disconnect from MongoDB
+   */
+  async disconnect() {
+    if (this.client) {
+      try {
+        await this.client.close();
+        logger.info("MongoDB connection closed successfully");
+      } catch (error) {
+        logger.error(`Error closing MongoDB connection: ${error.message}`);
+      } finally {
+        this.client = null;
+        this.db = null;
+      }
     }
   }
 
