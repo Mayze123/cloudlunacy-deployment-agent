@@ -116,7 +116,8 @@ const initializeMongoDB = async () => {
     }
 
     // Initialize MongoDB connection manager
-    const initialized = await databaseManager.initialize();
+    const initialized =
+      await databaseManager.supportedDatabases.mongodb.manager.initialize();
 
     if (!initialized) {
       logger.error("Failed to initialize MongoDB connection manager");
@@ -124,7 +125,8 @@ const initializeMongoDB = async () => {
     }
 
     // Test the connection to verify it's working
-    const connectionTest = await databaseManager.testConnection();
+    const connectionTest =
+      await databaseManager.supportedDatabases.mongodb.manager.testConnection();
 
     if (!connectionTest.success) {
       logger.error(`MongoDB connection test failed: ${connectionTest.message}`);
@@ -386,6 +388,9 @@ async function handleDatabaseManagement(payload) {
 
     // If operation was successful and it was an install command, register with front server
     if (result.success && command === "install") {
+      logger.info("Registering with front server...");
+      logger.info(databaseManager.supportedDatabases[dbType]);
+      logger.info(command);
       try {
         // Get agent ID from JWT file
         let agentId = SERVER_ID;
