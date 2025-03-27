@@ -369,70 +369,8 @@ ${config.authEnabled && config.password ? `REDIS_PASSWORD=${config.password}` : 
         const checkDirAccess = (dir) => {
           try {
             if (!fs.existsSync(dir)) {
-              // Try to create directory if it doesn't exist
-              try {
-                logger.info(`Creating directory: ${dir}`);
-                fs.mkdirSync(dir, { recursive: true, mode: 0o755 });
-
-                // Check if the directory was created and is writable
-                if (!fs.existsSync(dir)) {
-                  return { exists: false, writable: false };
-                }
-
-                // Check if we can write to the directory
-                const testFile = path.join(
-                  dir,
-                  `.write-test-${Date.now()}.tmp`,
-                );
-                fs.writeFileSync(testFile, "test");
-                fs.unlinkSync(testFile);
-                return { exists: true, writable: true };
-              } catch (createError) {
-                // If mkdir fails due to permission issues, try using sudo or the setup-database-dirs.js script
-                logger.error(
-                  `Failed to create directory ${dir}: ${createError.message}`,
-                );
-
-                // Attempt to create directory with elevated permissions
-                try {
-                  logger.info(
-                    `Attempting to create directory with elevated permissions: ${dir}`,
-                  );
-                  // First try using the setup-database-dirs.js script which should have correct permissions
-                  execSync(
-                    `node /opt/cloudlunacy/setup-database-dirs.js --dir="${dir}"`,
-                    { stdio: "inherit" },
-                  );
-
-                  // Check if the directory now exists
-                  if (fs.existsSync(dir)) {
-                    // Check if we can write to the directory
-                    try {
-                      const testFile = path.join(
-                        dir,
-                        `.write-test-${Date.now()}.tmp`,
-                      );
-                      fs.writeFileSync(testFile, "test");
-                      fs.unlinkSync(testFile);
-                      logger.info(
-                        `Successfully created and verified directory: ${dir}`,
-                      );
-                      return { exists: true, writable: true };
-                    } catch (writeError) {
-                      logger.warn(
-                        `Directory exists but is not writable: ${dir}`,
-                      );
-                      return { exists: true, writable: false };
-                    }
-                  }
-                  return { exists: fs.existsSync(dir), writable: false };
-                } catch (elevatedError) {
-                  logger.error(
-                    `Failed to create directory with elevated permissions: ${elevatedError.message}`,
-                  );
-                  return { exists: fs.existsSync(dir), writable: false };
-                }
-              }
+              // Directory doesn't exist - don't try to create it
+              return { exists: false, writable: false };
             }
 
             // Check if we can write to the directory
@@ -486,28 +424,14 @@ ${config.authEnabled && config.password ? `REDIS_PASSWORD=${config.password}` : 
 
           logger.error(errorMsg);
 
-          // Get current user and group info
-          let userInfo = "cloudlunacy:cloudlunacy";
-          try {
-            const userId = process.getuid?.() || "cloudlunacy";
-            const groupId = process.getgid?.() || "cloudlunacy";
-            userInfo = `${userId}:${groupId}`;
-          } catch (e) {
-            logger.warn(`Could not determine user info: ${e.message}`);
-          }
-
           return {
             success: false,
             message: "Failed to install MongoDB: Directory permission issues",
             error: "Permission denied",
             details: { missingDirs, nonWritableDirs },
             help:
-              "Since the application is running as a service, please run the following commands manually before installation:\n\n" +
-              (missingDirs.length > 0
-                ? `sudo mkdir -p ${missingDirs.join(" ")}\n`
-                : "") +
-              `sudo chown -R ${userInfo} /opt/cloudlunacy\n` +
-              "sudo chmod -R 755 /opt/cloudlunacy\n\n" +
+              "Directory permission issues detected. Please run the fix-permissions script to correct this:\n\n" +
+              "sudo ./scripts/install-agent.sh --fix-permissions\n\n" +
               "Then restart the service and try again.",
           };
         }
@@ -766,70 +690,8 @@ services:
         const checkDirAccess = (dir) => {
           try {
             if (!fs.existsSync(dir)) {
-              // Try to create directory if it doesn't exist
-              try {
-                logger.info(`Creating directory: ${dir}`);
-                fs.mkdirSync(dir, { recursive: true, mode: 0o755 });
-
-                // Check if the directory was created and is writable
-                if (!fs.existsSync(dir)) {
-                  return { exists: false, writable: false };
-                }
-
-                // Check if we can write to the directory
-                const testFile = path.join(
-                  dir,
-                  `.write-test-${Date.now()}.tmp`,
-                );
-                fs.writeFileSync(testFile, "test");
-                fs.unlinkSync(testFile);
-                return { exists: true, writable: true };
-              } catch (createError) {
-                // If mkdir fails due to permission issues, try using sudo or the setup-database-dirs.js script
-                logger.error(
-                  `Failed to create directory ${dir}: ${createError.message}`,
-                );
-
-                // Attempt to create directory with elevated permissions
-                try {
-                  logger.info(
-                    `Attempting to create directory with elevated permissions: ${dir}`,
-                  );
-                  // First try using the setup-database-dirs.js script which should have correct permissions
-                  execSync(
-                    `node /opt/cloudlunacy/setup-database-dirs.js --dir="${dir}"`,
-                    { stdio: "inherit" },
-                  );
-
-                  // Check if the directory now exists
-                  if (fs.existsSync(dir)) {
-                    // Check if we can write to the directory
-                    try {
-                      const testFile = path.join(
-                        dir,
-                        `.write-test-${Date.now()}.tmp`,
-                      );
-                      fs.writeFileSync(testFile, "test");
-                      fs.unlinkSync(testFile);
-                      logger.info(
-                        `Successfully created and verified directory: ${dir}`,
-                      );
-                      return { exists: true, writable: true };
-                    } catch (writeError) {
-                      logger.warn(
-                        `Directory exists but is not writable: ${dir}`,
-                      );
-                      return { exists: true, writable: false };
-                    }
-                  }
-                  return { exists: fs.existsSync(dir), writable: false };
-                } catch (elevatedError) {
-                  logger.error(
-                    `Failed to create directory with elevated permissions: ${elevatedError.message}`,
-                  );
-                  return { exists: fs.existsSync(dir), writable: false };
-                }
-              }
+              // Directory doesn't exist - don't try to create it
+              return { exists: false, writable: false };
             }
 
             // Check if we can write to the directory
@@ -877,28 +739,14 @@ services:
 
           logger.error(errorMsg);
 
-          // Get current user and group info
-          let userInfo = "cloudlunacy:cloudlunacy";
-          try {
-            const userId = process.getuid?.() || "cloudlunacy";
-            const groupId = process.getgid?.() || "cloudlunacy";
-            userInfo = `${userId}:${groupId}`;
-          } catch (e) {
-            logger.warn(`Could not determine user info: ${e.message}`);
-          }
-
           return {
             success: false,
             message: "Failed to install Redis: Directory permission issues",
             error: "Permission denied",
             details: { missingDirs, nonWritableDirs },
             help:
-              "Since the application is running as a service, please run the following commands manually before installation:\n\n" +
-              (missingDirs.length > 0
-                ? `sudo mkdir -p ${missingDirs.join(" ")}\n`
-                : "") +
-              `sudo chown -R ${userInfo} /opt/cloudlunacy\n` +
-              "sudo chmod -R 755 /opt/cloudlunacy\n\n" +
+              "Directory permission issues detected. Please run the fix-permissions script to correct this:\n\n" +
+              "sudo ./scripts/install-agent.sh --fix-permissions\n\n" +
               "Then restart the service and try again.",
           };
         }
