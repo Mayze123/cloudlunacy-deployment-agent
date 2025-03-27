@@ -3,21 +3,21 @@ name: Create Release
 on:
   push:
     tags:
-      - 'v*'  # Triggers on tags starting with 'v'
+      - "v*" # Triggers on tags starting with 'v'
 
 jobs:
   release:
     name: Build and Release
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # Add this line to grant write permissions
+      contents: write # Grant write permissions to update releases
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # Fetch all history for all branches and tags
-          path: '.'       # Check out into the current directory
+          fetch-depth: 0 # Fetch all history for branches and tags
+          path: "." # Check out into the current directory
 
       - name: Set up Git user
         run: |
@@ -33,7 +33,7 @@ jobs:
       - name: Generate SHA256 Checksum
         run: |
           cd scripts
-          sha256sum install-agent.sh > ../install-agent.sh.sha256
+          sha256sum install-agent.sh > install-agent.sh.sha256
 
       - name: Upload Release Assets
         uses: ncipollo/release-action@v1
