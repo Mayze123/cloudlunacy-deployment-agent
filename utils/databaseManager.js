@@ -4,7 +4,6 @@ const path = require("path");
 const axios = require("axios");
 const logger = require("./logger");
 const mongoManager = require("./mongoManager");
-const config = require("../config");
 const { executeCommand } = require("./executor");
 
 /**
