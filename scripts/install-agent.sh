@@ -640,13 +640,13 @@ APP_DOMAIN=apps.cloudlunacy.uk
 # REDIS_USE_TLS=true
 
 # MongoDB configuration example (added when mongodb is installed)
-MONGO_MANAGER_USERNAME=admin
-MONGO_MANAGER_PASSWORD=adminPassword
-MONGO_DOMAIN=mongodb.cloudlunacy.uk
-MONGO_USE_TLS=true
-MONGO_CERT_PATH=${CERTS_DIR}/server.crt
-MONGO_KEY_PATH=${CERTS_DIR}/server.key
-MONGO_CA_PATH=${CERTS_DIR}/ca.crt
+# MONGO_MANAGER_USERNAME=admin
+# MONGO_MANAGER_PASSWORD=adminPassword
+# MONGO_DOMAIN=mongodb.cloudlunacy.uk
+# MONGO_USE_TLS=true
+# MONGO_CERT_PATH=${CERTS_DIR}/server.crt
+# MONGO_KEY_PATH=${CERTS_DIR}/server.key
+# MONGO_CA_PATH=${CERTS_DIR}/ca.crt
 EOL
 
   chown "$USERNAME:$USERNAME" "$ENV_FILE"
