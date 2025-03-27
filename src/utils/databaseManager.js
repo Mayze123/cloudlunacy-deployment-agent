@@ -12,6 +12,7 @@ const { exec, execSync } = require("child_process");
 const config = require("../config");
 const axios = require("axios");
 const mongoManager = require("../../utils/mongoManager");
+const { executeCommand } = require("../../utils/executor");
 
 class DatabaseManager {
   constructor() {
@@ -305,17 +306,23 @@ class DatabaseManager {
                   `Permission denied, attempting to create directory with sudo: ${dir}`,
                 );
                 try {
-                  // Execute sudo mkdir command
-                  execSync(`sudo mkdir -p ${dir}`);
+                  // Use executeCommand with sudo instead of execSync
+                  await executeCommand("sudo", ["mkdir", "-p", dir]);
 
-                  // Set ownership to current user
-                  const currentUser = execSync("whoami").toString().trim();
-                  execSync(
-                    `sudo chown -R ${currentUser}:${currentUser} ${dir}`,
-                  );
+                  // Get current user
+                  const { stdout: currentUser } =
+                    await executeCommand("whoami");
 
-                  // Set appropriate permissions
-                  execSync(`sudo chmod -R 755 ${dir}`);
+                  // Set ownership
+                  await executeCommand("sudo", [
+                    "chown",
+                    "-R",
+                    `${currentUser.trim()}:${currentUser.trim()}`,
+                    dir,
+                  ]);
+
+                  // Set permissions
+                  await executeCommand("sudo", ["chmod", "-R", "755", dir]);
 
                   logger.info(
                     `Successfully created directory with sudo: ${dir}`,
@@ -391,7 +398,7 @@ services:
       if (config.useTls) {
         try {
           // Run certificate generation script
-          execSync("npm run dev:prepare-mongo");
+          await executeCommand("npm", ["run", "dev:prepare-mongo"]);
           logger.info("Generated MongoDB certificates");
         } catch (certError) {
           logger.error(`Error generating certificates: ${certError.message}`);
@@ -405,7 +412,7 @@ services:
 
       // Start MongoDB container
       try {
-        execSync(`docker-compose -f ${composeFile} up -d`);
+        await executeCommand("docker-compose", ["-f", composeFile, "up", "-d"]);
         logger.info("Started MongoDB container");
       } catch (dockerError) {
         logger.error(
@@ -497,7 +504,12 @@ services:
 
       if (fs.existsSync(composeFile)) {
         // Stop and remove container
-        execSync(`docker-compose -f ${composeFile} down -v`);
+        await executeCommand("docker-compose", [
+          "-f",
+          composeFile,
+          "down",
+          "-v",
+        ]);
 
         // Remove compose file
         fs.unlinkSync(composeFile);
@@ -535,11 +547,14 @@ services:
       if (isDevelopment) {
         // In development, check if MongoDB container is running
         try {
-          const output = execSync(
-            'docker ps --format "{{.Names}}" | grep mongodb',
-          )
-            .toString()
-            .trim();
+          const { stdout: output } = await executeCommand("docker", [
+            "ps",
+            "--format",
+            "{{.Names}}",
+            "|",
+            "grep",
+            "mongodb",
+          ]);
           const testResult =
             await this.supportedDatabases.mongodb.manager.testConnection();
 
@@ -560,11 +575,14 @@ services:
       } else {
         // In production, check if MongoDB container is running
         try {
-          const output = execSync(
-            'docker ps --format "{{.Names}}" | grep cloudlunacy-mongodb',
-          )
-            .toString()
-            .trim();
+          const { stdout: output } = await executeCommand("docker", [
+            "ps",
+            "--format",
+            "{{.Names}}",
+            "|",
+            "grep",
+            "cloudlunacy-mongodb",
+          ]);
 
           if (output.length > 0) {
             // Container is running, check connection
@@ -667,17 +685,23 @@ services:
                   `Permission denied, attempting to create directory with sudo: ${dir}`,
                 );
                 try {
-                  // Execute sudo mkdir command
-                  execSync(`sudo mkdir -p ${dir}`);
+                  // Use executeCommand with sudo instead of execSync
+                  await executeCommand("sudo", ["mkdir", "-p", dir]);
 
-                  // Set ownership to current user
-                  const currentUser = execSync("whoami").toString().trim();
-                  execSync(
-                    `sudo chown -R ${currentUser}:${currentUser} ${dir}`,
-                  );
+                  // Get current user
+                  const { stdout: currentUser } =
+                    await executeCommand("whoami");
 
-                  // Set appropriate permissions
-                  execSync(`sudo chmod -R 755 ${dir}`);
+                  // Set ownership
+                  await executeCommand("sudo", [
+                    "chown",
+                    "-R",
+                    `${currentUser.trim()}:${currentUser.trim()}`,
+                    dir,
+                  ]);
+
+                  // Set permissions
+                  await executeCommand("sudo", ["chmod", "-R", "755", dir]);
 
                   logger.info(
                     `Successfully created directory with sudo: ${dir}`,
@@ -762,7 +786,7 @@ services:
 
       // Start Redis container
       try {
-        execSync(`docker-compose -f ${composeFile} up -d`);
+        await executeCommand("docker-compose", ["-f", composeFile, "up", "-d"]);
         logger.info("Started Redis container");
       } catch (dockerError) {
         logger.error(`Error starting Redis container: ${dockerError.message}`);
@@ -836,7 +860,12 @@ services:
 
       if (fs.existsSync(composeFile)) {
         // Stop and remove container
-        execSync(`docker-compose -f ${composeFile} down -v`);
+        await executeCommand("docker-compose", [
+          "-f",
+          composeFile,
+          "down",
+          "-v",
+        ]);
 
         // Remove compose file
         fs.unlinkSync(composeFile);
@@ -874,11 +903,14 @@ services:
       if (isDevelopment) {
         // In development, check if Redis container is running
         try {
-          const output = execSync(
-            'docker ps --format "{{.Names}}" | grep redis',
-          )
-            .toString()
-            .trim();
+          const { stdout: output } = await executeCommand("docker", [
+            "ps",
+            "--format",
+            "{{.Names}}",
+            "|",
+            "grep",
+            "redis",
+          ]);
           const testResult = await this.testRedisConnection(config);
 
           return {
@@ -898,11 +930,14 @@ services:
       } else {
         // In production, check if Redis container is running
         try {
-          const output = execSync(
-            'docker ps --format "{{.Names}}" | grep cloudlunacy-redis',
-          )
-            .toString()
-            .trim();
+          const { stdout: output } = await executeCommand("docker", [
+            "ps",
+            "--format",
+            "{{.Names}}",
+            "|",
+            "grep",
+            "cloudlunacy-redis",
+          ]);
           const testResult = await this.testRedisConnection(config);
 
           return {
@@ -942,14 +977,22 @@ services:
       const port = config.port || 6379;
 
       // Basic command to test connection
-      let command = `redis-cli -h ${host} -p ${port} ping`;
+      let args = ["-h", host, "-p", port.toString(), "ping"];
 
       // Add authentication if enabled
       if (config.authEnabled && config.password) {
-        command = `redis-cli -h ${host} -p ${port} -a ${config.password} ping`;
+        args = [
+          "-h",
+          host,
+          "-p",
+          port.toString(),
+          "-a",
+          config.password,
+          "ping",
+        ];
       }
 
-      const output = execSync(command).toString().trim();
+      const { stdout: output } = await executeCommand("redis-cli", args);
 
       if (output === "PONG") {
         return {
