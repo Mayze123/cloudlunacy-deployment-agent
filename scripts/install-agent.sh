@@ -218,10 +218,29 @@ setup_user_directories() {
   fi
 
   mkdir -p "$BASE_DIR"
+
+  # Create MongoDB directories with proper permissions
+  log "Creating MongoDB directories..."
+  mkdir -p "$BASE_DIR/mongodb/data/db"
+
+  # Create Redis directories with proper permissions
+  log "Creating Redis directories..."
+  mkdir -p "$BASE_DIR/redis/data"
+
+  # Create other required directories
+  log "Creating other required directories..."
+  mkdir -p "$CERTS_DIR"
+  mkdir -p "$BASE_DIR/logs"
+  mkdir -p "$BASE_DIR/deployments"
+
+  # Set ownership and permissions for all directories
   chown -R "$USERNAME":"$USERNAME" "$BASE_DIR"
   chmod -R 750 "$BASE_DIR"
 
-  log "Directories created at $BASE_DIR."
+  # Special permissions for certificates directory
+  chmod 700 "$CERTS_DIR"
+
+  log "Directories created and permissions set at $BASE_DIR."
 }
 
 download_agent() {
@@ -315,9 +334,44 @@ verify_installation() {
   fi
 }
 
+# ------------------------------------------------------------------------------
+# Fix Permissions
+# ------------------------------------------------------------------------------
+fix_permissions() {
+  log "Fixing permissions for existing CloudLunacy installation..."
+
+  # Create directories if they don't exist
+  mkdir -p "$BASE_DIR/mongodb/data/db"
+  mkdir -p "$BASE_DIR/redis/data"
+  mkdir -p "$CERTS_DIR"
+  mkdir -p "$BASE_DIR/logs"
+  mkdir -p "$BASE_DIR/deployments"
+
+  # Set ownership for all directories
+  chown -R "$USERNAME":"$USERNAME" "$BASE_DIR"
+  chmod -R 750 "$BASE_DIR"
+
+  # Special permissions for certificates directory
+  chmod 700 "$CERTS_DIR"
+
+  # Add the user to the docker group
+  usermod -aG docker "$USERNAME"
+  chmod 666 /var/run/docker.sock
+
+  log "Permissions fixed successfully. You may need to restart the CloudLunacy service:"
+  log "systemctl restart cloudlunacy"
+}
+
 main() {
   check_root
   display_info
+
+  # Check if only fixing permissions
+  if [ "$#" -eq 1 ] && [ "$1" = "--fix-permissions" ]; then
+    fix_permissions
+    exit 0
+  fi
+
   check_args "$@"
 
   AGENT_TOKEN="$1"
@@ -359,6 +413,9 @@ main() {
   echo "  Uninstall database: npm run db:uninstall -- <dbType>"
   echo ""
   log "Supported database types: mongodb, redis"
+  echo ""
+  log "If you encounter permission issues with database directories, run:"
+  echo "  sudo $(basename "$0") --fix-permissions"
 }
 
 # ------------------------------------------------------------------------------
