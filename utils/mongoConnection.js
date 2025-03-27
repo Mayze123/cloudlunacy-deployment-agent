@@ -6,7 +6,7 @@ const logger = require("./logger");
 /**
  * MongoDB Connection Utility for HAProxy TLS termination
  *
- * This utility provides a secure connection to MongoDB with TLS enabled by default.
+ * This utility provides a secure connection to MongoDB with TLS enabled.
  * After the migration from Traefik to HAProxy, TLS termination is handled by HAProxy.
  * The SNI-based routing is used to direct traffic to the correct MongoDB instance.
  */
@@ -18,7 +18,7 @@ class MongoConnection {
     this.username = process.env.MONGO_MANAGER_USERNAME;
     this.password = process.env.MONGO_MANAGER_PASSWORD;
     this.database = process.env.MONGO_DATABASE || "admin";
-    this.useTls = process.env.MONGO_USE_TLS !== "false"; // Default to true
+    // TLS is always enabled - no longer optional
     this.serverId = process.env.SERVER_ID || "dev-server-id";
     this.mongoDomain = process.env.MONGO_DOMAIN || "mongodb.cloudlunacy.uk";
 
@@ -51,11 +51,9 @@ class MongoConnection {
     // This enables SNI-based routing to reach the correct MongoDB instance
     const host = `${this.serverId}.${this.mongoDomain}`;
 
-    // Add proper TLS parameters for HAProxy-proxied connections
-    // Updated TLS parameters to fix connection issues
-    const tlsParams = this.useTls
-      ? "?tls=true&tlsAllowInvalidCertificates=true&retryWrites=false"
-      : "";
+    // TLS is always enabled
+    const tlsParams =
+      "?tls=true&tlsAllowInvalidCertificates=true&directConnection=true";
 
     const uri = `mongodb://${credentials}${host}:${this.port}/${this.database}${tlsParams}`;
     logger.debug(`Generated MongoDB URI: ${uri.replace(/:[^:]*@/, ":***@")}`);
@@ -72,16 +70,11 @@ class MongoConnection {
    * @returns {Object} TLS options
    */
   getTlsOptions() {
-    if (!this.useTls) {
-      return {};
-    }
-
-    // With HAProxy, we allow invalid certificates and hostnames
+    // TLS is always enabled and we allow invalid certificates and hostnames
     // because TLS verification is handled by HAProxy
     return {
       tlsAllowInvalidCertificates: true,
       tlsAllowInvalidHostnames: true,
-      directConnection: false, // Change to false since we're going through HAProxy
     };
   }
 
@@ -96,9 +89,9 @@ class MongoConnection {
 
     const uri = this.getUri();
     const options = {
-      serverSelectionTimeoutMS: 10000, // Increased from 5000
-      socketTimeoutMS: 15000, // Increased from 10000
-      connectTimeoutMS: 15000, // Increased from 10000
+      serverSelectionTimeoutMS: 5000,
+      socketTimeoutMS: 10000, // Increase socket timeout
+      connectTimeoutMS: 10000, // Increase connect timeout
       maxPoolSize: 5, // Limit pool size for better management
       retryWrites: false, // Disable retry writes for initial connection
       ...this.getTlsOptions(),
@@ -108,7 +101,7 @@ class MongoConnection {
     logger.info(
       `Connecting to MongoDB through HAProxy at ${this.serverId}.${
         this.mongoDomain
-      }:${this.port} with TLS ${this.useTls ? "enabled" : "disabled"}`,
+      }:${this.port} with TLS enabled`,
     );
 
     // Log the DNS hostname resolution for troubleshooting
@@ -116,7 +109,7 @@ class MongoConnection {
       const { execSync } = require("child_process");
       const hostname = `${this.serverId}.${this.mongoDomain}`;
       const dnsOutput = execSync(
-        `dig +short ${hostname} || host ${hostname} || echo "DNS resolution failed"`,
+        `dig +short ${hostname} || echo "DNS resolution failed"`,
       )
         .toString()
         .trim();
@@ -145,17 +138,6 @@ class MongoConnection {
     } catch (error) {
       logger.error(`Failed to connect to MongoDB: ${error.message}`);
 
-      // Close failed connection to prevent hanging resources
-      if (this.client) {
-        try {
-          await this.client.close(true);
-          this.client = null;
-          this.db = null;
-        } catch (closeErr) {
-          logger.warn(`Error closing MongoDB client: ${closeErr.message}`);
-        }
-      }
-
       // Provide more detailed error information for troubleshooting
       if (error.message.includes("ECONNREFUSED")) {
         logger.error(
@@ -175,65 +157,9 @@ class MongoConnection {
         logger.error(
           `TLS certificate error: Check HAProxy SSL configuration and agent certificates`,
         );
-
-        // Try connecting without TLS as a fallback if TLS fails
-        if (this.useTls) {
-          logger.info("Attempting fallback connection without TLS...");
-          try {
-            // Set a flag for this connection attempt only
-            const originalTlsSetting = this.useTls;
-            this.useTls = false;
-            const noTlsUri = this.getUri();
-            const noTlsOptions = {
-              serverSelectionTimeoutMS: 10000,
-              socketTimeoutMS: 15000,
-              connectTimeoutMS: 15000,
-            };
-
-            const tempClient = new MongoClient(noTlsUri, noTlsOptions);
-            await tempClient.connect();
-            const response = await tempClient
-              .db(this.database)
-              .command({ ping: 1 });
-            await tempClient.close();
-
-            logger.info(
-              "Fallback connection without TLS succeeded. Please check your TLS configuration.",
-            );
-            logger.info(
-              "You may need to update your environment to set MONGO_USE_TLS=false if TLS is not properly configured.",
-            );
-
-            // Reset the flag after the attempt
-            this.useTls = originalTlsSetting;
-          } catch (fallbackErr) {
-            logger.error(
-              `Fallback connection also failed: ${fallbackErr.message}`,
-            );
-            // Reset the flag after the attempt
-            this.useTls = true;
-          }
-        }
       }
 
       throw error;
-    }
-  }
-
-  /**
-   * Disconnect from MongoDB
-   */
-  async disconnect() {
-    if (this.client) {
-      try {
-        await this.client.close();
-        logger.info("MongoDB connection closed successfully");
-      } catch (error) {
-        logger.error(`Error closing MongoDB connection: ${error.message}`);
-      } finally {
-        this.client = null;
-        this.db = null;
-      }
     }
   }
 

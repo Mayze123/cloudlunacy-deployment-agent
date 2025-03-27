@@ -64,11 +64,15 @@ const config = {
 
   // Database configuration
   mongodb: {
-    host: process.env.MONGO_HOST || "localhost",
-    port: process.env.MONGO_PORT || 27017,
+    enabled:
+      !!process.env.MONGO_MANAGER_USERNAME &&
+      !!process.env.MONGO_MANAGER_PASSWORD,
     username: process.env.MONGO_MANAGER_USERNAME,
     password: process.env.MONGO_MANAGER_PASSWORD,
-    useTls: process.env.MONGO_USE_TLS === "true",
+    host: process.env.MONGO_HOST || "localhost",
+    port: process.env.MONGO_PORT || 27017,
+    database: process.env.MONGO_DATABASE || "admin",
+    useTls: true, // TLS is always enabled
   },
 
   // Deployment configuration

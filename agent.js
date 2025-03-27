@@ -85,12 +85,12 @@ const initializeMongoDB = async () => {
     const mongoHost = process.env.MONGO_HOST;
     const mongoPort = process.env.MONGO_PORT || "27017";
     const serverDomain = process.env.MONGO_DOMAIN || "mongodb.cloudlunacy.uk";
-    const useTLS = process.env.MONGO_USE_TLS !== "false"; // Default to true
+    // TLS is always enabled now
 
     // Check if we're connecting through HAProxy or directly
     if (process.env.SERVER_ID) {
       logger.info(
-        `Connecting to MongoDB through HAProxy at ${process.env.SERVER_ID}.${serverDomain}:${mongoPort} with TLS ${useTLS ? "enabled" : "disabled"}`,
+        `Connecting to MongoDB through HAProxy at ${process.env.SERVER_ID}.${serverDomain}:${mongoPort} with TLS enabled`,
       );
 
       // Attempt DNS resolution to verify connectivity
@@ -111,7 +111,7 @@ const initializeMongoDB = async () => {
       }
     } else {
       logger.info(
-        `Connecting to MongoDB directly at ${mongoHost}:${mongoPort}`,
+        `Connecting to MongoDB directly at ${mongoHost}:${mongoPort} with TLS enabled`,
       );
     }
 
@@ -322,149 +322,137 @@ function handleDeployApp(message) {
 }
 
 /**
- * Create a new database based on the payload received from the backend.
- * @param {Object} payload Database creation payload.
+ * Handle database creation requests.
+ * @param {Object} payload Payload containing database details.
  */
 async function createDatabase(payload) {
+  const { type, config } = payload;
+  logger.info(`Creating database: ${type}`);
+
   try {
-    logger.info(`Executing install command for ${payload.type} database`);
-    logger.info(`Installing ${payload.type}...`);
+    if (type === "mongodb") {
+      // Always use TLS for MongoDB
+      const dbConfig = {
+        ...config,
+        useTls: true, // Always use TLS
+      };
 
-    // Initialize MongoDB connection
-    if (payload.type === "mongodb") {
-      await initializeMongoDB();
-    }
-
-    const result = await databaseManager.handleDatabaseOperation(
-      "install",
-      payload.type,
-      payload.options,
-    );
-
-    if (result.success) {
-      logger.info(`${payload.type} database installed successfully.`);
-      sendWebSocketMessage("database_created", {
-        success: true,
-        databaseId: payload.databaseId,
-        details: result,
-      });
+      const result = await databaseManager.installMongoDB(dbConfig);
+      return result;
+    } else if (type === "redis") {
+      const result = await databaseManager.installRedis(config);
+      return result;
     } else {
-      logger.error(
-        `Failed to install ${payload.type} database: ${result.message}`,
-      );
-      sendWebSocketMessage("database_created", {
+      return {
         success: false,
-        databaseId: payload.databaseId,
-        error: result.message,
-      });
+        message: `Unsupported database type: ${type}`,
+      };
     }
   } catch (error) {
-    logger.error(`Error creating database: ${error.message}`);
-    sendWebSocketMessage("database_created", {
+    logger.error(`Error creating database ${type}: ${error.message}`);
+    return {
       success: false,
-      databaseId: payload.databaseId,
+      message: `Failed to create ${type} database: ${error.message}`,
       error: error.message,
-    });
+    };
   }
 }
 
 /**
- * Handle database management operations.
- * @param {Object} payload Database management payload.
+ * Handle database management commands (install, uninstall, status).
+ * @param {Object} payload Command payload.
  */
 async function handleDatabaseManagement(payload) {
+  const { command, dbType, databaseId, options } = payload;
+
+  if (!command || !dbType) {
+    sendWebSocketMessage("database_management_failed", {
+      databaseId: databaseId || "unknown",
+      status: "failed",
+      message: "Missing required parameters: command and dbType",
+    });
+    return;
+  }
+
+  logger.info(`Executing ${command} command for ${dbType} database`);
+
   try {
-    const { operation, type, databaseId, options } = payload;
-    logger.info(
-      `Handling ${operation} operation for ${type} database ${databaseId}`,
+    // Handle the database operation
+    const result = await databaseManager.handleDatabaseOperation(
+      command,
+      dbType,
+      options || {},
     );
 
-    // Make sure MongoDB is initialized if dealing with MongoDB
-    if (type === "mongodb") {
-      await initializeMongoDB();
+    // If operation was successful and it was an install command, register with front server
+    if (result.success && command === "install") {
+      try {
+        // Get agent ID from JWT file
+        let agentId = SERVER_ID;
+        try {
+          const jwtData = JSON.parse(fs.readFileSync(jwtFile, "utf8"));
+          if (jwtData && jwtData.agentId) {
+            agentId = jwtData.agentId;
+          }
+        } catch (err) {
+          logger.warn(`Could not read agentId from JWT file: ${err.message}`);
+        }
+
+        // Get the IP address for database registration
+        const targetIp = await getPublicIp();
+        const targetPort =
+          options?.port ||
+          databaseManager.supportedDatabases[dbType].defaultPort;
+
+        // Register with front server
+        const registrationResult =
+          await databaseManager.registerWithFrontServer(
+            dbType,
+            agentId,
+            targetIp,
+            targetPort,
+            options || {},
+            AGENT_JWT,
+          );
+
+        if (registrationResult.success) {
+          result.registration = registrationResult;
+        } else {
+          logger.warn(
+            `Database registered locally but failed to register with front server: ${registrationResult.message}`,
+          );
+          result.registrationWarning = registrationResult.message;
+        }
+      } catch (regError) {
+        logger.warn(
+          `Error during database registration with front server: ${regError.message}`,
+        );
+        result.registrationWarning = regError.message;
+      }
     }
 
-    let result;
-    switch (operation) {
-      case "create_user":
-        if (type === "mongodb") {
-          const { username, password, dbName } = options;
-          result =
-            await databaseManager.supportedDatabases.mongodb.manager.createUser(
-              username,
-              password,
-              dbName,
-              options.roles || ["readWrite"],
-            );
-        } else {
-          result = {
-            success: false,
-            message: `Unsupported database type: ${type}`,
-          };
-        }
-        break;
-      case "create_database":
-        if (type === "mongodb") {
-          const { dbName, username, password } = options;
-          result =
-            await databaseManager.supportedDatabases.mongodb.manager.createDatabaseAndUser(
-              dbName,
-              username,
-              password,
-            );
-        } else {
-          result = {
-            success: false,
-            message: `Unsupported database type: ${type}`,
-          };
-        }
-        break;
-      case "test_connection":
-        if (type === "mongodb") {
-          result =
-            await databaseManager.supportedDatabases.mongodb.manager.testConnection();
-        } else {
-          result = {
-            success: false,
-            message: `Unsupported database type: ${type}`,
-          };
-        }
-        break;
-      case "status":
-        result = await databaseManager.handleDatabaseOperation(
-          "status",
-          type,
-          options,
-        );
-        break;
-      case "uninstall":
-        result = await databaseManager.handleDatabaseOperation(
-          "uninstall",
-          type,
-          options,
-        );
-        break;
-      default:
-        result = {
-          success: false,
-          message: `Unsupported operation: ${operation}`,
-        };
-    }
-
-    sendWebSocketMessage("database_management_result", {
-      success: result.success,
-      databaseId,
-      operation,
-      type,
-      details: result,
-    });
+    // Send the result back to the client
+    sendWebSocketMessage(
+      result.success
+        ? "database_management_succeeded"
+        : "database_management_failed",
+      {
+        databaseId: databaseId || dbType,
+        status: result.success ? "success" : "failed",
+        command,
+        dbType,
+        message: result.message,
+        details: result,
+      },
+    );
   } catch (error) {
-    logger.error(`Error handling database management: ${error.message}`);
-    sendWebSocketMessage("database_management_result", {
-      success: false,
-      databaseId: payload.databaseId,
-      operation: payload.operation,
-      type: payload.type,
+    logger.error(`Database management failed: ${error.message}`);
+    sendWebSocketMessage("database_management_failed", {
+      databaseId: databaseId || dbType,
+      status: "failed",
+      command,
+      dbType,
+      message: `Database management failed: ${error.message}`,
       error: error.message,
     });
   }
@@ -551,44 +539,155 @@ function getDiskUsage() {
  */
 async function init() {
   try {
-    logger.info("CloudLunacy Deployment Agent initializing...");
+    // Check if MongoDB is configured by looking for MongoDB-specific environment variables
+    const isMongoConfigured =
+      process.env.MONGO_HOST ||
+      process.env.MONGO_PORT ||
+      process.env.MONGO_MANAGER_USERNAME;
 
-    // Ensure required directories exist
-    [
-      "/opt/cloudlunacy/deployments",
-      "/opt/cloudlunacy/logs",
-      "/opt/cloudlunacy/certs",
-    ].forEach((dir) => {
-      if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
-        logger.info(`Created directory: ${dir}`);
+    if (isMongoConfigured) {
+      // MongoDB initialization: No TLS CA verification needed on the agent side anymore.
+      if (!initializeMongoDB()) {
+        throw new Error("MongoDB initialization failed");
       }
-    });
 
-    // Set appropriate permissions if running as root
-    if (process.getuid() === 0) {
+      // Initialize MongoDB manager (if used for administrative tasks).
+      const mongoManager = require("./utils/mongoManager");
+      await mongoManager.initialize();
+
+      // Register MongoDB with front server if not already registered
       try {
-        execSync(`chown -R cloudlunacy:cloudlunacy /opt/cloudlunacy`);
-        logger.info("Set ownership of /opt/cloudlunacy to cloudlunacy user");
-      } catch (err) {
-        logger.warn(
-          `Could not set permissions for /opt/cloudlunacy: ${err.message}`,
+        // Skip in development mode
+        if (isDevelopment) {
+          logger.info("Development mode: Skipping MongoDB registration");
+        }
+        // Only attempt this if we have the necessary environment variables
+        else if (FRONT_API_URL && AGENT_JWT) {
+          logger.info(
+            "Registering MongoDB with HAProxy front server for TLS termination...",
+          );
+
+          // Get the local IP address for MongoDB registration
+          const LOCAL_IP = await getPublicIp();
+
+          // Get agent ID from JWT file
+          let agentId = SERVER_ID;
+          try {
+            const jwtData = JSON.parse(fs.readFileSync(jwtFile, "utf8"));
+            if (jwtData && jwtData.agentId) {
+              agentId = jwtData.agentId;
+            }
+          } catch (err) {
+            logger.warn(`Could not read agentId from JWT file: ${err.message}`);
+          }
+
+          logger.info(
+            `Using agent ID: ${agentId} and IP: ${LOCAL_IP} for MongoDB registration`,
+          );
+
+          // Use the MongoDB-specific subdomain registration endpoint
+          try {
+            const response = await axios.post(
+              `${FRONT_API_URL}/api/databases/mongodb/register`,
+              {
+                agentId,
+                targetIp: LOCAL_IP,
+                targetPort: process.env.MONGO_PORT || 27017,
+                options: {
+                  useTls: true, // TLS is always enabled
+                },
+              },
+              {
+                headers: {
+                  Authorization: `Bearer ${AGENT_JWT}`,
+                  "Content-Type": "application/json",
+                },
+              },
+            );
+
+            if (response.data && response.data.success) {
+              logger.info(
+                "MongoDB successfully registered with HAProxy front server for TLS termination",
+                {
+                  domain: response.data.domain || response.data.details?.domain,
+                  connectionString: response.data.connectionString,
+                },
+              );
+
+              // Test the connection to confirm it's working
+              try {
+                const testConnection = await mongoManager.testConnection();
+                if (testConnection.success) {
+                  logger.info(
+                    "MongoDB connection test successful after registration",
+                  );
+                } else {
+                  logger.warn(
+                    `MongoDB connection test failed: ${testConnection.message}`,
+                  );
+                }
+              } catch (testErr) {
+                logger.warn(
+                  `Error testing MongoDB connection: ${testErr.message}`,
+                );
+              }
+            } else {
+              logger.warn("Unexpected response when registering MongoDB", {
+                response: response.data,
+              });
+            }
+          } catch (err) {
+            logger.error(
+              "Error registering MongoDB with HAProxy front server:",
+              err.message,
+            );
+
+            if (err.response) {
+              logger.error(
+                `Response status: ${err.response.status}, data:`,
+                err.response.data,
+              );
+            }
+
+            logger.info(
+              "Continuing agent initialization despite MongoDB registration issue",
+            );
+          }
+        } else {
+          logger.warn(
+            "Missing FRONT_API_URL or AGENT_JWT, cannot register MongoDB for TLS termination",
+          );
+        }
+      } catch (mongoRegErr) {
+        logger.error(
+          "Error registering MongoDB with HAProxy front server:",
+          mongoRegErr.message,
+        );
+        logger.info(
+          "Continuing agent initialization despite MongoDB registration issue",
         );
       }
+    } else {
+      logger.info(
+        "MongoDB not configured in environment variables. Skipping MongoDB initialization and registration.",
+      );
     }
 
-    // Initialize MongoDB and attempt connection
-    await initializeMongoDB();
+    // Check deployment permissions.
+    const permissionsOk = await ensureDeploymentPermissions();
+    if (!permissionsOk) {
+      throw new Error("Critical: Permission check failed");
+    }
 
-    // Authenticate with the SaaS backend
+    // Connect to the backend.
     await authenticateAndConnect();
 
-    // Start periodically collecting metrics
+    // Start collecting metrics
     setInterval(collectMetrics, METRICS_INTERVAL);
 
     logger.info("CloudLunacy Deployment Agent initialized successfully");
   } catch (error) {
-    logger.error(`Initialization failed: ${error.message}`);
+    logger.error("Initialization failed:", error.message);
     process.exit(1);
   }
 }

@@ -136,28 +136,49 @@ class DatabaseManager {
    * @returns {Promise<Object>} Result of the operation
    */
   async addDatabaseConfig(dbType, config) {
+    if (!config) {
+      return { success: false, message: "No configuration provided" };
+    }
+
+    logger.info(`Adding ${dbType} configuration`);
+
     try {
+      // Validate required configuration fields
+      if (!this.supportedDatabases[dbType]) {
+        return {
+          success: false,
+          message: `Unsupported database type: ${dbType}. Supported types: ${Object.keys(this.supportedDatabases).join(", ")}`,
+        };
+      }
+
+      // Merge options with defaults
+      const dbConfig = this.supportedDatabases[dbType];
+      const mergedConfig = {
+        ...dbConfig.defaultConfig,
+        port: dbConfig.defaultPort,
+        ...config,
+      };
+
       // Read current .env file
       let envContent = "";
       try {
         envContent = fs.readFileSync(this.envFile, "utf8");
       } catch (err) {
-        return {
-          success: false,
-          message: `Failed to read environment file: ${err.message}`,
-        };
+        // If file doesn't exist, create it with default content
+        envContent = "# CloudLunacy Agent Environment Variables\n";
       }
 
-      // Prepare the configuration based on database type
+      // Create configuration block
       let configContent = "";
       if (dbType === "mongodb") {
         configContent = `
 # MongoDB Configuration
-MONGO_HOST=localhost
-MONGO_PORT=${config.port || 27017}
-MONGO_MANAGER_USERNAME=${config.username || "admin"}
-MONGO_MANAGER_PASSWORD=${config.password || "adminPassword"}
-MONGO_USE_TLS=${config.useTls}
+MONGO_HOST=${mergedConfig.host || "localhost"}
+MONGO_PORT=${mergedConfig.port || 27017}
+MONGO_MANAGER_USERNAME=${mergedConfig.username || "admin"}
+MONGO_MANAGER_PASSWORD=${mergedConfig.password || "adminPassword"}
+MONGO_USE_TLS=true
+MONGO_DATABASE=${mergedConfig.database || "admin"}
 `;
 
         // Add TLS paths if in production mode
@@ -172,10 +193,12 @@ MONGO_PEM_PATH=${certsDir}/server.pem
       } else if (dbType === "redis") {
         configContent = `
 # Redis Configuration
-REDIS_HOST=localhost
-REDIS_PORT=${config.port || 6379}
-REDIS_USE_TLS=${config.useTls}
-${config.authEnabled && config.password ? `REDIS_PASSWORD=${config.password}` : ""}
+REDIS_HOST=${mergedConfig.host || "localhost"}
+REDIS_PORT=${mergedConfig.port || 6379}
+REDIS_USE_TLS=${mergedConfig.useTls}
+${mergedConfig.authEnabled && mergedConfig.password ? `REDIS_PASSWORD=${mergedConfig.password}` : ""}
+REDIS_USERNAME=${mergedConfig.username || ""}
+REDIS_PASSWORD=${mergedConfig.password || ""}
 `;
       }
 
@@ -458,7 +481,7 @@ services:
   mongodb:
     image: mongo:latest
     container_name: cloudlunacy-mongodb
-    command: --tlsMode ${config.useTls ? "preferTLS" : "disabled"} ${config.useTls ? "--tlsCertificateKeyFile /etc/mongodb/certs/server.pem --tlsCAFile /etc/mongodb/certs/ca.crt --tlsAllowConnectionsWithoutCertificates" : ""}
+    command: --tlsMode preferTLS --tlsCertificateKeyFile /etc/mongodb/certs/server.pem --tlsCAFile /etc/mongodb/certs/ca.crt --tlsAllowConnectionsWithoutCertificates
     restart: always
     environment:
       - MONGO_INITDB_ROOT_USERNAME=${config.username || "admin"}
@@ -473,65 +496,57 @@ services:
       fs.writeFileSync(composeFile, composeContent);
       logger.info("Created MongoDB docker-compose configuration");
 
-      // Set up certificates if TLS is enabled
-      if (config.useTls) {
-        const isDevelopment = process.env.NODE_ENV === "development";
+      // Set up certificates (always required now since TLS is mandatory)
+      if (isDevelopment) {
+        try {
+          // Run certificate generation script only in development mode
+          await executeCommand("npm", ["run", "dev:prepare-mongo"]);
+          logger.info("Generated MongoDB certificates");
+        } catch (certErr) {
+          logger.error(`Certificate preparation failed: ${certErr.message}`);
+          return {
+            success: false,
+            message: `Failed to prepare MongoDB certificates: ${certErr.message}`,
+            error: certErr.message,
+            help: "Run 'npm run dev:setup' first to fetch the certificates from the front server.",
+          };
+        }
+      } else {
+        // In production, certificates should already be available from agent installation
+        if (
+          !fs.existsSync(path.join(certsPath, "ca.crt")) ||
+          !fs.existsSync(path.join(certsPath, "server.key")) ||
+          !fs.existsSync(path.join(certsPath, "server.crt"))
+        ) {
+          logger.error("TLS certificates not found in production environment");
+          return {
+            success: false,
+            message: "TLS certificates not found in production environment",
+            error: "Missing certificates",
+            help: "Certificates should be in /opt/cloudlunacy/certs from agent installation",
+          };
+        }
 
-        if (isDevelopment) {
+        // Ensure server.pem exists (combined key and cert)
+        if (!fs.existsSync(path.join(certsPath, "server.pem"))) {
           try {
-            // Run certificate generation script only in development mode
-            await executeCommand("npm", ["run", "dev:prepare-mongo"]);
-            logger.info("Generated MongoDB certificates");
-          } catch (certErr) {
-            logger.error(`Certificate preparation failed: ${certErr.message}`);
-            return {
-              success: false,
-              message: `Failed to prepare MongoDB certificates: ${certErr.message}`,
-              error: certErr.message,
-              help: "Run 'npm run dev:setup' first to fetch the certificates from the front server.",
-            };
-          }
-        } else {
-          // In production, certificates should already be available from agent installation
-          if (
-            !fs.existsSync(path.join(certsPath, "ca.crt")) ||
-            !fs.existsSync(path.join(certsPath, "server.key")) ||
-            !fs.existsSync(path.join(certsPath, "server.crt"))
-          ) {
-            logger.error(
-              "TLS certificates not found in production environment",
+            logger.info("Creating server.pem file in production environment");
+            const key = fs.readFileSync(path.join(certsPath, "server.key"));
+            const cert = fs.readFileSync(path.join(certsPath, "server.crt"));
+            fs.writeFileSync(
+              path.join(certsPath, "server.pem"),
+              Buffer.concat([key, cert]),
             );
+            // Set proper permissions
+            execSync(`chmod 600 ${path.join(certsPath, "server.pem")}`);
+            logger.info("Created server.pem file successfully");
+          } catch (pemErr) {
+            logger.error(`Failed to create server.pem file: ${pemErr.message}`);
             return {
               success: false,
-              message: "TLS certificates not found in production environment",
-              error: "Missing certificates",
-              help: "Certificates should be in /opt/cloudlunacy/certs from agent installation",
+              message: `Failed to create server.pem file: ${pemErr.message}`,
+              error: pemErr.message,
             };
-          }
-
-          // Ensure server.pem exists (combined key and cert)
-          if (!fs.existsSync(path.join(certsPath, "server.pem"))) {
-            try {
-              logger.info("Creating server.pem file in production environment");
-              const key = fs.readFileSync(path.join(certsPath, "server.key"));
-              const cert = fs.readFileSync(path.join(certsPath, "server.crt"));
-              fs.writeFileSync(
-                path.join(certsPath, "server.pem"),
-                Buffer.concat([key, cert]),
-              );
-              // Set proper permissions
-              execSync(`chmod 600 ${path.join(certsPath, "server.pem")}`);
-              logger.info("Created server.pem file successfully");
-            } catch (pemErr) {
-              logger.error(
-                `Failed to create server.pem file: ${pemErr.message}`,
-              );
-              return {
-                success: false,
-                message: `Failed to create server.pem file: ${pemErr.message}`,
-                error: pemErr.message,
-              };
-            }
           }
         }
       }

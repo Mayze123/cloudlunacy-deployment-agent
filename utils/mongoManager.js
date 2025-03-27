@@ -21,34 +21,13 @@ class MongoManager {
    * @returns {Promise<boolean>} Success status
    */
   async initialize() {
-    if (this.initialized && this.connection.client && this.connection.db) {
-      try {
-        // Verify connection is still valid with a ping
-        await this.connection.db.command({ ping: 1 });
-        return true;
-      } catch (err) {
-        logger.warn(
-          `Existing connection is not valid: ${err.message}. Reconnecting...`,
-        );
-        this.initialized = false;
-        // Force close any existing connection
-        await this.connection.disconnect();
-      }
+    if (this.initialized) {
+      return true;
     }
 
     try {
       logger.info("Initializing MongoDB connection through HAProxy");
       await this.connection.connect();
-
-      // Verify connection with a ping
-      if (this.connection.db) {
-        await this.connection.db.command({ ping: 1 });
-      } else {
-        throw new Error(
-          "MongoDB connection established but db reference is null",
-        );
-      }
-
       this.initialized = true;
       this.retryCount = 0;
       logger.info(
@@ -85,12 +64,12 @@ class MongoManager {
    * @returns {Promise<Object>} MongoDB database
    */
   async getDb() {
-    // Ensure we're connected
-    if (!this.initialized || !this.connection.client || !this.connection.db) {
-      const initResult = await this.initialize();
-      if (!initResult) {
-        throw new Error("Failed to initialize MongoDB connection");
-      }
+    if (!this.initialized) {
+      await this.initialize();
+    }
+
+    if (!this.connection.db) {
+      await this.connection.connect();
     }
 
     return this.connection.db;
@@ -113,9 +92,12 @@ class MongoManager {
       );
 
       // Ensure we're connected
+      if (!this.initialized) {
+        await this.initialize();
+      }
+
       const db = await this.getDb();
 
-      // Create the user with appropriate roles
       await db.command({
         createUser: username,
         pwd: password,
@@ -134,13 +116,10 @@ class MongoManager {
       // If connection error, try to reinitialize
       if (
         error.message.includes("ECONNREFUSED") ||
-        error.message.includes("ETIMEDOUT") ||
-        error.message.includes("not connected")
+        error.message.includes("ETIMEDOUT")
       ) {
         this.initialized = false;
         logger.info("Reinitializing connection for next attempt");
-        // Force close connection
-        await this.connection.disconnect();
       }
 
       return false;
@@ -163,11 +142,12 @@ class MongoManager {
       );
 
       // Ensure we're connected
-      const db = await this.getDb();
-
-      if (!db) {
-        throw new Error("Failed to get MongoDB database instance");
+      if (!this.initialized) {
+        await this.initialize();
       }
+
+      // Get admin DB
+      const db = await this.getDb();
 
       // Create the new database by accessing it (MongoDB creates it automatically)
       const newDb = this.connection.client.db(dbName);
@@ -197,13 +177,10 @@ class MongoManager {
       // If connection error, try to reinitialize
       if (
         error.message.includes("ECONNREFUSED") ||
-        error.message.includes("ETIMEDOUT") ||
-        error.message.includes("not connected")
+        error.message.includes("ETIMEDOUT")
       ) {
         this.initialized = false;
         logger.info("Reinitializing connection for next attempt");
-        // Force close connection
-        await this.connection.disconnect();
       }
 
       return false;
@@ -216,14 +193,12 @@ class MongoManager {
    */
   async testConnection() {
     try {
-      // Ensure we're connected and get the DB reference
-      const db = await this.getDb();
-
-      if (!db) {
-        throw new Error("Failed to get MongoDB database instance");
+      // Ensure we're connected
+      if (!this.initialized) {
+        await this.initialize();
       }
 
-      // Try to ping the database
+      const db = await this.getDb();
       const result = await db.admin().ping();
 
       return {
@@ -233,18 +208,6 @@ class MongoManager {
       };
     } catch (error) {
       logger.error(`MongoDB connection test failed: ${error.message}`);
-
-      // If connection error, try to reinitialize on next attempt
-      if (
-        error.message.includes("ECONNREFUSED") ||
-        error.message.includes("ETIMEDOUT") ||
-        error.message.includes("not connected")
-      ) {
-        this.initialized = false;
-        // Force close connection
-        await this.connection.disconnect();
-      }
-
       return {
         success: false,
         message: `MongoDB connection test failed: ${error.message}`,
@@ -256,8 +219,8 @@ class MongoManager {
    * Close MongoDB connection
    */
   async close() {
-    if (this.initialized && this.connection) {
-      await this.connection.disconnect();
+    if (this.connection.client) {
+      await this.connection.client.close();
       this.initialized = false;
       logger.info("MongoDB connection closed");
     }
