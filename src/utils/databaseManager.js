@@ -293,61 +293,74 @@ class DatabaseManager {
           certsPath,
         ];
 
-        for (const dir of dirs) {
-          if (!dirExists(dir)) {
-            try {
-              // First attempt: try to create directory normally
+        // First try to create all directories at once with a single sudo command
+        // This is more efficient and avoids multiple sudo prompts
+        try {
+          // Create the base directory first to check permissions
+          if (!dirExists(mountPath)) {
+            fs.mkdirSync(mountPath, { recursive: true });
+            logger.info(`Created base directory: ${mountPath}`);
+          }
+
+          // Build a command that creates all directories in one go
+          const dirsToCreate = dirs.filter((dir) => !dirExists(dir));
+
+          if (dirsToCreate.length > 0) {
+            // Try to create all directories with regular permissions first
+            for (const dir of dirsToCreate) {
               fs.mkdirSync(dir, { recursive: true });
               logger.info(`Created directory: ${dir}`);
-            } catch (err) {
-              // If permission error, try with sudo
-              if (err.code === "EACCES" || err.code === "EPERM") {
-                logger.info(
-                  `Permission denied, attempting to create directory with sudo: ${dir}`,
-                );
-                try {
-                  // Use executeCommand with sudo instead of execSync
-                  await executeCommand("sudo", ["mkdir", "-p", dir]);
-
-                  // Get current user
-                  const { stdout: currentUser } =
-                    await executeCommand("whoami");
-
-                  // Set ownership
-                  await executeCommand("sudo", [
-                    "chown",
-                    "-R",
-                    `${currentUser.trim()}:${currentUser.trim()}`,
-                    dir,
-                  ]);
-
-                  // Set permissions
-                  await executeCommand("sudo", ["chmod", "-R", "755", dir]);
-
-                  logger.info(
-                    `Successfully created directory with sudo: ${dir}`,
-                  );
-                } catch (sudoError) {
-                  logger.error(
-                    `Failed to create directory with sudo: ${sudoError.message}`,
-                  );
-                  return {
-                    success: false,
-                    message:
-                      "Failed to create MongoDB directories, even with sudo",
-                    error: sudoError.message,
-                    help:
-                      "Please ensure you have sudo access or manually create the directories:\n" +
-                      `sudo mkdir -p ${mountPath}/data/db\n` +
-                      `sudo mkdir -p ${certsPath}\n` +
-                      `sudo chown -R $USER:$USER /opt/cloudlunacy\n` +
-                      "Then try installing MongoDB again.",
-                  };
-                }
-              } else {
-                throw err; // Re-throw other errors
-              }
             }
+          }
+        } catch (err) {
+          // If permission error, try with sudo to create all directories at once
+          if (err.code === "EACCES" || err.code === "EPERM") {
+            logger.info(
+              "Permission denied, attempting to create directories with sudo",
+            );
+            try {
+              // Create all directories with one sudo command
+              await executeCommand("sudo", ["mkdir", "-p", ...dirs]);
+
+              // Get current user
+              const { stdout: currentUser } = await executeCommand("whoami");
+              const user = currentUser.trim();
+
+              // Set ownership for the entire base directory
+              await executeCommand("sudo", [
+                "chown",
+                "-R",
+                `${user}:${user}`,
+                "/opt/cloudlunacy",
+              ]);
+
+              // Set permissions
+              await executeCommand("sudo", [
+                "chmod",
+                "-R",
+                "755",
+                "/opt/cloudlunacy",
+              ]);
+
+              logger.info("Successfully created all directories with sudo");
+            } catch (sudoError) {
+              logger.error(
+                `Failed to create directories with sudo: ${sudoError.message}`,
+              );
+              return {
+                success: false,
+                message: "Failed to create MongoDB directories, even with sudo",
+                error: sudoError.message,
+                help:
+                  "Please ensure you have sudo access or manually create the directories:\n" +
+                  `sudo mkdir -p ${mountPath}/data/db\n` +
+                  `sudo mkdir -p ${certsPath}\n` +
+                  `sudo chown -R $USER:$USER /opt/cloudlunacy\n` +
+                  "Then try installing MongoDB again.",
+              };
+            }
+          } else {
+            throw err; // Re-throw other errors
           }
         }
       } catch (dirError) {
@@ -547,20 +560,18 @@ services:
       if (isDevelopment) {
         // In development, check if MongoDB container is running
         try {
-          const { stdout: output } = await executeCommand("docker", [
-            "ps",
-            "--format",
-            "{{.Names}}",
-            "|",
-            "grep",
-            "mongodb",
+          // Use a shell command to properly handle the pipe
+          const { stdout: output } = await executeCommand("sh", [
+            "-c",
+            'docker ps --format "{{.Names}}" | grep mongodb || true',
           ]);
+
           const testResult =
             await this.supportedDatabases.mongodb.manager.testConnection();
 
           return {
             success: true,
-            installed: output.length > 0,
+            installed: output.trim().length > 0,
             running: testResult.success,
             details: testResult,
           };
@@ -575,16 +586,13 @@ services:
       } else {
         // In production, check if MongoDB container is running
         try {
-          const { stdout: output } = await executeCommand("docker", [
-            "ps",
-            "--format",
-            "{{.Names}}",
-            "|",
-            "grep",
-            "cloudlunacy-mongodb",
+          // Use a shell command to properly handle the pipe
+          const { stdout: output } = await executeCommand("sh", [
+            "-c",
+            'docker ps --format "{{.Names}}" | grep cloudlunacy-mongodb || true',
           ]);
 
-          if (output.length > 0) {
+          if (output.trim().length > 0) {
             // Container is running, check connection
             const testResult =
               await this.supportedDatabases.mongodb.manager.testConnection();
@@ -672,60 +680,73 @@ services:
         // Create required directories if they don't exist
         const dirs = [mountPath, `${mountPath}/data`];
 
-        for (const dir of dirs) {
-          if (!dirExists(dir)) {
-            try {
-              // First attempt: try to create directory normally
+        // First try to create all directories at once with a single sudo command
+        // This is more efficient and avoids multiple sudo prompts
+        try {
+          // Create the base directory first to check permissions
+          if (!dirExists(mountPath)) {
+            fs.mkdirSync(mountPath, { recursive: true });
+            logger.info(`Created base directory: ${mountPath}`);
+          }
+
+          // Build a command that creates all directories in one go
+          const dirsToCreate = dirs.filter((dir) => !dirExists(dir));
+
+          if (dirsToCreate.length > 0) {
+            // Try to create all directories with regular permissions first
+            for (const dir of dirsToCreate) {
               fs.mkdirSync(dir, { recursive: true });
               logger.info(`Created directory: ${dir}`);
-            } catch (err) {
-              // If permission error, try with sudo
-              if (err.code === "EACCES" || err.code === "EPERM") {
-                logger.info(
-                  `Permission denied, attempting to create directory with sudo: ${dir}`,
-                );
-                try {
-                  // Use executeCommand with sudo instead of execSync
-                  await executeCommand("sudo", ["mkdir", "-p", dir]);
-
-                  // Get current user
-                  const { stdout: currentUser } =
-                    await executeCommand("whoami");
-
-                  // Set ownership
-                  await executeCommand("sudo", [
-                    "chown",
-                    "-R",
-                    `${currentUser.trim()}:${currentUser.trim()}`,
-                    dir,
-                  ]);
-
-                  // Set permissions
-                  await executeCommand("sudo", ["chmod", "-R", "755", dir]);
-
-                  logger.info(
-                    `Successfully created directory with sudo: ${dir}`,
-                  );
-                } catch (sudoError) {
-                  logger.error(
-                    `Failed to create directory with sudo: ${sudoError.message}`,
-                  );
-                  return {
-                    success: false,
-                    message:
-                      "Failed to create Redis directories, even with sudo",
-                    error: sudoError.message,
-                    help:
-                      "Please ensure you have sudo access or manually create the directories:\n" +
-                      `sudo mkdir -p ${mountPath}/data\n` +
-                      `sudo chown -R $USER:$USER /opt/cloudlunacy\n` +
-                      "Then try installing Redis again.",
-                  };
-                }
-              } else {
-                throw err; // Re-throw other errors
-              }
             }
+          }
+        } catch (err) {
+          // If permission error, try with sudo to create all directories at once
+          if (err.code === "EACCES" || err.code === "EPERM") {
+            logger.info(
+              "Permission denied, attempting to create directories with sudo",
+            );
+            try {
+              // Create all directories with one sudo command
+              await executeCommand("sudo", ["mkdir", "-p", ...dirs]);
+
+              // Get current user
+              const { stdout: currentUser } = await executeCommand("whoami");
+              const user = currentUser.trim();
+
+              // Set ownership for the entire base directory
+              await executeCommand("sudo", [
+                "chown",
+                "-R",
+                `${user}:${user}`,
+                "/opt/cloudlunacy",
+              ]);
+
+              // Set permissions
+              await executeCommand("sudo", [
+                "chmod",
+                "-R",
+                "755",
+                "/opt/cloudlunacy",
+              ]);
+
+              logger.info("Successfully created all directories with sudo");
+            } catch (sudoError) {
+              logger.error(
+                `Failed to create directories with sudo: ${sudoError.message}`,
+              );
+              return {
+                success: false,
+                message: "Failed to create Redis directories, even with sudo",
+                error: sudoError.message,
+                help:
+                  "Please ensure you have sudo access or manually create the directories:\n" +
+                  `sudo mkdir -p ${mountPath}/data\n` +
+                  `sudo chown -R $USER:$USER /opt/cloudlunacy\n` +
+                  "Then try installing Redis again.",
+              };
+            }
+          } else {
+            throw err; // Re-throw other errors
           }
         }
       } catch (dirError) {
@@ -903,19 +924,17 @@ services:
       if (isDevelopment) {
         // In development, check if Redis container is running
         try {
-          const { stdout: output } = await executeCommand("docker", [
-            "ps",
-            "--format",
-            "{{.Names}}",
-            "|",
-            "grep",
-            "redis",
+          // Use a shell command to properly handle the pipe
+          const { stdout: output } = await executeCommand("sh", [
+            "-c",
+            'docker ps --format "{{.Names}}" | grep redis || true',
           ]);
+
           const testResult = await this.testRedisConnection(config);
 
           return {
             success: true,
-            installed: output.length > 0,
+            installed: output.trim().length > 0,
             running: testResult.success,
             details: testResult,
           };
@@ -930,19 +949,17 @@ services:
       } else {
         // In production, check if Redis container is running
         try {
-          const { stdout: output } = await executeCommand("docker", [
-            "ps",
-            "--format",
-            "{{.Names}}",
-            "|",
-            "grep",
-            "cloudlunacy-redis",
+          // Use a shell command to properly handle the pipe
+          const { stdout: output } = await executeCommand("sh", [
+            "-c",
+            'docker ps --format "{{.Names}}" | grep cloudlunacy-redis || true',
           ]);
+
           const testResult = await this.testRedisConnection(config);
 
           return {
             success: true,
-            installed: output.length > 0,
+            installed: output.trim().length > 0,
             running: testResult.success,
             details: testResult,
           };
