@@ -273,102 +273,92 @@ class DatabaseManager {
       // For production, use Docker to install MongoDB
       const mountPath = "/opt/cloudlunacy/mongodb";
       const certsPath = "/opt/cloudlunacy/certs";
+      const basePath = "/opt/cloudlunacy";
 
-      // Create directories with proper error handling
+      // Check if directories exist and are writable before proceeding
       try {
-        // Check if directories exist first
-        const dirExists = (dir) => {
+        // Function to check if directory exists and is writable
+        const checkDirAccess = (dir) => {
           try {
-            return fs.existsSync(dir);
+            if (!fs.existsSync(dir)) {
+              return { exists: false, writable: false };
+            }
+
+            // Check if we can write to the directory
+            const testFile = path.join(dir, `.write-test-${Date.now()}.tmp`);
+            fs.writeFileSync(testFile, "test");
+            fs.unlinkSync(testFile);
+            return { exists: true, writable: true };
           } catch (e) {
-            return false;
+            return { exists: fs.existsSync(dir), writable: false };
           }
         };
 
-        // Create required directories if they don't exist
-        const dirs = [
+        // Required directories with parent paths to check
+        const requiredDirs = [
+          basePath,
           mountPath,
           `${mountPath}/data`,
           `${mountPath}/data/db`,
           certsPath,
         ];
 
-        // First try to create all directories at once with a single sudo command
-        // This is more efficient and avoids multiple sudo prompts
-        try {
-          // Create the base directory first to check permissions
-          if (!dirExists(mountPath)) {
-            fs.mkdirSync(mountPath, { recursive: true });
-            logger.info(`Created base directory: ${mountPath}`);
-          }
-
-          // Build a command that creates all directories in one go
-          const dirsToCreate = dirs.filter((dir) => !dirExists(dir));
-
-          if (dirsToCreate.length > 0) {
-            // Try to create all directories with regular permissions first
-            for (const dir of dirsToCreate) {
-              fs.mkdirSync(dir, { recursive: true });
-              logger.info(`Created directory: ${dir}`);
-            }
-          }
-        } catch (err) {
-          // If permission error, try with sudo to create all directories at once
-          if (err.code === "EACCES" || err.code === "EPERM") {
-            logger.info(
-              "Permission denied, attempting to create directories with sudo",
-            );
-            try {
-              // Create all directories with one sudo command
-              await executeCommand("sudo", ["mkdir", "-p", ...dirs]);
-
-              // Get current user
-              const { stdout: currentUser } = await executeCommand("whoami");
-              const user = currentUser.trim();
-
-              // Set ownership for the entire base directory
-              await executeCommand("sudo", [
-                "chown",
-                "-R",
-                `${user}:${user}`,
-                "/opt/cloudlunacy",
-              ]);
-
-              // Set permissions
-              await executeCommand("sudo", [
-                "chmod",
-                "-R",
-                "755",
-                "/opt/cloudlunacy",
-              ]);
-
-              logger.info("Successfully created all directories with sudo");
-            } catch (sudoError) {
-              logger.error(
-                `Failed to create directories with sudo: ${sudoError.message}`,
-              );
-              return {
-                success: false,
-                message: "Failed to create MongoDB directories, even with sudo",
-                error: sudoError.message,
-                help:
-                  "Please ensure you have sudo access or manually create the directories:\n" +
-                  `sudo mkdir -p ${mountPath}/data/db\n` +
-                  `sudo mkdir -p ${certsPath}\n` +
-                  `sudo chown -R $USER:$USER /opt/cloudlunacy\n` +
-                  "Then try installing MongoDB again.",
-              };
-            }
-          } else {
-            throw err; // Re-throw other errors
+        // Check each directory
+        const dirIssues = [];
+        for (const dir of requiredDirs) {
+          const access = checkDirAccess(dir);
+          if (!access.exists || !access.writable) {
+            dirIssues.push({
+              path: dir,
+              exists: access.exists,
+              writable: access.writable,
+            });
           }
         }
-      } catch (dirError) {
-        logger.error(`Error creating directories: ${dirError.message}`);
+
+        // If there are issues with directories, return detailed error
+        if (dirIssues.length > 0) {
+          const missingDirs = dirIssues
+            .filter((d) => !d.exists)
+            .map((d) => d.path);
+          const nonWritableDirs = dirIssues
+            .filter((d) => d.exists && !d.writable)
+            .map((d) => d.path);
+
+          let errorMsg = "Directory permission issues detected:\n";
+          if (missingDirs.length > 0) {
+            errorMsg += `- Missing directories: ${missingDirs.join(", ")}\n`;
+          }
+          if (nonWritableDirs.length > 0) {
+            errorMsg += `- Non-writable directories: ${nonWritableDirs.join(", ")}\n`;
+          }
+
+          logger.error(errorMsg);
+          return {
+            success: false,
+            message: "Failed to install MongoDB: Directory permission issues",
+            error: "Permission denied",
+            details: { missingDirs, nonWritableDirs },
+            help:
+              "Since the application is running as a service, please run the following commands manually before installation:\n\n" +
+              "sudo mkdir -p /opt/cloudlunacy/mongodb/data/db\n" +
+              "sudo mkdir -p /opt/cloudlunacy/certs\n" +
+              `sudo chown -R ${process.getuid?.() || "SERVICE_USER"}:${process.getgid?.() || "SERVICE_GROUP"} /opt/cloudlunacy\n` +
+              "sudo chmod -R 755 /opt/cloudlunacy\n\n" +
+              "Then restart the service and try again.",
+          };
+        }
+
+        // All directories exist and are writable, continue with installation
+        logger.info("All required directories exist and are writable");
+      } catch (dirCheckError) {
+        logger.error(
+          `Error checking directory permissions: ${dirCheckError.message}`,
+        );
         return {
           success: false,
-          message: `Failed to create required directories: ${dirError.message}`,
-          error: dirError.message,
+          message: `Failed to check directory permissions: ${dirCheckError.message}`,
+          error: dirCheckError.message,
         };
       }
 
@@ -665,96 +655,85 @@ services:
 
       // For production, use Docker to install Redis
       const mountPath = "/opt/cloudlunacy/redis";
+      const basePath = "/opt/cloudlunacy";
 
-      // Create directories with proper error handling
+      // Check if directories exist and are writable before proceeding
       try {
-        // Check if directories exist first
-        const dirExists = (dir) => {
+        // Function to check if directory exists and is writable
+        const checkDirAccess = (dir) => {
           try {
-            return fs.existsSync(dir);
+            if (!fs.existsSync(dir)) {
+              return { exists: false, writable: false };
+            }
+
+            // Check if we can write to the directory
+            const testFile = path.join(dir, `.write-test-${Date.now()}.tmp`);
+            fs.writeFileSync(testFile, "test");
+            fs.unlinkSync(testFile);
+            return { exists: true, writable: true };
           } catch (e) {
-            return false;
+            return { exists: fs.existsSync(dir), writable: false };
           }
         };
 
-        // Create required directories if they don't exist
-        const dirs = [mountPath, `${mountPath}/data`];
+        // Required directories with parent paths to check
+        const requiredDirs = [basePath, mountPath, `${mountPath}/data`];
 
-        // First try to create all directories at once with a single sudo command
-        // This is more efficient and avoids multiple sudo prompts
-        try {
-          // Create the base directory first to check permissions
-          if (!dirExists(mountPath)) {
-            fs.mkdirSync(mountPath, { recursive: true });
-            logger.info(`Created base directory: ${mountPath}`);
-          }
-
-          // Build a command that creates all directories in one go
-          const dirsToCreate = dirs.filter((dir) => !dirExists(dir));
-
-          if (dirsToCreate.length > 0) {
-            // Try to create all directories with regular permissions first
-            for (const dir of dirsToCreate) {
-              fs.mkdirSync(dir, { recursive: true });
-              logger.info(`Created directory: ${dir}`);
-            }
-          }
-        } catch (err) {
-          // If permission error, try with sudo to create all directories at once
-          if (err.code === "EACCES" || err.code === "EPERM") {
-            logger.info(
-              "Permission denied, attempting to create directories with sudo",
-            );
-            try {
-              // Create all directories with one sudo command
-              await executeCommand("sudo", ["mkdir", "-p", ...dirs]);
-
-              // Get current user
-              const { stdout: currentUser } = await executeCommand("whoami");
-              const user = currentUser.trim();
-
-              // Set ownership for the entire base directory
-              await executeCommand("sudo", [
-                "chown",
-                "-R",
-                `${user}:${user}`,
-                "/opt/cloudlunacy",
-              ]);
-
-              // Set permissions
-              await executeCommand("sudo", [
-                "chmod",
-                "-R",
-                "755",
-                "/opt/cloudlunacy",
-              ]);
-
-              logger.info("Successfully created all directories with sudo");
-            } catch (sudoError) {
-              logger.error(
-                `Failed to create directories with sudo: ${sudoError.message}`,
-              );
-              return {
-                success: false,
-                message: "Failed to create Redis directories, even with sudo",
-                error: sudoError.message,
-                help:
-                  "Please ensure you have sudo access or manually create the directories:\n" +
-                  `sudo mkdir -p ${mountPath}/data\n` +
-                  `sudo chown -R $USER:$USER /opt/cloudlunacy\n` +
-                  "Then try installing Redis again.",
-              };
-            }
-          } else {
-            throw err; // Re-throw other errors
+        // Check each directory
+        const dirIssues = [];
+        for (const dir of requiredDirs) {
+          const access = checkDirAccess(dir);
+          if (!access.exists || !access.writable) {
+            dirIssues.push({
+              path: dir,
+              exists: access.exists,
+              writable: access.writable,
+            });
           }
         }
-      } catch (dirError) {
-        logger.error(`Error creating directories: ${dirError.message}`);
+
+        // If there are issues with directories, return detailed error
+        if (dirIssues.length > 0) {
+          const missingDirs = dirIssues
+            .filter((d) => !d.exists)
+            .map((d) => d.path);
+          const nonWritableDirs = dirIssues
+            .filter((d) => d.exists && !d.writable)
+            .map((d) => d.path);
+
+          let errorMsg = "Directory permission issues detected:\n";
+          if (missingDirs.length > 0) {
+            errorMsg += `- Missing directories: ${missingDirs.join(", ")}\n`;
+          }
+          if (nonWritableDirs.length > 0) {
+            errorMsg += `- Non-writable directories: ${nonWritableDirs.join(", ")}\n`;
+          }
+
+          logger.error(errorMsg);
+          return {
+            success: false,
+            message: "Failed to install Redis: Directory permission issues",
+            error: "Permission denied",
+            details: { missingDirs, nonWritableDirs },
+            help:
+              "Since the application is running as a service, please run the following commands manually before installation:\n\n" +
+              "sudo mkdir -p /opt/cloudlunacy/redis/data\n" +
+              `sudo chown -R ${process.getuid?.() || "SERVICE_USER"}:${process.getgid?.() || "SERVICE_GROUP"} /opt/cloudlunacy\n` +
+              "sudo chmod -R 755 /opt/cloudlunacy\n\n" +
+              "Then restart the service and try again.",
+          };
+        }
+
+        // All directories exist and are writable, continue with installation
+        logger.info("All required directories exist and are writable");
+      } catch (dirCheckError) {
+        logger.error(
+          `Error checking directory permissions: ${dirCheckError.message}`,
+        );
         return {
           success: false,
-          message: `Failed to create required directories: ${dirError.message}`,
-          error: dirError.message,
+          message: `Failed to check directory permissions: ${dirCheckError.message}`,
+          error: dirCheckError.message,
         };
       }
 
