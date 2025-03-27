@@ -6,7 +6,9 @@
  * This script creates the necessary directories for MongoDB and Redis
  * with proper permissions. It should be run with sudo permissions.
  *
- * Usage: sudo node setup-database-dirs.js [username]
+ * Usage:
+ *   - Create all standard directories: sudo node setup-database-dirs.js [username]
+ *   - Create a specific directory: sudo node setup-database-dirs.js --dir="/path/to/directory" [username]
  *
  * If username is not provided, the current user's name will be used.
  */
@@ -18,7 +20,79 @@ const { execSync } = require("child_process");
 // Base directory for CloudLunacy
 const basePath = "/opt/cloudlunacy";
 
-// Directories to create
+// Parse command line arguments
+let specificDir = null;
+let username = null;
+
+for (let i = 2; i < process.argv.length; i++) {
+  const arg = process.argv[i];
+  if (arg.startsWith("--dir=")) {
+    specificDir = arg.substring(6);
+  } else if (!username) {
+    username = arg;
+  }
+}
+
+// Get username if not provided
+if (!username) {
+  try {
+    // Try to get current username
+    username = execSync("whoami").toString().trim();
+    console.log(`No username provided, using current user: ${username}`);
+  } catch (error) {
+    console.error("Failed to get current username:", error.message);
+    console.error(
+      "Please provide a username as an argument: sudo node setup-database-dirs.js [username]",
+    );
+    process.exit(1);
+  }
+}
+
+// Check if running as root
+const isRoot = process.getuid && process.getuid() === 0;
+if (!isRoot) {
+  console.error("This script must be run with sudo privileges.");
+  console.error("Please run: sudo node setup-database-dirs.js [username]");
+  process.exit(1);
+}
+
+// If a specific directory is provided, only create that one
+if (specificDir) {
+  console.log(
+    `Creating specific directory: ${specificDir} with proper permissions...`,
+  );
+
+  try {
+    // Create directory if it doesn't exist
+    if (!fs.existsSync(specificDir)) {
+      fs.mkdirSync(specificDir, { recursive: true });
+      console.log(`Created directory: ${specificDir}`);
+    } else {
+      console.log(`Directory already exists: ${specificDir}`);
+    }
+
+    // Set ownership
+    const ownerCommand = `chown -R ${username}:${username} ${specificDir}`;
+    console.log(`Setting ownership: ${ownerCommand}`);
+    execSync(ownerCommand);
+
+    // Set permissions
+    const permCommand = `chmod -R 755 ${specificDir}`;
+    console.log(`Setting permissions: ${permCommand}`);
+    execSync(permCommand);
+
+    console.log(`Successfully created and set permissions for: ${specificDir}`);
+    process.exit(0);
+  } catch (error) {
+    console.error(
+      `Failed to create or set permissions for ${specificDir}:`,
+      error.message,
+    );
+    process.exit(1);
+  }
+}
+
+// Standard directories to create when no specific directory is provided
 const directories = [
   // MongoDB directories
   path.join(basePath, "mongodb"),
@@ -32,30 +106,6 @@ const directories = [
   // Certificates directory
   path.join(basePath, "certs"),
 ];
-
-// Get username from command line or current user
-let username = process.argv[2];
-if (!username) {
-  try {
-    // Try to get current username
-    username = execSync("whoami").toString().trim();
-    console.log(`No username provided, using current user: ${username}`);
-  } catch (error) {
-    console.error("Failed to get current username:", error.message);
-    console.error(
-      "Please provide a username as an argument: sudo node setup-database-dirs.js <username>",
-    );
-    process.exit(1);
-  }
-}
-
-// Check if running as root
-const isRoot = process.getuid && process.getuid() === 0;
-if (!isRoot) {
-  console.error("This script must be run with sudo privileges.");
-  console.error("Please run: sudo node setup-database-dirs.js [username]");
-  process.exit(1);
-}
 
 console.log("Creating CloudLunacy directories with proper permissions...");
 

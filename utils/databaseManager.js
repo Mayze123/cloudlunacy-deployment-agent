@@ -388,10 +388,50 @@ ${config.authEnabled && config.password ? `REDIS_PASSWORD=${config.password}` : 
                 fs.unlinkSync(testFile);
                 return { exists: true, writable: true };
               } catch (createError) {
+                // If mkdir fails due to permission issues, try using sudo or the setup-database-dirs.js script
                 logger.error(
                   `Failed to create directory ${dir}: ${createError.message}`,
                 );
-                return { exists: fs.existsSync(dir), writable: false };
+
+                // Attempt to create directory with elevated permissions
+                try {
+                  logger.info(
+                    `Attempting to create directory with elevated permissions: ${dir}`,
+                  );
+                  // First try using the setup-database-dirs.js script which should have correct permissions
+                  execSync(
+                    `node /opt/cloudlunacy/setup-database-dirs.js --dir="${dir}"`,
+                    { stdio: "inherit" },
+                  );
+
+                  // Check if the directory now exists
+                  if (fs.existsSync(dir)) {
+                    // Check if we can write to the directory
+                    try {
+                      const testFile = path.join(
+                        dir,
+                        `.write-test-${Date.now()}.tmp`,
+                      );
+                      fs.writeFileSync(testFile, "test");
+                      fs.unlinkSync(testFile);
+                      logger.info(
+                        `Successfully created and verified directory: ${dir}`,
+                      );
+                      return { exists: true, writable: true };
+                    } catch (writeError) {
+                      logger.warn(
+                        `Directory exists but is not writable: ${dir}`,
+                      );
+                      return { exists: true, writable: false };
+                    }
+                  }
+                  return { exists: fs.existsSync(dir), writable: false };
+                } catch (elevatedError) {
+                  logger.error(
+                    `Failed to create directory with elevated permissions: ${elevatedError.message}`,
+                  );
+                  return { exists: fs.existsSync(dir), writable: false };
+                }
               }
             }
 
@@ -745,10 +785,50 @@ services:
                 fs.unlinkSync(testFile);
                 return { exists: true, writable: true };
               } catch (createError) {
+                // If mkdir fails due to permission issues, try using sudo or the setup-database-dirs.js script
                 logger.error(
                   `Failed to create directory ${dir}: ${createError.message}`,
                 );
-                return { exists: fs.existsSync(dir), writable: false };
+
+                // Attempt to create directory with elevated permissions
+                try {
+                  logger.info(
+                    `Attempting to create directory with elevated permissions: ${dir}`,
+                  );
+                  // First try using the setup-database-dirs.js script which should have correct permissions
+                  execSync(
+                    `node /opt/cloudlunacy/setup-database-dirs.js --dir="${dir}"`,
+                    { stdio: "inherit" },
+                  );
+
+                  // Check if the directory now exists
+                  if (fs.existsSync(dir)) {
+                    // Check if we can write to the directory
+                    try {
+                      const testFile = path.join(
+                        dir,
+                        `.write-test-${Date.now()}.tmp`,
+                      );
+                      fs.writeFileSync(testFile, "test");
+                      fs.unlinkSync(testFile);
+                      logger.info(
+                        `Successfully created and verified directory: ${dir}`,
+                      );
+                      return { exists: true, writable: true };
+                    } catch (writeError) {
+                      logger.warn(
+                        `Directory exists but is not writable: ${dir}`,
+                      );
+                      return { exists: true, writable: false };
+                    }
+                  }
+                  return { exists: fs.existsSync(dir), writable: false };
+                } catch (elevatedError) {
+                  logger.error(
+                    `Failed to create directory with elevated permissions: ${elevatedError.message}`,
+                  );
+                  return { exists: fs.existsSync(dir), writable: false };
+                }
               }
             }
 
