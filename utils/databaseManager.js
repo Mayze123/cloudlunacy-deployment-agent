@@ -369,7 +369,30 @@ ${config.authEnabled && config.password ? `REDIS_PASSWORD=${config.password}` : 
         const checkDirAccess = (dir) => {
           try {
             if (!fs.existsSync(dir)) {
-              return { exists: false, writable: false };
+              // Try to create directory if it doesn't exist
+              try {
+                logger.info(`Creating directory: ${dir}`);
+                fs.mkdirSync(dir, { recursive: true, mode: 0o755 });
+
+                // Check if the directory was created and is writable
+                if (!fs.existsSync(dir)) {
+                  return { exists: false, writable: false };
+                }
+
+                // Check if we can write to the directory
+                const testFile = path.join(
+                  dir,
+                  `.write-test-${Date.now()}.tmp`,
+                );
+                fs.writeFileSync(testFile, "test");
+                fs.unlinkSync(testFile);
+                return { exists: true, writable: true };
+              } catch (createError) {
+                logger.error(
+                  `Failed to create directory ${dir}: ${createError.message}`,
+                );
+                return { exists: fs.existsSync(dir), writable: false };
+              }
             }
 
             // Check if we can write to the directory
@@ -422,6 +445,17 @@ ${config.authEnabled && config.password ? `REDIS_PASSWORD=${config.password}` : 
           }
 
           logger.error(errorMsg);
+
+          // Get current user and group info
+          let userInfo = "cloudlunacy:cloudlunacy";
+          try {
+            const userId = process.getuid?.() || "cloudlunacy";
+            const groupId = process.getgid?.() || "cloudlunacy";
+            userInfo = `${userId}:${groupId}`;
+          } catch (e) {
+            logger.warn(`Could not determine user info: ${e.message}`);
+          }
+
           return {
             success: false,
             message: "Failed to install MongoDB: Directory permission issues",
@@ -429,9 +463,10 @@ ${config.authEnabled && config.password ? `REDIS_PASSWORD=${config.password}` : 
             details: { missingDirs, nonWritableDirs },
             help:
               "Since the application is running as a service, please run the following commands manually before installation:\n\n" +
-              "sudo mkdir -p /opt/cloudlunacy/mongodb/data/db\n" +
-              "sudo mkdir -p /opt/cloudlunacy/certs\n" +
-              `sudo chown -R ${process.getuid?.() || "SERVICE_USER"}:${process.getgid?.() || "SERVICE_GROUP"} /opt/cloudlunacy\n` +
+              (missingDirs.length > 0
+                ? `sudo mkdir -p ${missingDirs.join(" ")}\n`
+                : "") +
+              `sudo chown -R ${userInfo} /opt/cloudlunacy\n` +
               "sudo chmod -R 755 /opt/cloudlunacy\n\n" +
               "Then restart the service and try again.",
           };
@@ -670,9 +705,10 @@ services:
         };
       }
 
-      // For development mode, Redis should be in docker-compose
+      // For Docker-based setup, we install Redis via docker-compose
       const isDevelopment = process.env.NODE_ENV === "development";
       if (isDevelopment) {
+        // In development mode, Redis should be defined in docker-compose
         return {
           success: true,
           message:
@@ -690,7 +726,30 @@ services:
         const checkDirAccess = (dir) => {
           try {
             if (!fs.existsSync(dir)) {
-              return { exists: false, writable: false };
+              // Try to create directory if it doesn't exist
+              try {
+                logger.info(`Creating directory: ${dir}`);
+                fs.mkdirSync(dir, { recursive: true, mode: 0o755 });
+
+                // Check if the directory was created and is writable
+                if (!fs.existsSync(dir)) {
+                  return { exists: false, writable: false };
+                }
+
+                // Check if we can write to the directory
+                const testFile = path.join(
+                  dir,
+                  `.write-test-${Date.now()}.tmp`,
+                );
+                fs.writeFileSync(testFile, "test");
+                fs.unlinkSync(testFile);
+                return { exists: true, writable: true };
+              } catch (createError) {
+                logger.error(
+                  `Failed to create directory ${dir}: ${createError.message}`,
+                );
+                return { exists: fs.existsSync(dir), writable: false };
+              }
             }
 
             // Check if we can write to the directory
@@ -737,6 +796,17 @@ services:
           }
 
           logger.error(errorMsg);
+
+          // Get current user and group info
+          let userInfo = "cloudlunacy:cloudlunacy";
+          try {
+            const userId = process.getuid?.() || "cloudlunacy";
+            const groupId = process.getgid?.() || "cloudlunacy";
+            userInfo = `${userId}:${groupId}`;
+          } catch (e) {
+            logger.warn(`Could not determine user info: ${e.message}`);
+          }
+
           return {
             success: false,
             message: "Failed to install Redis: Directory permission issues",
@@ -744,8 +814,10 @@ services:
             details: { missingDirs, nonWritableDirs },
             help:
               "Since the application is running as a service, please run the following commands manually before installation:\n\n" +
-              "sudo mkdir -p /opt/cloudlunacy/redis/data\n" +
-              `sudo chown -R ${process.getuid?.() || "SERVICE_USER"}:${process.getgid?.() || "SERVICE_GROUP"} /opt/cloudlunacy\n` +
+              (missingDirs.length > 0
+                ? `sudo mkdir -p ${missingDirs.join(" ")}\n`
+                : "") +
+              `sudo chown -R ${userInfo} /opt/cloudlunacy\n` +
               "sudo chmod -R 755 /opt/cloudlunacy\n\n" +
               "Then restart the service and try again.",
           };
