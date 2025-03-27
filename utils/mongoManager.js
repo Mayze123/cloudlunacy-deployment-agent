@@ -65,11 +65,27 @@ class MongoManager {
    */
   async getDb() {
     if (!this.initialized) {
-      await this.initialize();
+      const initResult = await this.initialize();
+      if (!initResult) {
+        logger.error("Failed to initialize MongoDB connection");
+        return null;
+      }
     }
 
+    // If connection.db is null, attempt to reconnect
     if (!this.connection.db) {
-      await this.connection.connect();
+      try {
+        await this.connection.connect();
+      } catch (error) {
+        logger.error(`Failed to connect to MongoDB: ${error.message}`);
+        return null;
+      }
+    }
+
+    // Double-check that db is available after potential reconnection
+    if (!this.connection.db) {
+      logger.error("MongoDB database connection is null after connect attempt");
+      return null;
     }
 
     return this.connection.db;
@@ -198,8 +214,19 @@ class MongoManager {
         await this.initialize();
       }
 
+      // Get the database object
       const db = await this.getDb();
-      const result = await db.admin().ping();
+
+      // Check if we actually have a valid db object
+      if (!db) {
+        throw new Error(
+          "Failed to obtain database object, connection may not be properly established",
+        );
+      }
+
+      // Try to perform an admin command to verify connection works
+      const adminDb = this.connection.client.db("admin");
+      const result = await adminDb.command({ ping: 1 });
 
       return {
         success: true,
@@ -208,6 +235,14 @@ class MongoManager {
       };
     } catch (error) {
       logger.error(`MongoDB connection test failed: ${error.message}`);
+
+      // If connection object seems to exist but the test fails, force reinitialization
+      if (this.initialized && this.connection.client) {
+        logger.info("Forcing connection reinitialization for next attempt");
+        this.initialized = false;
+        await this.connection.close();
+      }
+
       return {
         success: false,
         message: `MongoDB connection test failed: ${error.message}`,

@@ -83,9 +83,17 @@ class MongoConnection {
    * @returns {Promise<MongoClient>} MongoDB client
    */
   async connect() {
-    if (this.client) {
+    if (
+      this.client &&
+      this.client.topology &&
+      this.client.topology.isConnected()
+    ) {
       return this.client;
     }
+
+    // Reset state if a previous attempt failed
+    this.client = null;
+    this.db = null;
 
     const uri = this.getUri();
     const options = {
@@ -128,15 +136,22 @@ class MongoConnection {
 
       // Try to establish a connection
       await this.client.connect();
-      this.db = this.client.db(this.database);
 
-      // Test the connection with a simple command
-      await this.db.command({ ping: 1 });
+      // Verify connection with a ping before setting the db
+      const adminDb = this.client.db("admin");
+      await adminDb.command({ ping: 1 });
+
+      // Only set this.db after successful connection verification
+      this.db = this.client.db(this.database);
 
       logger.info("Successfully connected to MongoDB through HAProxy");
       return this.client;
     } catch (error) {
       logger.error(`Failed to connect to MongoDB: ${error.message}`);
+
+      // Reset the client and db on failure
+      this.client = null;
+      this.db = null;
 
       // Provide more detailed error information for troubleshooting
       if (error.message.includes("ECONNREFUSED")) {
@@ -160,6 +175,23 @@ class MongoConnection {
       }
 
       throw error;
+    }
+  }
+
+  /**
+   * Close the MongoDB connection and reset state
+   */
+  async close() {
+    try {
+      if (this.client) {
+        await this.client.close();
+        logger.info("MongoDB client connection closed");
+      }
+    } catch (error) {
+      logger.warn(`Error closing MongoDB connection: ${error.message}`);
+    } finally {
+      this.client = null;
+      this.db = null;
     }
   }
 
