@@ -295,30 +295,51 @@ class DatabaseManager {
         for (const dir of dirs) {
           if (!dirExists(dir)) {
             try {
+              // First attempt: try to create directory normally
               fs.mkdirSync(dir, { recursive: true });
               logger.info(`Created directory: ${dir}`);
             } catch (err) {
-              // Handle permission errors with helpful messages
+              // If permission error, try with sudo
               if (err.code === "EACCES" || err.code === "EPERM") {
-                logger.error(
-                  `Permission denied when creating directory: ${dir}`,
+                logger.info(
+                  `Permission denied, attempting to create directory with sudo: ${dir}`,
                 );
-                return {
-                  success: false,
-                  message:
-                    "Permission denied when creating MongoDB directories",
-                  error: err.message,
-                  help:
-                    "Run our setup script with sudo to fix permission issues:\n" +
-                    "sudo node setup-database-dirs.js\n\n" +
-                    "Or manually run these commands:\n" +
-                    `sudo mkdir -p ${mountPath}/data/db\n` +
-                    `sudo mkdir -p ${certsPath}\n` +
-                    `sudo chown -R $USER:$USER /opt/cloudlunacy\n` +
-                    "Then try installing MongoDB again.",
-                };
+                try {
+                  // Execute sudo mkdir command
+                  execSync(`sudo mkdir -p ${dir}`);
+
+                  // Set ownership to current user
+                  const currentUser = execSync("whoami").toString().trim();
+                  execSync(
+                    `sudo chown -R ${currentUser}:${currentUser} ${dir}`,
+                  );
+
+                  // Set appropriate permissions
+                  execSync(`sudo chmod -R 755 ${dir}`);
+
+                  logger.info(
+                    `Successfully created directory with sudo: ${dir}`,
+                  );
+                } catch (sudoError) {
+                  logger.error(
+                    `Failed to create directory with sudo: ${sudoError.message}`,
+                  );
+                  return {
+                    success: false,
+                    message:
+                      "Failed to create MongoDB directories, even with sudo",
+                    error: sudoError.message,
+                    help:
+                      "Please ensure you have sudo access or manually create the directories:\n" +
+                      `sudo mkdir -p ${mountPath}/data/db\n` +
+                      `sudo mkdir -p ${certsPath}\n` +
+                      `sudo chown -R $USER:$USER /opt/cloudlunacy\n` +
+                      "Then try installing MongoDB again.",
+                  };
+                }
+              } else {
+                throw err; // Re-throw other errors
               }
-              throw err; // Re-throw other errors
             }
           }
         }
@@ -636,28 +657,50 @@ services:
         for (const dir of dirs) {
           if (!dirExists(dir)) {
             try {
+              // First attempt: try to create directory normally
               fs.mkdirSync(dir, { recursive: true });
               logger.info(`Created directory: ${dir}`);
             } catch (err) {
-              // Handle permission errors with helpful messages
+              // If permission error, try with sudo
               if (err.code === "EACCES" || err.code === "EPERM") {
-                logger.error(
-                  `Permission denied when creating directory: ${dir}`,
+                logger.info(
+                  `Permission denied, attempting to create directory with sudo: ${dir}`,
                 );
-                return {
-                  success: false,
-                  message: "Permission denied when creating Redis directories",
-                  error: err.message,
-                  help:
-                    "Run our setup script with sudo to fix permission issues:\n" +
-                    "sudo node setup-database-dirs.js\n\n" +
-                    "Or manually run these commands:\n" +
-                    `sudo mkdir -p ${mountPath}/data\n` +
-                    `sudo chown -R $USER:$USER /opt/cloudlunacy\n` +
-                    "Then try installing Redis again.",
-                };
+                try {
+                  // Execute sudo mkdir command
+                  execSync(`sudo mkdir -p ${dir}`);
+
+                  // Set ownership to current user
+                  const currentUser = execSync("whoami").toString().trim();
+                  execSync(
+                    `sudo chown -R ${currentUser}:${currentUser} ${dir}`,
+                  );
+
+                  // Set appropriate permissions
+                  execSync(`sudo chmod -R 755 ${dir}`);
+
+                  logger.info(
+                    `Successfully created directory with sudo: ${dir}`,
+                  );
+                } catch (sudoError) {
+                  logger.error(
+                    `Failed to create directory with sudo: ${sudoError.message}`,
+                  );
+                  return {
+                    success: false,
+                    message:
+                      "Failed to create Redis directories, even with sudo",
+                    error: sudoError.message,
+                    help:
+                      "Please ensure you have sudo access or manually create the directories:\n" +
+                      `sudo mkdir -p ${mountPath}/data\n` +
+                      `sudo chown -R $USER:$USER /opt/cloudlunacy\n` +
+                      "Then try installing Redis again.",
+                  };
+                }
+              } else {
+                throw err; // Re-throw other errors
               }
-              throw err; // Re-throw other errors
             }
           }
         }
