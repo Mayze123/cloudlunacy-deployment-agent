@@ -209,7 +209,7 @@ install_node() {
 }
 
 setup_user_directories() {
-  log "Creating dedicated user and directories..."
+  log "Creating dedicated user..."
   if id "$USERNAME" &> /dev/null; then
     log "User '$USERNAME' already exists."
   else
@@ -217,50 +217,100 @@ setup_user_directories() {
     log "User '$USERNAME' created."
   fi
 
-  mkdir -p "$BASE_DIR"
+  # Create just the base directory if it doesn't exist
+  if [ ! -d "$BASE_DIR" ]; then
+    mkdir -p "$BASE_DIR"
+    log "Base directory created at $BASE_DIR."
+  fi
 
-  # Create MongoDB directories with proper permissions
-  log "Creating MongoDB directories..."
-  mkdir -p "$BASE_DIR/mongodb/data/db"
-
-  # Create Redis directories with proper permissions
-  log "Creating Redis directories..."
-  mkdir -p "$BASE_DIR/redis/data"
-
-  # Create other required directories
-  log "Creating other required directories..."
-  mkdir -p "$CERTS_DIR"
-  mkdir -p "$BASE_DIR/logs"
-  mkdir -p "$BASE_DIR/deployments"
-
-  # Set ownership and permissions for all directories
+  # Set initial ownership of the base directory
   chown -R "$USERNAME":"$USERNAME" "$BASE_DIR"
-  chmod -R 750 "$BASE_DIR"
-
-  # Special permissions for certificates directory
-  chmod 700 "$CERTS_DIR"
-
-  log "Directories created and permissions set at $BASE_DIR."
+  chmod 750 "$BASE_DIR"
 }
 
 download_agent() {
   log "Cloning the CloudLunacy Deployment Agent repository..."
 
-  # Remove existing directory if it exists
+  # Check if the directory exists
   if [ -d "$BASE_DIR" ]; then
-    log "Directory $BASE_DIR already exists. Removing it for a fresh clone..."
-    rm -rf "$BASE_DIR" || {
-      log_error "Failed to remove directory $BASE_DIR"
-      exit 1
-    }
+    log "Directory $BASE_DIR already exists. Preserving data directories while refreshing repository..."
+
+    # Create a temporary directory for the fresh clone
+    TEMP_DIR=$(mktemp -d)
+
+    # Clone into temporary directory
+    git clone https://github.com/Mayze123/cloudlunacy-deployment-agent.git "$TEMP_DIR" \
+      || {
+        log_error "Failed to clone repository"
+        rm -rf "$TEMP_DIR"
+        exit 1
+      }
+
+    # Backup important directories and files
+    log "Backing up data directories and configuration files..."
+    mkdir -p "/tmp/cloudlunacy-backup"
+
+    # Preserve these directories if they exist
+    for DIR in "mongodb" "redis" "certs" "logs" "deployments"; do
+      if [ -d "$BASE_DIR/$DIR" ]; then
+        log "Preserving $DIR directory..."
+        cp -R "$BASE_DIR/$DIR" "/tmp/cloudlunacy-backup/"
+      fi
+    done
+
+    # Also preserve .env and .agent_jwt.json if they exist
+    for FILE in ".env" ".agent_jwt.json"; do
+      if [ -f "$BASE_DIR/$FILE" ]; then
+        log "Preserving $FILE file..."
+        cp "$BASE_DIR/$FILE" "/tmp/cloudlunacy-backup/"
+      fi
+    done
+
+    # Remove current directory contents but preserve the directory itself
+    rm -rf "$BASE_DIR"/* "$BASE_DIR"/.[!.]* 2> /dev/null || true
+
+    # Copy fresh clone to the base directory
+    cp -R "$TEMP_DIR"/* "$TEMP_DIR"/.[!.]* "$BASE_DIR"/ 2> /dev/null || true
+
+    # Restore the backed-up directories and files
+    log "Restoring data directories and configuration files..."
+    for DIR in "mongodb" "redis" "certs" "logs" "deployments"; do
+      if [ -d "/tmp/cloudlunacy-backup/$DIR" ]; then
+        log "Restoring $DIR directory..."
+        mkdir -p "$BASE_DIR/$DIR"
+        cp -R "/tmp/cloudlunacy-backup/$DIR"/* "$BASE_DIR/$DIR"/ 2> /dev/null || true
+      fi
+    done
+
+    # Restore configuration files
+    for FILE in ".env" ".agent_jwt.json"; do
+      if [ -f "/tmp/cloudlunacy-backup/$FILE" ]; then
+        log "Restoring $FILE file..."
+        cp "/tmp/cloudlunacy-backup/$FILE" "$BASE_DIR/"
+      fi
+    done
+
+    # Cleanup
+    rm -rf "$TEMP_DIR" "/tmp/cloudlunacy-backup"
+
+    log "Repository refreshed while preserving data directories."
+  else
+    # If the directory doesn't exist, simply clone the repository
+    git clone https://github.com/Mayze123/cloudlunacy-deployment-agent.git "$BASE_DIR" \
+      || {
+        log_error "Failed to clone repository"
+        exit 1
+      }
+
+    log "Repository freshly cloned at $BASE_DIR."
   fi
 
-  # Clone the repository as root (since root can write to /opt)
-  git clone https://github.com/Mayze123/cloudlunacy-deployment-agent.git "$BASE_DIR" \
-    || {
-      log_error "Failed to clone repository"
-      exit 1
-    }
+  # Create necessary directories if they don't exist
+  mkdir -p "$BASE_DIR/mongodb/data/db"
+  mkdir -p "$BASE_DIR/redis/data"
+  mkdir -p "$CERTS_DIR"
+  mkdir -p "$BASE_DIR/logs"
+  mkdir -p "$BASE_DIR/deployments"
 
   # Change ownership of the cloned repository to the dedicated user
   chown -R "$USERNAME":"$USERNAME" "$BASE_DIR" \
@@ -268,8 +318,6 @@ download_agent() {
       log_error "Failed to set ownership on $BASE_DIR"
       exit 1
     }
-
-  log "Agent repository is freshly cloned at $BASE_DIR."
 }
 
 install_agent_dependencies() {
@@ -340,7 +388,7 @@ verify_installation() {
 fix_permissions() {
   log "Fixing permissions for existing CloudLunacy installation..."
 
-  # Create directories if they don't exist
+  # Ensure all required directories exist without removing any data
   mkdir -p "$BASE_DIR/mongodb/data/db"
   mkdir -p "$BASE_DIR/redis/data"
   mkdir -p "$CERTS_DIR"
@@ -352,7 +400,25 @@ fix_permissions() {
   chmod -R 750 "$BASE_DIR"
 
   # Special permissions for certificates directory
-  chmod 700 "$CERTS_DIR"
+  if [ -d "$CERTS_DIR" ]; then
+    chmod 700 "$CERTS_DIR"
+    if [ -f "$CERTS_DIR/server.key" ]; then
+      chmod 600 "$CERTS_DIR/server.key"
+    fi
+    if [ -f "$CERTS_DIR/server.pem" ]; then
+      chmod 600 "$CERTS_DIR/server.pem"
+    fi
+  fi
+
+  # Ensure ENV file has proper permissions
+  if [ -f "$BASE_DIR/.env" ]; then
+    chmod 600 "$BASE_DIR/.env"
+  fi
+
+  # Ensure JWT file has proper permissions
+  if [ -f "$BASE_DIR/.agent_jwt.json" ]; then
+    chmod 600 "$BASE_DIR/.agent_jwt.json"
+  fi
 
   # Add the user to the docker group
   usermod -aG docker "$USERNAME"
