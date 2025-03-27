@@ -19,9 +19,6 @@
     "dev:prepare-mongo": "node scripts/prepare-mongo-certs.js",
     "dev:no-mongo": "DATABASES_ENABLED= npm run dev",
     "dev:build-no-mongo": "DATABASES_ENABLED= npm run dev:build",
-    "db:install": "node scripts/manage-database.js install",
-    "db:uninstall": "node scripts/manage-database.js uninstall",
-    "db:status": "node scripts/manage-database.js status",
     "test": "node tests/index.js",
     "test:mongo": "node tests/mongo/test-mongo-connections.js",
     "lint": "prettier --write ."

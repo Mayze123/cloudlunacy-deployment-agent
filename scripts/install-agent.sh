@@ -470,18 +470,6 @@ main() {
   verify_installation
 
   log "Installation completed successfully with HAProxy support!"
-
-  # Show information about database management
-  echo ""
-  log "To install and manage databases:"
-  echo "  Install database:   npm run db:install -- <dbType> [options]"
-  echo "  Check status:       npm run db:status -- <dbType>"
-  echo "  Uninstall database: npm run db:uninstall -- <dbType>"
-  echo ""
-  log "Supported database types: mongodb, redis"
-  echo ""
-  log "If you encounter permission issues with database directories, run:"
-  echo "  sudo $(basename "$0") --fix-permissions"
 }
 
 # ------------------------------------------------------------------------------
@@ -630,23 +618,6 @@ SERVER_ID="${SERVER_ID}"
 NODE_ENV=production
 JWT_SECRET=${JWT_SECRET}
 APP_DOMAIN=apps.cloudlunacy.uk
-
-# Database configurations will be added when databases are installed
-# Use 'npm run db:install -- <dbType>' to install and configure databases
-# The presence of database configuration determines if a database is used
-
-# Redis configuration example (added when redis is installed)
-# REDIS_PORT=6379 
-# REDIS_USE_TLS=true
-
-# MongoDB configuration example (added when mongodb is installed)
-# MONGO_MANAGER_USERNAME=admin
-# MONGO_MANAGER_PASSWORD=adminPassword
-# MONGO_DOMAIN=mongodb.cloudlunacy.uk
-# MONGO_USE_TLS=true
-# MONGO_CERT_PATH=${CERTS_DIR}/server.crt
-# MONGO_KEY_PATH=${CERTS_DIR}/server.key
-# MONGO_CA_PATH=${CERTS_DIR}/ca.crt
 EOL
 
   chown "$USERNAME:$USERNAME" "$ENV_FILE"
