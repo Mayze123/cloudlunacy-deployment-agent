@@ -4,6 +4,8 @@ const path = require("path");
 const axios = require("axios");
 const logger = require("./logger");
 const mongoManager = require("./mongoManager");
+const config = require("../config");
+const { executeCommand } = require("./executor");
 
 /**
  * Generic Database Manager
@@ -330,7 +332,7 @@ ${config.authEnabled && config.password ? `REDIS_PASSWORD=${config.password}` : 
   /**
    * Install MongoDB
    * @param {Object} config - Configuration options
-   * @returns {Promise<Object>} Installation result
+   * @returns {Promise<Object>} - Installation result
    */
   async installMongoDB(config) {
     logger.info("Installing MongoDB...");
@@ -360,10 +362,94 @@ ${config.authEnabled && config.password ? `REDIS_PASSWORD=${config.password}` : 
       // For production, use Docker to install MongoDB
       const mountPath = "/opt/cloudlunacy/mongodb";
       const certsPath = "/opt/cloudlunacy/certs";
+      const basePath = "/opt/cloudlunacy";
 
-      // Create directories if they don't exist
-      execSync(`mkdir -p ${mountPath}/data/db`);
-      execSync(`mkdir -p ${certsPath}`);
+      // Check if directories exist and are writable before proceeding
+      try {
+        // Function to check if directory exists and is writable
+        const checkDirAccess = (dir) => {
+          try {
+            if (!fs.existsSync(dir)) {
+              return { exists: false, writable: false };
+            }
+
+            // Check if we can write to the directory
+            const testFile = path.join(dir, `.write-test-${Date.now()}.tmp`);
+            fs.writeFileSync(testFile, "test");
+            fs.unlinkSync(testFile);
+            return { exists: true, writable: true };
+          } catch (e) {
+            return { exists: fs.existsSync(dir), writable: false };
+          }
+        };
+
+        // Required directories with parent paths to check
+        const requiredDirs = [
+          basePath,
+          mountPath,
+          `${mountPath}/data`,
+          `${mountPath}/data/db`,
+          certsPath,
+        ];
+
+        // Check each directory
+        const dirIssues = [];
+        for (const dir of requiredDirs) {
+          const access = checkDirAccess(dir);
+          if (!access.exists || !access.writable) {
+            dirIssues.push({
+              path: dir,
+              exists: access.exists,
+              writable: access.writable,
+            });
+          }
+        }
+
+        // If there are issues with directories, return detailed error
+        if (dirIssues.length > 0) {
+          const missingDirs = dirIssues
+            .filter((d) => !d.exists)
+            .map((d) => d.path);
+          const nonWritableDirs = dirIssues
+            .filter((d) => d.exists && !d.writable)
+            .map((d) => d.path);
+
+          let errorMsg = "Directory permission issues detected:\n";
+          if (missingDirs.length > 0) {
+            errorMsg += `- Missing directories: ${missingDirs.join(", ")}\n`;
+          }
+          if (nonWritableDirs.length > 0) {
+            errorMsg += `- Non-writable directories: ${nonWritableDirs.join(", ")}\n`;
+          }
+
+          logger.error(errorMsg);
+          return {
+            success: false,
+            message: "Failed to install MongoDB: Directory permission issues",
+            error: "Permission denied",
+            details: { missingDirs, nonWritableDirs },
+            help:
+              "Since the application is running as a service, please run the following commands manually before installation:\n\n" +
+              "sudo mkdir -p /opt/cloudlunacy/mongodb/data/db\n" +
+              "sudo mkdir -p /opt/cloudlunacy/certs\n" +
+              `sudo chown -R ${process.getuid?.() || "SERVICE_USER"}:${process.getgid?.() || "SERVICE_GROUP"} /opt/cloudlunacy\n` +
+              "sudo chmod -R 755 /opt/cloudlunacy\n\n" +
+              "Then restart the service and try again.",
+          };
+        }
+
+        // All directories exist and are writable, continue with installation
+        logger.info("All required directories exist and are writable");
+      } catch (dirCheckError) {
+        logger.error(
+          `Error checking directory permissions: ${dirCheckError.message}`,
+        );
+        return {
+          success: false,
+          message: `Failed to check directory permissions: ${dirCheckError.message}`,
+          error: dirCheckError.message,
+        };
+      }
 
       // Create docker-compose file for MongoDB
       const composeFile = `/opt/cloudlunacy/docker-compose.mongodb.yml`;
@@ -387,21 +473,26 @@ services:
 `;
 
       fs.writeFileSync(composeFile, composeContent);
+      logger.info("Created MongoDB docker-compose configuration");
 
       // Set up certificates if TLS is enabled
       if (config.useTls) {
         // Run certificate generation script
-        execSync("npm run dev:prepare-mongo");
+        await executeCommand("npm", ["run", "dev:prepare-mongo"]);
+        logger.info("Generated MongoDB certificates");
       }
 
       // Start MongoDB container
-      execSync(`docker-compose -f ${composeFile} up -d`);
+      await executeCommand("docker-compose", ["-f", composeFile, "up", "-d"]);
+      logger.info("Started MongoDB container");
 
       // Wait for MongoDB to start
+      logger.info("Waiting for MongoDB to initialize...");
       await new Promise((resolve) => setTimeout(resolve, 5000));
 
       // Initialize MongoDB manager
       await mongoManager.initialize();
+      logger.info("MongoDB manager initialized");
 
       // Test connection
       const testResult = await mongoManager.testConnection();
@@ -452,10 +543,17 @@ services:
 
       if (fs.existsSync(composeFile)) {
         // Stop and remove container
-        execSync(`docker-compose -f ${composeFile} down -v`);
+        await executeCommand("docker-compose", [
+          "-f",
+          composeFile,
+          "down",
+          "-v",
+        ]);
+        logger.info("MongoDB container stopped and removed");
 
         // Remove compose file
         fs.unlinkSync(composeFile);
+        logger.info("MongoDB compose file removed");
 
         return {
           success: true,
@@ -490,16 +588,17 @@ services:
       if (isDevelopment) {
         // In development, check if MongoDB container is running
         try {
-          const output = execSync(
-            'docker ps --format "{{.Names}}" | grep mongodb',
-          )
-            .toString()
-            .trim();
+          // Use a shell command to properly handle the pipe
+          const { stdout: output } = await executeCommand("sh", [
+            "-c",
+            'docker ps --format "{{.Names}}" | grep mongodb || true',
+          ]);
+
           const testResult = await mongoManager.testConnection();
 
           return {
             success: true,
-            installed: output.length > 0,
+            installed: output.trim().length > 0,
             running: testResult.success,
             details: testResult,
           };
@@ -514,11 +613,12 @@ services:
       } else {
         // In production, check if MongoDB container is running
         try {
-          const output = execSync(
-            'docker ps --format "{{.Names}}" | grep cloudlunacy-mongodb',
-          )
-            .toString()
-            .trim();
+          // Use a shell command to properly handle the pipe
+          const { stdout: output } = await executeCommand("sh", [
+            "-c",
+            'docker ps --format "{{.Names}}" | grep cloudlunacy-mongodb || true',
+          ]);
+
           let testResult = { success: false };
 
           try {
@@ -529,7 +629,7 @@ services:
 
           return {
             success: true,
-            installed: output.length > 0,
+            installed: output.trim().length > 0,
             running: testResult.success,
             details: testResult,
           };
@@ -555,7 +655,7 @@ services:
   /**
    * Install Redis
    * @param {Object} config - Configuration options
-   * @returns {Promise<Object>} Installation result
+   * @returns {Promise<Object>} - Installation result
    */
   async installRedis(config) {
     logger.info("Installing Redis...");
@@ -583,13 +683,92 @@ services:
 
       // For production, use Docker to install Redis
       const mountPath = "/opt/cloudlunacy/redis";
+      const basePath = "/opt/cloudlunacy";
 
-      // Create directories if they don't exist
-      execSync(`mkdir -p ${mountPath}/data`);
+      // Check if directories exist and are writable before proceeding
+      try {
+        // Function to check if directory exists and is writable
+        const checkDirAccess = (dir) => {
+          try {
+            if (!fs.existsSync(dir)) {
+              return { exists: false, writable: false };
+            }
+
+            // Check if we can write to the directory
+            const testFile = path.join(dir, `.write-test-${Date.now()}.tmp`);
+            fs.writeFileSync(testFile, "test");
+            fs.unlinkSync(testFile);
+            return { exists: true, writable: true };
+          } catch (e) {
+            return { exists: fs.existsSync(dir), writable: false };
+          }
+        };
+
+        // Required directories with parent paths to check
+        const requiredDirs = [basePath, mountPath, `${mountPath}/data`];
+
+        // Check each directory
+        const dirIssues = [];
+        for (const dir of requiredDirs) {
+          const access = checkDirAccess(dir);
+          if (!access.exists || !access.writable) {
+            dirIssues.push({
+              path: dir,
+              exists: access.exists,
+              writable: access.writable,
+            });
+          }
+        }
+
+        // If there are issues with directories, return detailed error
+        if (dirIssues.length > 0) {
+          const missingDirs = dirIssues
+            .filter((d) => !d.exists)
+            .map((d) => d.path);
+          const nonWritableDirs = dirIssues
+            .filter((d) => d.exists && !d.writable)
+            .map((d) => d.path);
+
+          let errorMsg = "Directory permission issues detected:\n";
+          if (missingDirs.length > 0) {
+            errorMsg += `- Missing directories: ${missingDirs.join(", ")}\n`;
+          }
+          if (nonWritableDirs.length > 0) {
+            errorMsg += `- Non-writable directories: ${nonWritableDirs.join(", ")}\n`;
+          }
+
+          logger.error(errorMsg);
+          return {
+            success: false,
+            message: "Failed to install Redis: Directory permission issues",
+            error: "Permission denied",
+            details: { missingDirs, nonWritableDirs },
+            help:
+              "Since the application is running as a service, please run the following commands manually before installation:\n\n" +
+              "sudo mkdir -p /opt/cloudlunacy/redis/data\n" +
+              `sudo chown -R ${process.getuid?.() || "SERVICE_USER"}:${process.getgid?.() || "SERVICE_GROUP"} /opt/cloudlunacy\n` +
+              "sudo chmod -R 755 /opt/cloudlunacy\n\n" +
+              "Then restart the service and try again.",
+          };
+        }
+
+        // All directories exist and are writable, continue with installation
+        logger.info("All required directories exist and are writable");
+      } catch (dirCheckError) {
+        logger.error(
+          `Error checking directory permissions: ${dirCheckError.message}`,
+        );
+        return {
+          success: false,
+          message: `Failed to check directory permissions: ${dirCheckError.message}`,
+          error: dirCheckError.message,
+        };
+      }
 
       // Create password file for Redis if auth is enabled
       if (config.authEnabled && config.password) {
         fs.writeFileSync(`${mountPath}/password.txt`, config.password);
+        logger.info("Created Redis password file");
       }
 
       // Create docker-compose file for Redis
@@ -610,11 +789,14 @@ services:
 `;
 
       fs.writeFileSync(composeFile, composeContent);
+      logger.info("Created Redis docker-compose configuration");
 
       // Start Redis container
-      execSync(`docker-compose -f ${composeFile} up -d`);
+      await executeCommand("docker-compose", ["-f", composeFile, "up", "-d"]);
+      logger.info("Started Redis container");
 
       // Wait for Redis to start
+      logger.info("Waiting for Redis to initialize...");
       await new Promise((resolve) => setTimeout(resolve, 5000));
 
       // Test connection
@@ -666,10 +848,17 @@ services:
 
       if (fs.existsSync(composeFile)) {
         // Stop and remove container
-        execSync(`docker-compose -f ${composeFile} down -v`);
+        await executeCommand("docker-compose", [
+          "-f",
+          composeFile,
+          "down",
+          "-v",
+        ]);
+        logger.info("Redis container stopped and removed");
 
         // Remove compose file
         fs.unlinkSync(composeFile);
+        logger.info("Redis compose file removed");
 
         return {
           success: true,
@@ -704,16 +893,17 @@ services:
       if (isDevelopment) {
         // In development, check if Redis container is running
         try {
-          const output = execSync(
-            'docker ps --format "{{.Names}}" | grep redis',
-          )
-            .toString()
-            .trim();
+          // Use a shell command to properly handle the pipe
+          const { stdout: output } = await executeCommand("sh", [
+            "-c",
+            'docker ps --format "{{.Names}}" | grep redis || true',
+          ]);
+
           const testResult = await this.testRedisConnection(config);
 
           return {
             success: true,
-            installed: output.length > 0,
+            installed: output.trim().length > 0,
             running: testResult.success,
             details: testResult,
           };
@@ -728,16 +918,17 @@ services:
       } else {
         // In production, check if Redis container is running
         try {
-          const output = execSync(
-            'docker ps --format "{{.Names}}" | grep cloudlunacy-redis',
-          )
-            .toString()
-            .trim();
+          // Use a shell command to properly handle the pipe
+          const { stdout: output } = await executeCommand("sh", [
+            "-c",
+            'docker ps --format "{{.Names}}" | grep cloudlunacy-redis || true',
+          ]);
+
           const testResult = await this.testRedisConnection(config);
 
           return {
             success: true,
-            installed: output.length > 0,
+            installed: output.trim().length > 0,
             running: testResult.success,
             details: testResult,
           };
