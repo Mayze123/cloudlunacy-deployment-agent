@@ -80,7 +80,6 @@ class MongoConnection {
     return {
       tlsAllowInvalidCertificates: true,
       tlsAllowInvalidHostnames: true,
-      tlsInsecure: true, // Additional option to bypass strict TLS checking
     };
   }
 
