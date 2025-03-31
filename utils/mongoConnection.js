@@ -47,11 +47,12 @@ class MongoConnection {
         ? `${this.username}:${this.password}@`
         : "";
 
-    // IMPORTANT FIX: Always use the agent subdomain format for HAProxy routing
+    // IMPORTANT: Always use the agent subdomain format for HAProxy routing
     // This enables SNI-based routing to reach the correct MongoDB instance
+    // Format: {agentId}.mongodb.cloudlunacy.uk
     const host = `${this.serverId}.${this.mongoDomain}`;
 
-    // TLS is always enabled
+    // TLS is always enabled with HAProxy Data Plane API
     const tlsParams =
       "?tls=true&tlsAllowInvalidCertificates=true&directConnection=true";
 
@@ -64,7 +65,7 @@ class MongoConnection {
   /**
    * Get TLS options for MongoDB connection
    *
-   * With HAProxy, we don't need to verify certificates on the agent side
+   * With HAProxy Data Plane API, we don't need to verify certificates on the agent side
    * because HAProxy handles TLS termination
    *
    * @returns {Object} TLS options

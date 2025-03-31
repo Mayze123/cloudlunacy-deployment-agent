@@ -32,13 +32,16 @@ class AuthenticationService {
         return;
       }
 
-      logger.info("Authenticating with backend...");
+      logger.info(
+        "Authenticating with backend server for WebSocket connection...",
+      );
 
+      // Updated to use the backend API endpoint for WebSocket authentication
       const response = await axios.post(
-        `${config.api.backendUrl}/api/agent/authenticate`,
+        `${config.api.backendUrl}/api/agents/authenticate`,
         {
-          agentToken: config.api.token,
-          serverId: config.serverId,
+          agentToken: config.serverId,
+          serverId: config.api.token,
         },
         {
           headers: {
@@ -48,8 +51,9 @@ class AuthenticationService {
       );
 
       // Check if we received a JWT token in the response and store it
-      if (response.data.jwt) {
-        await this.storeJwtToken(response.data.jwt);
+      if (response.data.token) {
+        await this.storeJwtToken(response.data.token);
+        logger.info("Authentication successful, received JWT token");
       }
 
       const { wsUrl } = response.data;
@@ -94,14 +98,14 @@ class AuthenticationService {
   handleAuthenticationError(error) {
     if (error.response) {
       logger.error(
-        `Authentication failed with status ${
+        `Backend authentication failed with status ${
           error.response.status
         }: ${JSON.stringify(error.response.data)}`,
       );
     } else if (error.request) {
       logger.error("No response received from backend:", error.request);
     } else {
-      logger.error("Error in authentication request:", error.message);
+      logger.error("Error in backend authentication request:", error.message);
     }
   }
 }

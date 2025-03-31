@@ -21,6 +21,73 @@ class WebSocketService {
     this.PING_TIMEOUT = 5000; // 5 seconds
     // Store reference to authenticationService to avoid circular dependency
     this.authService = null;
+    this.initialized = false;
+  }
+
+  /**
+   * Initialize the WebSocket service
+   * @returns {Promise<boolean>} Success status
+   */
+  async initialize() {
+    try {
+      if (this.initialized) {
+        return true;
+      }
+
+      logger.info("Initializing WebSocket service...");
+
+      // Websocket URL comes from the authentication process
+      // The actual connection will be established after authentication
+      // in the authenticateAndConnect method of authenticationService
+
+      this.initialized = true;
+      logger.info("WebSocket service initialized successfully");
+      return true;
+    } catch (error) {
+      logger.error(`Failed to initialize WebSocket service: ${error.message}`);
+      return false;
+    }
+  }
+
+  /**
+   * Shutdown the WebSocket service
+   * @returns {Promise<boolean>} Success status
+   */
+  async shutdown() {
+    try {
+      // Clear intervals and timeouts
+      if (this.pingInterval) {
+        clearInterval(this.pingInterval);
+        this.pingInterval = null;
+      }
+
+      if (this.pingTimeout) {
+        clearTimeout(this.pingTimeout);
+        this.pingTimeout = null;
+      }
+
+      // Close the WebSocket connection if it exists
+      if (this.ws) {
+        if (this.ws.readyState === WebSocket.OPEN) {
+          // Send a goodbye message
+          this.sendMessage("goodbye", { reason: "Agent shutting down" });
+
+          // Close the connection
+          this.ws.close(1000, "Agent shutting down");
+        } else if (this.ws.readyState === WebSocket.CONNECTING) {
+          this.ws.terminate();
+        }
+
+        this.ws = null;
+      }
+
+      this.initialized = false;
+      logger.info("WebSocket service shut down successfully");
+      return true;
+    } catch (error) {
+      logger.error(`Error shutting down WebSocket service: ${error.message}`);
+      return false;
+    }
   }
 
   /**

@@ -12,42 +12,89 @@ const websocketService = require("./websocketService");
 
 class MetricsService {
   constructor() {
-    this.metricsInterval = null;
+    this.collectionInterval = null;
+    this.metricsHistory = [];
+    this.initialized = false;
+    this.historySize = 60; // Keep 1 hour of metrics (1 sample per minute)
+  }
+
+  /**
+   * Initialize the metrics service
+   * @returns {Promise<boolean>} Success status
+   */
+  async initialize() {
+    try {
+      if (this.initialized) {
+        return true;
+      }
+
+      logger.info("Initializing metrics service...");
+
+      // Get configuration
+      const metricsEnabled = config.metrics.enabled;
+      const collectionInterval = config.metrics.interval;
+
+      if (!metricsEnabled) {
+        logger.info("Metrics collection is disabled in configuration");
+        return true;
+      }
+
+      // Start collecting metrics
+      this.startMetricsCollection(collectionInterval);
+
+      this.initialized = true;
+      logger.info(
+        `Metrics service initialized with collection interval of ${collectionInterval}ms`,
+      );
+      return true;
+    } catch (error) {
+      logger.error(`Failed to initialize metrics service: ${error.message}`);
+      return false;
+    }
+  }
+
+  /**
+   * Shutdown the metrics service
+   * @returns {Promise<boolean>} Success status
+   */
+  async shutdown() {
+    try {
+      if (this.collectionInterval) {
+        clearInterval(this.collectionInterval);
+        this.collectionInterval = null;
+        logger.info("Metrics collection stopped");
+      }
+
+      this.initialized = false;
+      this.metricsHistory = [];
+      logger.info("Metrics service shut down successfully");
+      return true;
+    } catch (error) {
+      logger.error(`Error shutting down metrics service: ${error.message}`);
+      return false;
+    }
   }
 
   /**
    * Start collecting and reporting metrics at regular intervals
    */
-  startMetricsCollection() {
+  startMetricsCollection(interval) {
     // Clear any existing interval
-    if (this.metricsInterval) {
-      clearInterval(this.metricsInterval);
+    if (this.collectionInterval) {
+      clearInterval(this.collectionInterval);
     }
 
-    logger.info(
-      `Starting metrics collection every ${config.metrics.interval / 1000} seconds`,
-    );
+    logger.info(`Starting metrics collection every ${interval / 1000} seconds`);
 
     // Set up the interval for metrics collection
-    this.metricsInterval = setInterval(async () => {
+    this.collectionInterval = setInterval(async () => {
       try {
         const metrics = await this.collectMetrics();
         websocketService.sendMessage("metrics", { metrics });
       } catch (error) {
         logger.error(`Failed to collect or send metrics: ${error.message}`);
       }
-    }, config.metrics.interval);
-  }
-
-  /**
-   * Stop metrics collection
-   */
-  stopMetricsCollection() {
-    if (this.metricsInterval) {
-      clearInterval(this.metricsInterval);
-      this.metricsInterval = null;
-      logger.info("Metrics collection stopped");
-    }
+    }, interval);
   }
 
   /**
@@ -68,6 +115,11 @@ class MetricsService {
         release: os.release(),
         hostname: os.hostname(),
       };
+
+      this.metricsHistory.push(metrics);
+      if (this.metricsHistory.length > this.historySize) {
+        this.metricsHistory.shift();
+      }
 
       return metrics;
     } catch (error) {

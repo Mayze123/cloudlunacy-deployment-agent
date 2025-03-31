@@ -345,21 +345,17 @@ setup_service() {
 
   cat > "$SERVICE_FILE" << EOF
 [Unit]
-Description=CloudLunacy Deployment Agent with HAProxy Support
-After=network.target docker.service
-Requires=docker.service
+Description=CloudLunacy Agent Service
+After=network.target
 
 [Service]
-Type=simple
 User=$USERNAME
-Group=docker
+Group=$USERNAME
 WorkingDirectory=$BASE_DIR
-EnvironmentFile=$BASE_DIR/.env
-ExecStart=/usr/bin/node --trace-warnings $BASE_DIR/agent.js
+ExecStart=/usr/bin/node --trace-warnings $BASE_DIR/src/index.js
 Restart=always
 RestartSec=10
-StandardOutput=append:$LOG_DIR/app.log
-StandardError=append:$LOG_DIR/error.log
+Environment=NODE_ENV=production
 
 [Install]
 WantedBy=multi-user.target
@@ -514,42 +510,37 @@ register_agent() {
 # Fetch TLS Certificates
 # ------------------------------------------------------------------------------
 fetch_certificates() {
-  log "Fetching TLS certificates from front server..."
+  log "Fetching certificates from HAProxy front server..."
 
-  # Create certificates directory
-  mkdir -p "${CERTS_DIR}"
-  chmod 700 "${CERTS_DIR}"
+  # First authenticate to get JWT token if not already available
+  if [ -z "$JWT_TOKEN" ]; then
+    log "Authenticating with HAProxy front server..."
+    AUTH_RESPONSE=$(curl -s -X POST "${FRONT_API_URL}/api/agents/authenticate" \
+      -H "Content-Type: application/json" \
+      -d "{\"agentId\":\"${SERVER_ID}\",\"agentKey\":\"${TOKEN}\"}")
 
-  # Get JWT token from the saved file
-  JWT_FILE="${BASE_DIR}/.agent_jwt.json"
-  if [ ! -f "$JWT_FILE" ]; then
-    log_error "JWT file not found. Cannot fetch certificates."
-    return 1
+    if [ $? -ne 0 ] || [ -z "$AUTH_RESPONSE" ]; then
+      log_error "Authentication request failed"
+      return 1
+    fi
+
+    # Extract JWT token
+    JWT_TOKEN=$(echo "$AUTH_RESPONSE" | jq -r '.token')
+
+    if [ -z "$JWT_TOKEN" ] || [ "$JWT_TOKEN" = "null" ]; then
+      log_error "Failed to extract JWT token from response"
+      log_error "Response: $AUTH_RESPONSE"
+      return 1
+    fi
+
+    # Save JWT token for environment configuration
+    JWT_ENV_VALUE=$JWT_TOKEN
+
+    log "JWT token obtained successfully"
   fi
 
-  TOKEN=$(jq -r '.token' "$JWT_FILE")
-  if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
-    log_error "Invalid JWT token. Cannot fetch certificates."
-    return 1
-  fi
-
-  # Fetch CA certificate
-  log "Fetching CA certificate..."
-  CA_CERT_RESPONSE=$(curl -s "${FRONT_API_URL}/api/certificates/mongodb-ca")
-  if [ $? -ne 0 ] || [ -z "$CA_CERT_RESPONSE" ]; then
-    log_error "Failed to fetch CA certificate"
-    return 1
-  fi
-
-  # Save CA certificate
-  echo "$CA_CERT_RESPONSE" > "${CERTS_DIR}/ca.crt"
-
-  # Fetch agent certificates
-  log "Fetching agent certificates..."
-  CERT_RESPONSE=$(curl -s -H "Authorization: Bearer $TOKEN" "${FRONT_API_URL}/api/certificates/agent/${SERVER_ID}")
-
-  # Debug output
-  log "Certificate response: $(echo "$CERT_RESPONSE" | grep -v serverKey | grep -v serverCert)"
+  # Fetch certificates using the new HAProxy Data Plane API endpoint
+  CERT_RESPONSE=$(curl -s -H "Authorization: Bearer $JWT_TOKEN" "${FRONT_API_URL}/api/config/${SERVER_ID}")
 
   # Check if response is valid JSON
   if ! echo "$CERT_RESPONSE" | jq . > /dev/null 2>&1; then
@@ -567,17 +558,20 @@ fetch_certificates() {
   fi
 
   # Extract certificates from JSON response
-  SERVER_KEY=$(echo "$CERT_RESPONSE" | jq -r '.certificates.serverKey')
-  SERVER_CERT=$(echo "$CERT_RESPONSE" | jq -r '.certificates.serverCert')
+  CA_CERT=$(echo "$CERT_RESPONSE" | jq -r '.certificates.ca')
+  SERVER_CERT=$(echo "$CERT_RESPONSE" | jq -r '.certificates.cert')
+  SERVER_KEY=$(echo "$CERT_RESPONSE" | jq -r '.certificates.key')
 
-  if [ "$SERVER_KEY" = "null" ] || [ "$SERVER_CERT" = "null" ] || [ -z "$SERVER_KEY" ] || [ -z "$SERVER_CERT" ]; then
+  if [ "$CA_CERT" = "null" ] || [ "$SERVER_CERT" = "null" ] || [ "$SERVER_KEY" = "null" ] \
+    || [ -z "$CA_CERT" ] || [ -z "$SERVER_CERT" ] || [ -z "$SERVER_KEY" ]; then
     log_error "Invalid certificate data in response"
     return 1
   fi
 
   # Save certificates
-  echo "$SERVER_KEY" > "${CERTS_DIR}/server.key"
+  echo "$CA_CERT" > "${CERTS_DIR}/ca.crt"
   echo "$SERVER_CERT" > "${CERTS_DIR}/server.crt"
+  echo "$SERVER_KEY" > "${CERTS_DIR}/server.key"
 
   # Create combined PEM file for services that need it
   cat "${CERTS_DIR}/server.key" "${CERTS_DIR}/server.crt" > "${CERTS_DIR}/server.pem"

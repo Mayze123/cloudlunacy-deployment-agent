@@ -7,6 +7,7 @@
 const logger = require("../../utils/logger");
 const databaseManager = require("../../utils/databaseManager");
 const config = require("../config");
+const mongodbService = require("../services/mongodbService");
 
 class DatabaseController {
   /**
@@ -43,16 +44,15 @@ class DatabaseController {
       }
 
       // Register with front server if enabled
-      if (payload.registerFrontdoor && config.api.frontApiUrl) {
+      if (payload.registerProxy && config.api.frontApiUrl) {
         const registrationResult =
           await databaseManager.registerWithFrontServer(
             payload.dbType,
-            payload.dbName,
+            config.serverId, // Use agent ID from config
             payload.hostname || "localhost",
             payload.port,
             {
-              useSubdomain: payload.useSubdomain || false,
-              customDomain: payload.customDomain || null,
+              useTls: true, // Always enable TLS with HAProxy Data Plane API
             },
             config.api.jwt,
           );
@@ -62,6 +62,12 @@ class DatabaseController {
             `Database created but front server registration failed: ${registrationResult.message}`,
           );
           result.frontServerWarning = registrationResult.message;
+        } else {
+          result.domain = registrationResult.domain;
+          result.useTls = registrationResult.useTls;
+          logger.info(
+            `Database registered successfully with domain: ${result.domain}`,
+          );
         }
       }
 
@@ -257,6 +263,104 @@ class DatabaseController {
       ws.send(JSON.stringify(data));
     } else {
       logger.warn("Unable to send response: WebSocket not connected");
+    }
+  }
+
+  /**
+   * Handle database deployment requests that come through the deployment message channel
+   * This maintains backward compatibility with clients that use the deploy message type
+   * @param {Object} payload - Deployment payload
+   * @param {WebSocket} ws - WebSocket connection to respond on
+   */
+  async handleDatabaseDeployment(payload, ws) {
+    try {
+      const { deploymentId, appType, serviceName } = payload;
+
+      logger.info(`Handling ${appType} deployment with ID: ${deploymentId}`);
+
+      // Send initial status
+      this.sendResponse(ws, {
+        type: "status",
+        payload: {
+          deploymentId,
+          status: "started",
+          message: `Starting ${appType} deployment`,
+          timestamp: new Date().toISOString(),
+        },
+      });
+
+      // Convert deployment payload to database creation payload
+      const dbPayload = {
+        databaseId: deploymentId,
+        dbType:
+          appType.toLowerCase() === "mongo" ? "mongodb" : appType.toLowerCase(),
+        dbName: serviceName,
+        port: payload.port || 27017, // Default MongoDB port
+        username: payload.username,
+        password: payload.password,
+        hostname: payload.hostname || "localhost",
+        registerProxy: true,
+        authEnabled: payload.authEnabled !== false,
+      };
+
+      // Handle specific database type
+      if (dbPayload.dbType === "mongodb") {
+        const result = await this.handleMongoDBDeployment(dbPayload);
+
+        if (result.success) {
+          this.sendResponse(ws, {
+            type: "status",
+            payload: {
+              deploymentId,
+              status: "success",
+              message: "MongoDB deployment completed successfully",
+              domain: result.domain,
+              timestamp: new Date().toISOString(),
+            },
+          });
+        } else {
+          throw new Error(result.message || "MongoDB deployment failed");
+        }
+      } else {
+        throw new Error(`Unsupported database type: ${dbPayload.dbType}`);
+      }
+    } catch (error) {
+      logger.error(`Database deployment failed: ${error.message}`);
+      this.sendResponse(ws, {
+        type: "error",
+        payload: {
+          deploymentId: payload.deploymentId,
+          status: "failed",
+          message: error.message,
+          timestamp: new Date().toISOString(),
+        },
+      });
+    }
+  }
+
+  /**
+   * Handle MongoDB-specific deployment logic
+   * @param {Object} dbPayload - Database payload
+   * @returns {Promise<Object>} Deployment result
+   */
+  async handleMongoDBDeployment(dbPayload) {
+    try {
+      // Use the dedicated MongoDB service for deployments
+      const result = await mongodbService.deployMongoDB({
+        port: dbPayload.port,
+        username: dbPayload.username,
+        password: dbPayload.password,
+        authEnabled: dbPayload.authEnabled,
+        dbName: dbPayload.dbName,
+      });
+
+      return result;
+    } catch (error) {
+      logger.error(`MongoDB deployment failed: ${error.message}`);
+      return {
+        success: false,
+        message: `MongoDB deployment failed: ${error.message}`,
+      };
     }
   }
 }

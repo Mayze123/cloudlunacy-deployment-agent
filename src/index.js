@@ -1,111 +1,139 @@
 /**
  * CloudLunacy Deployment Agent
- * Main Entry Point
  *
- * This script is the entry point for the CloudLunacy Deployment Agent installed on a user's VPS.
- * It sets up the agent services, establishes connections with the backend,
- * and handles the initialization of all required modules.
+ * Main entry point for the agent that manages deployment operations
+ * and connects to the CloudLunacy infrastructure.
  */
 
-const logger = require("./utils/logger");
+const http = require("http");
+const logger = require("../utils/logger");
+const coreServices = require("./services/core");
 const config = require("./config");
-const authService = require("./services/authenticationService");
-const metricsService = require("./services/metricsService");
-const databaseManager = require("./utils/databaseManager");
-const { ensureDeploymentPermissions } = require("./utils/permissionCheck");
-const express = require("express");
+const fs = require("fs");
+const path = require("path");
 
-/**
- * Initialize MongoDB connection if needed
- * @returns {boolean} - Success status
- */
-const initializeMongoDB = () => {
-  // In the new architecture, MongoDB TLS termination is handled by HAProxy on the front server.
-  logger.info(
-    "MongoDB initialization: TLS verification is handled by HAProxy on the front server.",
-  );
-  return true;
-};
+// Create necessary directories if they don't exist
+function ensureDirectoriesExist() {
+  const directories = [
+    config.paths.base,
+    config.paths.logs,
+    config.paths.apps,
+    config.paths.certs,
+    config.paths.cache,
+    config.paths.temp,
+  ];
 
-/**
- * Initialize health check server
- * Allows the platform to determine if the agent is running
- */
-const startHealthServer = () => {
-  const app = express();
-  const port = process.env.HEALTH_PORT || 8081;
+  for (const dir of directories) {
+    if (!fs.existsSync(dir)) {
+      logger.info(`Creating directory: ${dir}`);
+      fs.mkdirSync(dir, { recursive: true });
+    }
+  }
+}
 
-  app.get("/health", (req, res) => {
-    res.status(200).send({ status: "ok" });
-  });
-
-  app.listen(port, () => {
-    logger.info(`Health check server listening on port ${port}`);
-  });
-};
-
-/**
- * Main initialization function
- * Sets up the agent and connects to the backend
- */
-async function init() {
+// Simple health check server
+function startHealthServer() {
   try {
-    logger.info("Starting CloudLunacy Deployment Agent...");
-
-    // Check if MongoDB initialization is needed
-    if (
-      process.env.MONGODB_ENABLED === "true" ||
-      process.env.DATABASE_ENABLED === "true"
-    ) {
-      const mongoInitSuccess = initializeMongoDB();
-      if (!mongoInitSuccess) {
-        logger.error(
-          "MongoDB initialization failed, but continuing agent startup...",
+    const server = http.createServer((req, res) => {
+      if (req.url === "/health") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({ status: "ok", timestamp: new Date().toISOString() }),
         );
+      } else {
+        res.writeHead(404);
+        res.end();
       }
+    });
+
+    const port = config.health.port;
+    server.listen(port, () => {
+      logger.info(`Health check server running on port ${port}`);
+    });
+
+    return server;
+  } catch (error) {
+    logger.error(`Failed to start health check server: ${error.message}`);
+    return null;
+  }
+}
+
+// Setup graceful shutdown
+function setupGracefulShutdown(healthServer) {
+  const shutdown = async () => {
+    logger.info("Shutting down CloudLunacy Deployment Agent...");
+
+    // Shutdown health check server
+    if (healthServer) {
+      await new Promise((resolve) => healthServer.close(resolve));
+      logger.info("Health check server shut down");
     }
 
-    // Ensure deployment permissions
-    await ensureDeploymentPermissions();
+    // Shutdown all core services
+    await coreServices.shutdownServices();
+
+    logger.info("CloudLunacy Deployment Agent shut down complete");
+    process.exit(0);
+  };
+
+  // Graceful shutdown on SIGTERM and SIGINT
+  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", shutdown);
+
+  // Handle uncaught exceptions
+  process.on("uncaughtException", (error) => {
+    logger.error(`Uncaught exception: ${error.message}`, {
+      stack: error.stack,
+    });
+    shutdown().catch((err) => {
+      logger.error(
+        `Error during shutdown after uncaught exception: ${err.message}`,
+      );
+      process.exit(1);
+    });
+  });
+
+  // Handle unhandled promise rejections
+  process.on("unhandledRejection", (reason, promise) => {
+    logger.error(`Unhandled promise rejection: ${reason}`, { promise });
+  });
+}
+
+/**
+ * Initialize and start the CloudLunacy Deployment Agent
+ */
+async function main() {
+  try {
+    logger.info("Starting CloudLunacy Deployment Agent...");
+    logger.info(`Environment: ${config.environment}`);
+    logger.info(`Server ID: ${config.serverId}`);
+
+    // Create necessary directories
+    ensureDirectoriesExist();
 
     // Start health check server
-    startHealthServer();
+    const healthServer = startHealthServer();
 
-    // Authenticate with backend and establish WebSocket connection
-    await authService.authenticateAndConnect();
+    // Setup graceful shutdown
+    setupGracefulShutdown(healthServer);
 
-    // Start metrics collection
-    metricsService.startMetricsCollection();
+    // Initialize core services
+    const servicesInitialized = await coreServices.initializeServices();
+    if (!servicesInitialized) {
+      throw new Error("Failed to initialize core services");
+    }
 
-    logger.info("CloudLunacy Deployment Agent initialized successfully");
+    logger.info("CloudLunacy Deployment Agent started successfully");
   } catch (error) {
-    logger.error(`Initialization failed: ${error.message}`, error);
+    logger.error(
+      `Failed to start CloudLunacy Deployment Agent: ${error.message}`,
+    );
     process.exit(1);
   }
 }
 
-// Handle process termination gracefully
-process.on("SIGINT", () => {
-  logger.info("Received SIGINT signal. Shutting down gracefully...");
-  metricsService.stopMetricsCollection();
-  process.exit(0);
+// Start the agent
+main().catch((error) => {
+  logger.error(`Fatal error: ${error.message}`, { stack: error.stack });
+  process.exit(1);
 });
-
-process.on("SIGTERM", () => {
-  logger.info("Received SIGTERM signal. Shutting down gracefully...");
-  metricsService.stopMetricsCollection();
-  process.exit(0);
-});
-
-// Handle uncaught exceptions
-process.on("uncaughtException", (error) => {
-  logger.error("Uncaught exception:", error);
-});
-
-// Handle unhandled promise rejections
-process.on("unhandledRejection", (reason, promise) => {
-  logger.error("Unhandled promise rejection:", reason);
-});
-
-// Start the application
-init();

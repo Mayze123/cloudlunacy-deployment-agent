@@ -62,180 +62,133 @@ class ZeroDowntimeDeployer {
     }
   }
 
-  async registerWithFrontServer(serviceName, targetUrl, appType) {
-    const token = process.env.AGENT_JWT;
-    const frontApiUrl = process.env.FRONT_API_URL;
-
-    if (!token) {
-      throw new Error(
-        "AGENT_JWT is not set - agent not properly registered with front server",
-      );
-    }
-    if (!frontApiUrl) {
-      throw new Error(
-        "FRONT_API_URL is not set - cannot communicate with front server",
-      );
-    }
-
-    logger.info(
-      `Registering service ${serviceName} with front server at ${frontApiUrl}`,
-    );
-    logger.info(`Using target URL: ${targetUrl}`);
-
-    // Extract port from target URL
-    let actualPort = null;
-    let targetHost = null;
+  async registerWithFrontServer(serviceName, targetUrl) {
     try {
-      const urlObj = new URL(targetUrl);
-      actualPort = parseInt(urlObj.port, 10);
-      targetHost = urlObj.host; // this will be hostname:port
+      const frontApiUrl = process.env.FRONT_API_URL;
+      const agentId = process.env.SERVER_ID;
+      const jwt = process.env.AGENT_JWT;
 
-      // Log the extracted values
-      logger.info(
-        `Extracted from URL - host: ${targetHost}, port: ${actualPort}`,
-      );
-
-      if (actualPort && !isNaN(actualPort)) {
-        // Update the port mapping for the base service name (without -blue/-green suffix)
-        const baseServiceName = serviceName.replace(/-blue$|-green$/, "");
-        await portManager.verifyPortMapping(baseServiceName, actualPort);
-        logger.info(
-          `Updated port mapping for ${baseServiceName} to ${actualPort}`,
+      if (!frontApiUrl || !jwt || !agentId) {
+        logger.warn(
+          "Missing FRONT_API_URL, AGENT_JWT, or SERVER_ID - cannot register with front server",
         );
+        return {
+          success: false,
+          message: "Missing required environment variables",
+        };
       }
-    } catch (err) {
-      logger.warn(
-        `Could not parse URL ${targetUrl} to extract port: ${err.message}`,
-      );
-    }
 
-    // Determine the endpoint based on app type
-    const endpoint =
-      appType.toLowerCase() === "mongo"
-        ? `${frontApiUrl}/api/frontdoor/add-subdomain`
-        : `${frontApiUrl}/api/frontdoor/add-app`;
+      logger.info(`Registering ${serviceName} with HAProxy front server...`);
 
-    const payload =
-      appType.toLowerCase() === "mongo"
-        ? {
-            subdomain: serviceName,
-            targetIp: targetUrl.split(":")[0],
-          }
-        : {
-            subdomain: serviceName,
-            targetUrl: targetUrl,
-            protocol: "http",
-          };
-
-    const maxRetries = 5;
-    const initialDelay = 1000; // 1 second
-
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      try {
-        // Log the exact request being sent
-        logger.info(`Sending registration to ${endpoint}`, payload);
-
-        const response = await axios.post(endpoint, payload, {
+      // Use the HAProxy Data Plane API endpoint for HTTP routes only
+      const response = await axios.post(
+        `${frontApiUrl}/api/proxy/http`,
+        {
+          agentId,
+          subdomain: serviceName,
+          targetUrl,
+          options: {
+            useTls: true,
+            check: true,
+          },
+        },
+        {
           headers: {
             "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`,
+            Authorization: `Bearer ${jwt}`,
           },
-          timeout: 10000,
-        });
+        },
+      );
 
+      if (response.data && response.data.success) {
         logger.info(
-          `Service registration successful on attempt ${attempt}:`,
-          response.data,
+          `Service ${serviceName} registered successfully with domain: ${response.data.domain}`,
         );
-        return response.data;
-      } catch (error) {
-        const statusCode = error.response?.status;
-        const errorData = error.response?.data;
-        logger.error(`Registration attempt ${attempt} failed:`, {
-          statusCode,
-          error: errorData || error.message,
-        });
-
-        if ([400, 401, 403].includes(statusCode)) {
-          throw new Error(
-            `Service registration failed: ${errorData?.message || error.message}`,
-          );
-        }
-
-        if (attempt === maxRetries) {
-          throw new Error(
-            `Service registration failed after ${maxRetries} attempts`,
-          );
-        }
-
-        const delay = initialDelay * Math.pow(2, attempt - 1);
-        logger.info(`Retrying in ${delay}ms...`);
-        await new Promise((resolve) => setTimeout(resolve, delay));
+        return {
+          success: true,
+          domain: response.data.domain,
+          message: "Service registered successfully with HAProxy",
+        };
+      } else {
+        const errorMessage =
+          response.data.message || "Unknown error from front server";
+        logger.warn(`Failed to register service: ${errorMessage}`);
+        return { success: false, message: errorMessage };
       }
+    } catch (error) {
+      logger.error(`Failed to register with front server: ${error.message}`);
+
+      // Provide more detailed error information for troubleshooting
+      if (error.response) {
+        logger.error(`Response status: ${error.response.status}`);
+        logger.error(`Response data: ${JSON.stringify(error.response.data)}`);
+      }
+
+      return { success: false, message: `Error: ${error.message}` };
     }
   }
 
   async verifyServiceAccessibility(domain, protocol = "http") {
-    logger.info(`Verifying service accessibility at ${protocol}://${domain}`);
-    const maxAttempts = 10;
-    const retryDelay = 5000;
-    const serviceName = domain.split(".")[0];
-    let directPortCheck = false;
-    let directPort = null;
-    if (this.portMap && this.portMap[serviceName]) {
-      directPort = this.portMap[serviceName];
-      logger.info(`Will also attempt direct port check on port ${directPort}`);
-      directPortCheck = true;
-    }
-
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      try {
-        const response = await axios.get(`${protocol}://${domain}`, {
-          timeout: 5000,
-          validateStatus: (status) => status < 500,
-        });
-        logger.info(
-          `Service at ${domain} is accessible (Status: ${response.status})`,
+    try {
+      const frontApiUrl = process.env.FRONT_API_URL;
+      const jwt = process.env.AGENT_JWT;
+      if (!frontApiUrl || !jwt) {
+        logger.warn(
+          "Missing FRONT_API_URL or AGENT_JWT, skipping service accessibility verification",
         );
         return true;
-      } catch (domainError) {
-        logger.warn(
-          `Attempt ${attempt}/${maxAttempts}: Service at ${domain} not accessible via domain: ${domainError.message}`,
-        );
-        if (directPortCheck && directPort) {
-          try {
-            const LOCAL_IP = execSync("hostname -I | awk '{print $1}'")
-              .toString()
-              .trim();
-            const directUrl = `http://${LOCAL_IP}:${directPort}`;
-            logger.info(`Attempting direct port check: ${directUrl}`);
-            const directResponse = await axios.get(directUrl, {
-              timeout: 3000,
-              validateStatus: (status) => status < 500,
-            });
+      }
+
+      logger.info(
+        `Verifying service accessibility through HAProxy for ${domain}`,
+      );
+
+      // Get the base service name from domain (remove the .apps.cloudlunacy.uk part)
+      const baseServiceName = domain.split(".")[0];
+      logger.info(`Base service name: ${baseServiceName}`);
+
+      try {
+        // Query the front server API to check if the service is configured
+        const response = await axios.get(`${frontApiUrl}/api/proxy/routes`, {
+          headers: {
+            Authorization: `Bearer ${jwt}`,
+            "Content-Type": "application/json",
+          },
+        });
+
+        // Check if the subdomain is in the list
+        if (response.data && response.data.routes) {
+          const serviceFound = response.data.routes.some(
+            (route) => route.subdomain === baseServiceName,
+          );
+
+          if (serviceFound) {
             logger.info(
-              `Direct port check successful (Status: ${directResponse.status})`,
-            );
-            logger.warn(
-              "Service is accessible directly but not via domain. DNS or front server issue likely.",
+              `Service ${baseServiceName} is accessible through HAProxy`,
             );
             return true;
-          } catch (directError) {
+          } else {
             logger.warn(
-              `Direct port check also failed: ${directError.message}`,
+              `Service ${baseServiceName} is not configured in HAProxy`,
             );
+            return false;
           }
-        }
-        if (attempt === maxAttempts) {
-          logger.error(
-            `Service verification failed after ${maxAttempts} attempts`,
-          );
+        } else {
+          logger.warn("Invalid response from HAProxy routes API");
           return false;
         }
-        await new Promise((resolve) => setTimeout(resolve, retryDelay));
+      } catch (apiError) {
+        logger.error(
+          `Error checking HAProxy configuration: ${apiError.message}`,
+        );
+        return false;
       }
+    } catch (error) {
+      logger.error(
+        `Service accessibility verification failed: ${error.message}`,
+      );
+      return false;
     }
-    return false;
   }
 
   async switchTraffic(oldContainer, newContainer, baseServiceName) {
@@ -297,7 +250,7 @@ class ZeroDowntimeDeployer {
       logger.info(
         `Registering new target URL: ${newTargetUrl} for base service name: ${baseServiceName}`,
       );
-      await this.registerWithFrontServer(baseServiceName, newTargetUrl, "app");
+      await this.registerWithFrontServer(baseServiceName, newTargetUrl);
 
       // 3. Wait briefly to ensure the configuration update propagates
       logger.info("Waiting for configuration to propagate...");
@@ -313,7 +266,7 @@ class ZeroDowntimeDeployer {
           const token = process.env.AGENT_JWT;
           if (frontApiUrl && token) {
             const routeCheck = await axios.get(
-              `${frontApiUrl}/api/frontdoor/config`,
+              `${frontApiUrl}/api/proxy/routes`,
               {
                 headers: { Authorization: `Bearer ${token}` },
                 timeout: 5000,
@@ -392,6 +345,21 @@ class ZeroDowntimeDeployer {
       return;
     }
 
+    // Early return for database deployments - MessageHandler should handle this,
+    // but this is an additional safety check
+    if (["mongodb", "mongo"].includes(value.appType.toLowerCase())) {
+      logger.warn(
+        `Received database deployment request for ${value.appType}, but ZeroDowntimeDeployer should not handle this`,
+      );
+      this.sendError(ws, {
+        deploymentId: value.deploymentId,
+        status: "failed",
+        message:
+          "Database deployments should be handled by the database controller",
+      });
+      return;
+    }
+
     const {
       deploymentId,
       appType,
@@ -411,7 +379,9 @@ class ZeroDowntimeDeployer {
     const LOCAL_IP = execSync("hostname -I | awk '{print $1}'")
       .toString()
       .trim();
-    let finalDomain = domain;
+
+    // Application-specific domain only
+    let finalDomain = `${serviceName}.${process.env.APP_DOMAIN}`;
 
     // Initialize port manager and allocate a host port for this service
     await portManager.initialize();
@@ -419,37 +389,30 @@ class ZeroDowntimeDeployer {
       await portManager.allocatePort(serviceName);
     logger.info("🚀 ~ ZeroDowntimeDeployer ~ deploy ~ hostPort:", hostPort);
 
-    if (appType.toLowerCase() === "mongo") {
-      finalDomain = `${serviceName}.${process.env.MONGO_DOMAIN}`;
-    } else {
-      finalDomain = `${serviceName}.${process.env.APP_DOMAIN}`;
-      const resolvedTargetUrl = `http://${LOCAL_IP}:${hostPort}`;
-      logger.info(
-        "🚀 ~ ZeroDowntimeDeployer ~ deploy ~ resolvedTargetUrl:",
-        resolvedTargetUrl,
-      );
-      try {
-        await this.registerWithFrontServer(
-          serviceName,
-          resolvedTargetUrl,
-          appType,
+    // Register the application with the front server
+    const resolvedTargetUrl = `http://${LOCAL_IP}:${hostPort}`;
+    logger.info(
+      "🚀 ~ ZeroDowntimeDeployer ~ deploy ~ resolvedTargetUrl:",
+      resolvedTargetUrl,
+    );
+
+    try {
+      await this.registerWithFrontServer(serviceName, resolvedTargetUrl);
+      const isAccessible = await this.verifyServiceAccessibility(finalDomain);
+      if (!isAccessible) {
+        logger.warn(
+          `Service at ${finalDomain} is not yet accessible, but deployment will continue`,
         );
-        const isAccessible = await this.verifyServiceAccessibility(finalDomain);
-        if (!isAccessible) {
-          logger.warn(
-            `Service at ${finalDomain} is not yet accessible, but deployment will continue`,
-          );
-        } else {
-          logger.info(
-            `Service at ${finalDomain} is accessible and properly routed`,
-          );
-        }
-      } catch (err) {
-        logger.error(
-          `Failed to register service with front server: ${err.message}`,
+      } else {
+        logger.info(
+          `Service at ${finalDomain} is accessible and properly routed`,
         );
-        logger.warn("Continuing deployment despite front API error");
       }
+    } catch (err) {
+      logger.error(
+        `Failed to register service with front server: ${err.message}`,
+      );
+      logger.warn("Continuing deployment despite front API error");
     }
 
     const serviceLockKey = `${serviceName}-${environment}`;

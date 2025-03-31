@@ -22,7 +22,19 @@ class MessageHandler {
     try {
       switch (message.type) {
         case "deploy_app":
-          deployController.handleDeployApp(message, ws);
+          // Check if this is a database deployment
+          if (
+            message.payload &&
+            ["mongodb", "mongo"].includes(
+              message.payload.appType?.toLowerCase(),
+            )
+          ) {
+            logger.info("Routing MongoDB deployment to database controller");
+            databaseController.handleDatabaseDeployment(message.payload, ws);
+          } else {
+            // Regular application deployment
+            deployController.handleDeployApp(message, ws);
+          }
           break;
 
         case "create_database":

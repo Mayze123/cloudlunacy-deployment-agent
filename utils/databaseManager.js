@@ -284,7 +284,7 @@ REDIS_PASSWORD=${mergedConfig.password || ""}
    * Registers the database with the front server for TLS termination
    * @param {string} dbType - Database type
    * @param {string} agentId - Agent ID
-   * @param {string} targetIp - Target IP address
+   * @param {string} targetHost - Target host
    * @param {number} targetPort - Target port
    * @param {Object} options - Database options
    * @param {string} jwt - JWT token for authentication
@@ -293,7 +293,7 @@ REDIS_PASSWORD=${mergedConfig.password || ""}
   async registerWithFrontServer(
     dbType,
     agentId,
-    targetIp,
+    targetHost,
     targetPort,
     options,
     jwt,
@@ -309,44 +309,61 @@ REDIS_PASSWORD=${mergedConfig.password || ""}
 
       logger.info(`Registering ${dbType} with HAProxy front server...`);
 
-      const response = await axios.post(
-        `${FRONT_API_URL}/api/databases/${dbType}/register`,
-        {
-          agentId,
-          targetIp,
-          targetPort,
-          options,
+      // Updated to use the new API endpoint based on database type
+      const endpoint =
+        dbType === "mongodb"
+          ? `${FRONT_API_URL}/api/proxy/mongodb`
+          : `${FRONT_API_URL}/api/proxy/${dbType}`;
+
+      logger.info(`Using endpoint: ${endpoint}`);
+
+      // Construct payload according to the HAProxy Data Plane API specification
+      const payload = {
+        agentId,
+        targetHost,
+        targetPort,
+        options: {
+          useTls: options.useTls !== false, // Default to true for TLS
         },
-        {
-          headers: {
-            Authorization: `Bearer ${jwt}`,
-            "Content-Type": "application/json",
-          },
+      };
+
+      // Make the API request
+      const response = await axios.post(endpoint, payload, {
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${jwt}`,
         },
-      );
+      });
 
       if (response.data && response.data.success) {
+        logger.info(`${dbType} successfully registered with front server`, {
+          domain: response.data.domain,
+          useTls: response.data.useTls,
+        });
         return {
           success: true,
-          message: `${dbType} successfully registered with HAProxy front server`,
-          domain: response.data.domain || response.data.details?.domain,
-          connectionString: response.data.connectionString,
+          domain: response.data.domain,
+          useTls: response.data.useTls,
         };
       } else {
         return {
           success: false,
-          message: `Unexpected response when registering ${dbType}`,
-          details: response.data,
+          message: response.data.message || "Unknown error from front server",
         };
       }
     } catch (error) {
       logger.error(
-        `Error registering ${dbType} with HAProxy: ${error.message}`,
+        `Error registering ${dbType} with front server: ${error.message}`,
       );
+      if (error.response) {
+        logger.error(
+          `Response status: ${error.response.status}, data:`,
+          error.response.data,
+        );
+      }
       return {
         success: false,
-        message: `Error registering ${dbType}: ${error.message}`,
-        error: error.response?.data || error.message,
+        message: error.message,
       };
     }
   }
