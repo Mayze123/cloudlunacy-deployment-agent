@@ -582,24 +582,24 @@ fetch_certificates() {
   if echo "$CERT_RESPONSE" | jq -e '.certificates' > /dev/null 2>&1; then
     # Extract certificates from the standard format
     log "Using standard certificate format"
-    CA_CERT=$(echo "$CERT_RESPONSE" | jq -r '.certificates.ca')
-    SERVER_CERT=$(echo "$CERT_RESPONSE" | jq -r '.certificates.cert')
-    SERVER_KEY=$(echo "$CERT_RESPONSE" | jq -r '.certificates.key')
+    CA_CERT=$(echo "$CERT_RESPONSE" | jq -r '.certificates.caCert')
+    SERVER_CERT=$(echo "$CERT_RESPONSE" | jq -r '.certificates.serverCert')
+    SERVER_KEY=$(echo "$CERT_RESPONSE" | jq -r '.certificates.serverKey')
   elif echo "$CERT_RESPONSE" | jq -e '.config.certificates' > /dev/null 2>&1; then
     # Alternative structure: might be under config.certificates
     log "Using alternative certificate format (under config)"
-    CA_CERT=$(echo "$CERT_RESPONSE" | jq -r '.config.certificates.ca')
-    SERVER_CERT=$(echo "$CERT_RESPONSE" | jq -r '.config.certificates.cert')
-    SERVER_KEY=$(echo "$CERT_RESPONSE" | jq -r '.config.certificates.key')
+    CA_CERT=$(echo "$CERT_RESPONSE" | jq -r '.config.certificates.caCert')
+    SERVER_CERT=$(echo "$CERT_RESPONSE" | jq -r '.config.certificates.serverCert')
+    SERVER_KEY=$(echo "$CERT_RESPONSE" | jq -r '.config.certificates.serverKey')
   else
     # Try to find any certificate-like fields in the response
     log_warn "Certificate structure is non-standard, attempting to locate certificate data..."
     log "Full response: $(echo "$CERT_RESPONSE" | jq .)"
 
     # Look for most likely certificate fields anywhere in the response
-    CA_CERT=$(echo "$CERT_RESPONSE" | jq -r '.. | .ca? | select(. != null)')
-    SERVER_CERT=$(echo "$CERT_RESPONSE" | jq -r '.. | .cert? | select(. != null)')
-    SERVER_KEY=$(echo "$CERT_RESPONSE" | jq -r '.. | .key? | select(. != null)')
+    CA_CERT=$(echo "$CERT_RESPONSE" | jq -r '.. | objects | select(has("caCert") or has("ca")) | .caCert? // .ca? // empty')
+    SERVER_CERT=$(echo "$CERT_RESPONSE" | jq -r '.. | objects | select(has("serverCert") or has("cert")) | .serverCert? // .cert? // empty')
+    SERVER_KEY=$(echo "$CERT_RESPONSE" | jq -r '.. | objects | select(has("serverKey") or has("key")) | .serverKey? // .key? // empty')
 
     if [ -z "$CA_CERT" ] || [ -z "$SERVER_CERT" ] || [ -z "$SERVER_KEY" ]; then
       log_error "Could not locate certificate data in the response"
