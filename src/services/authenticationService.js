@@ -33,15 +33,15 @@ class AuthenticationService {
       }
 
       logger.info(
-        "Authenticating with backend server for WebSocket connection...",
+        "Authenticating with Front Server for WebSocket connection...",
       );
 
-      // Updated to use the backend API endpoint for WebSocket authentication
+      // Updated to use the Front Server API endpoint for authentication
       const response = await axios.post(
-        `${config.api.backendUrl}/api/agents/authenticate`,
+        `${config.api.frontApiUrl}/api/agents/authenticate`,
         {
-          agentToken: config.serverId,
-          serverId: config.api.token,
+          agentId: config.serverId,
+          agentKey: config.api.token,
         },
         {
           headers: {
@@ -58,7 +58,7 @@ class AuthenticationService {
 
       const { wsUrl } = response.data;
       if (!wsUrl) {
-        throw new Error("WebSocket URL not provided by backend.");
+        throw new Error("WebSocket URL not provided by Front Server.");
       }
 
       logger.info(`WebSocket URL received: ${wsUrl}`);
@@ -98,14 +98,17 @@ class AuthenticationService {
   handleAuthenticationError(error) {
     if (error.response) {
       logger.error(
-        `Backend authentication failed with status ${
+        `Front Server authentication failed with status ${
           error.response.status
         }: ${JSON.stringify(error.response.data)}`,
       );
     } else if (error.request) {
-      logger.error("No response received from backend:", error.request);
+      logger.error("No response received from Front Server:", error.request);
     } else {
-      logger.error("Error in backend authentication request:", error.message);
+      logger.error(
+        "Error in Front Server authentication request:",
+        error.message,
+      );
     }
   }
 }
