@@ -559,6 +559,10 @@ fetch_certificates() {
   # Fetch certificates using the new HAProxy Data Plane API endpoint
   CERT_RESPONSE=$(curl -s -H "Authorization: Bearer $JWT_TOKEN" "${FRONT_API_URL}/api/config/${SERVER_ID}")
 
+  # Debug: Print the certificate response structure
+  log "Certificate response structure:"
+  echo "$CERT_RESPONSE" | jq .
+
   # Check if response is valid JSON
   if ! echo "$CERT_RESPONSE" | jq . > /dev/null 2>&1; then
     log_error "Invalid JSON response from certificate endpoint"
@@ -574,14 +578,45 @@ fetch_certificates() {
     return 1
   fi
 
-  # Extract certificates from JSON response
-  CA_CERT=$(echo "$CERT_RESPONSE" | jq -r '.certificates.ca')
-  SERVER_CERT=$(echo "$CERT_RESPONSE" | jq -r '.certificates.cert')
-  SERVER_KEY=$(echo "$CERT_RESPONSE" | jq -r '.certificates.key')
+  # Check if certificates exist in the expected structure
+  if echo "$CERT_RESPONSE" | jq -e '.certificates' > /dev/null 2>&1; then
+    # Extract certificates from the standard format
+    log "Using standard certificate format"
+    CA_CERT=$(echo "$CERT_RESPONSE" | jq -r '.certificates.ca')
+    SERVER_CERT=$(echo "$CERT_RESPONSE" | jq -r '.certificates.cert')
+    SERVER_KEY=$(echo "$CERT_RESPONSE" | jq -r '.certificates.key')
+  elif echo "$CERT_RESPONSE" | jq -e '.config.certificates' > /dev/null 2>&1; then
+    # Alternative structure: might be under config.certificates
+    log "Using alternative certificate format (under config)"
+    CA_CERT=$(echo "$CERT_RESPONSE" | jq -r '.config.certificates.ca')
+    SERVER_CERT=$(echo "$CERT_RESPONSE" | jq -r '.config.certificates.cert')
+    SERVER_KEY=$(echo "$CERT_RESPONSE" | jq -r '.config.certificates.key')
+  else
+    # Try to find any certificate-like fields in the response
+    log_warn "Certificate structure is non-standard, attempting to locate certificate data..."
+    log "Full response: $(echo "$CERT_RESPONSE" | jq .)"
 
+    # Look for most likely certificate fields anywhere in the response
+    CA_CERT=$(echo "$CERT_RESPONSE" | jq -r '.. | .ca? | select(. != null)')
+    SERVER_CERT=$(echo "$CERT_RESPONSE" | jq -r '.. | .cert? | select(. != null)')
+    SERVER_KEY=$(echo "$CERT_RESPONSE" | jq -r '.. | .key? | select(. != null)')
+
+    if [ -z "$CA_CERT" ] || [ -z "$SERVER_CERT" ] || [ -z "$SERVER_KEY" ]; then
+      log_error "Could not locate certificate data in the response"
+      log_error "Please check the response structure and update the script accordingly"
+      return 1
+    else
+      log "Found certificate data in non-standard location"
+    fi
+  fi
+
+  # Validate certificate data
   if [ "$CA_CERT" = "null" ] || [ "$SERVER_CERT" = "null" ] || [ "$SERVER_KEY" = "null" ] \
     || [ -z "$CA_CERT" ] || [ -z "$SERVER_CERT" ] || [ -z "$SERVER_KEY" ]; then
     log_error "Invalid certificate data in response"
+    log_error "CA cert present: $([ -n "$CA_CERT" ] && [ "$CA_CERT" != "null" ] && echo "Yes" || echo "No")"
+    log_error "Server cert present: $([ -n "$SERVER_CERT" ] && [ "$SERVER_CERT" != "null" ] && echo "Yes" || echo "No")"
+    log_error "Server key present: $([ -n "$SERVER_KEY" ] && [ "$SERVER_KEY" != "null" ] && echo "Yes" || echo "No")"
     return 1
   fi
 
