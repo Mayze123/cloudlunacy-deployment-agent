@@ -22,9 +22,16 @@ class DeploymentService {
     try {
       logger.info("Initializing deployment service...");
 
-      // Initialize the zero downtime deployer
-      this.deployer = new ZeroDowntimeDeployer();
-      await this.deployer.initialize();
+      // Use the zero downtime deployer (already instantiated)
+      this.deployer = ZeroDowntimeDeployer;
+
+      // If the deployer has an initialize method, call it
+      if (typeof this.deployer.initialize === "function") {
+        await this.deployer.initialize();
+      } else if (typeof this.deployer.validatePrerequisites === "function") {
+        // Fall back to validatePrerequisites if initialize doesn't exist
+        await this.deployer.validatePrerequisites();
+      }
 
       this.initialized = true;
       logger.info("Deployment service initialized successfully");
