@@ -493,6 +493,17 @@ register_agent() {
   if echo "$RESPONSE" | grep -q "token"; then
     log "Agent registered successfully with front server. Response: $RESPONSE"
 
+    # Extract the JWT token from the response
+    JWT_TOKEN=$(echo "$RESPONSE" | jq -r '.token')
+
+    if [ -z "$JWT_TOKEN" ] || [ "$JWT_TOKEN" = "null" ]; then
+      log_error "Failed to extract JWT token from registration response"
+      log_error "Response: $RESPONSE"
+      exit 1
+    fi
+
+    log "JWT token extracted successfully from registration response"
+
     # Extract MongoDB URL from response if available
     MONGO_URL=$(echo "$RESPONSE" | grep -o '"mongodbUrl":"[^"]*"' | cut -d'"' -f4 || echo "")
     if [ -n "$MONGO_URL" ]; then
@@ -520,8 +531,8 @@ fetch_certificates() {
   log "Fetching certificates from HAProxy front server..."
 
   # First authenticate to get JWT token if not already available
-  if [ -z "$JWT_TOKEN" ]; then
-    log "Authenticating with HAProxy front server..."
+  if [ -z "${JWT_TOKEN:-}" ]; then
+    log "No JWT token available, authenticating with HAProxy front server..."
     AUTH_RESPONSE=$(curl -s -X POST "${FRONT_API_URL}/api/agents/authenticate" \
       -H "Content-Type: application/json" \
       -d "{\"agentId\":\"${SERVER_ID}\",\"agentKey\":\"${AGENT_TOKEN}\"}")
@@ -540,10 +551,9 @@ fetch_certificates() {
       return 1
     fi
 
-    # Save JWT token for environment configuration
-    JWT_ENV_VALUE=$JWT_TOKEN
-
-    log "JWT token obtained successfully"
+    log "JWT token obtained successfully through authentication"
+  else
+    log "Using JWT token from previous registration"
   fi
 
   # Fetch certificates using the new HAProxy Data Plane API endpoint
@@ -619,6 +629,7 @@ SERVER_ID="${SERVER_ID}"
 NODE_ENV=production
 JWT_SECRET=${JWT_SECRET}
 APP_DOMAIN=apps.cloudlunacy.uk
+AGENT_JWT=${JWT_TOKEN}
 EOL
 
   chown "$USERNAME:$USERNAME" "$ENV_FILE"
