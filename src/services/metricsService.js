@@ -90,7 +90,16 @@ class MetricsService {
     this.collectionInterval = setInterval(async () => {
       try {
         const metrics = await this.collectMetrics();
-        websocketService.sendMessage("metrics", { metrics });
+
+        // Only try to send metrics if WebSocket is connected
+        if (websocketService.isConnected()) {
+          websocketService.sendMessage("metrics", { metrics });
+        } else {
+          // Just log metrics locally if WebSocket is not connected
+          if (process.env.DEBUG_METRICS === "true") {
+            logger.debug("Collected metrics (not sent):", metrics);
+          }
+        }
       } catch (error) {
         logger.error(`Failed to collect or send metrics: ${error.message}`);
       }

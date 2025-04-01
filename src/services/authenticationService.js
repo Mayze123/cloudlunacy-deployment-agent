@@ -77,33 +77,52 @@ class AuthenticationService {
         return;
       }
 
-      logger.info("Authenticating with backend...");
+      if (!config.api.backendUrl) {
+        logger.error(
+          "Backend URL not configured, cannot connect to WebSocket server",
+        );
+        return;
+      }
 
-      const response = await axios.post(
-        `${config.api.backendUrl}/api/agent/authenticate`,
-        {
-          agentToken: config.api.token,
-          serverId: config.serverId,
-        },
-        {
-          headers: {
-            "Content-Type": "application/json",
-          },
-        },
+      logger.info(
+        `Authenticating with backend service at ${config.api.backendUrl}...`,
       );
 
-      // Check if we received a JWT token in the response and store it
-      if (response.data.jwt) {
-        await this.storeJwtToken(response.data.jwt);
-      }
+      try {
+        // First try to authenticate with the backend server
+        const response = await axios.post(
+          `${config.api.backendUrl}/api/agent/authenticate`,
+          {
+            agentToken: config.api.token,
+            serverId: config.serverId,
+          },
+          {
+            headers: {
+              "Content-Type": "application/json",
+            },
+            timeout: 10000, // 10 second timeout
+          },
+        );
 
-      const { wsUrl } = response.data;
-      if (!wsUrl) {
-        throw new Error("WebSocket URL not provided by backend.");
-      }
+        // Check if we received a JWT token in the response and store it
+        if (response.data.jwt) {
+          await this.storeJwtToken(response.data.jwt);
+        }
 
-      logger.info(`WebSocket URL received: ${wsUrl}`);
-      websocketService.establishConnection(wsUrl);
+        const { wsUrl } = response.data;
+        if (!wsUrl) {
+          throw new Error("WebSocket URL not provided by backend.");
+        }
+
+        logger.info(`WebSocket URL received from backend: ${wsUrl}`);
+        websocketService.establishConnection(wsUrl);
+      } catch (error) {
+        logger.warn(`Could not connect to backend service: ${error.message}`);
+        logger.warn("Agent will run in standalone mode with HAProxy only");
+
+        // Continue without WebSocket connection in HAProxy-only mode
+        // This allows the agent to work with HAProxy for proxying even without backend connection
+      }
     } catch (error) {
       this.handleAuthenticationError(error);
     }

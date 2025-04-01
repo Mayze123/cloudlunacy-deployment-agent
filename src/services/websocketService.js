@@ -36,9 +36,26 @@ class WebSocketService {
 
       logger.info("Initializing WebSocket service...");
 
-      // Websocket URL comes from the authentication process
-      // The actual connection will be established after authentication
-      // in the authenticateAndConnect method of authenticationService
+      // Get a reference to the authentication service to avoid circular dependencies
+      try {
+        const authService = require("./authenticationService");
+        this.setAuthService(authService);
+
+        // Schedule the connection to be established after initialization
+        // This allows other services to complete initialization first
+        setImmediate(async () => {
+          try {
+            logger.info("Initiating WebSocket connection with backend...");
+            await authService.authenticateAndConnect();
+          } catch (connectError) {
+            logger.error(
+              `Error establishing WebSocket connection: ${connectError.message}`,
+            );
+          }
+        });
+      } catch (error) {
+        logger.warn(`Could not load authentication service: ${error.message}`);
+      }
 
       this.initialized = true;
       logger.info("WebSocket service initialized successfully");
@@ -196,6 +213,14 @@ class WebSocketService {
         "Maximum reconnect attempts reached. Please check the connection.",
       );
     }
+  }
+
+  /**
+   * Check if the WebSocket is connected
+   * @returns {boolean} True if WebSocket is connected
+   */
+  isConnected() {
+    return this.ws !== null && this.ws.readyState === WebSocket.OPEN;
   }
 
   /**

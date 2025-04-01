@@ -739,6 +739,12 @@ configure_env() {
     JWT_SECRET=$(openssl rand -base64 32)
   fi
 
+  # If BACKEND_URL isn't set, use the FRONT_API_URL
+  if [ -z "${BACKEND_URL:-}" ]; then
+    log "BACKEND_URL not set, using FRONT_API_URL as BACKEND_URL"
+    BACKEND_URL="${FRONT_API_URL}"
+  fi
+
   cat > "$ENV_FILE" << EOL
 BACKEND_URL="${BACKEND_URL}"
 FRONT_API_URL="${FRONT_API_URL}"
