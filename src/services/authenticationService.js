@@ -12,6 +12,56 @@ const config = require("../config");
 const websocketService = require("./websocketService");
 
 class AuthenticationService {
+  constructor() {
+    this.initialized = false;
+  }
+
+  /**
+   * Initialize the authentication service
+   * @returns {Promise<boolean>} Success status
+   */
+  async initialize() {
+    try {
+      if (this.initialized) {
+        return true;
+      }
+
+      logger.info("Initializing authentication service...");
+
+      // Check if we have a stored JWT token
+      try {
+        const jwtPath = config.paths.jwtFile;
+        const jwtData = await fs.readFile(jwtPath, "utf8");
+        const parsedData = JSON.parse(jwtData);
+
+        if (parsedData && parsedData.token) {
+          config.api.jwt = parsedData.token;
+          process.env.AGENT_JWT = parsedData.token;
+          logger.info(
+            "Loaded JWT token from file (previously stored by install script)",
+          );
+        } else {
+          logger.warn("JWT token file exists but contains no valid token");
+        }
+      } catch (readError) {
+        logger.warn(`No JWT token file found: ${readError.message}`);
+        logger.info(
+          "JWT token should have been created by the installation script",
+        );
+        // This is not a critical error since we might be using a different auth mechanism
+      }
+
+      this.initialized = true;
+      logger.info("Authentication service initialized successfully");
+      return true;
+    } catch (error) {
+      logger.error(
+        `Failed to initialize authentication service: ${error.message}`,
+      );
+      return false;
+    }
+  }
+
   /**
    * Authenticate with the backend and establish a WebSocket connection.
    */
