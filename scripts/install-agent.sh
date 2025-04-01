@@ -582,42 +582,125 @@ fetch_certificates() {
   if echo "$CERT_RESPONSE" | jq -e '.certificates' > /dev/null 2>&1; then
     # Extract certificates from the standard format
     log "Using standard certificate format"
-    CA_CERT=$(echo "$CERT_RESPONSE" | jq -r '.certificates.caCert')
-    SERVER_CERT=$(echo "$CERT_RESPONSE" | jq -r '.certificates.serverCert')
-    SERVER_KEY=$(echo "$CERT_RESPONSE" | jq -r '.certificates.serverKey')
+
+    # Debug: Check what fields are actually in the certificates object
+    log "Certificate fields available:"
+    echo "$CERT_RESPONSE" | jq -r '.certificates | keys[]'
+
+    # Save raw certificate data to temporary files to bypass any JSON parsing issues
+    TEMP_DIR=$(mktemp -d)
+    echo "$CERT_RESPONSE" | jq -r '.certificates.caCert' > "$TEMP_DIR/ca.crt"
+    echo "$CERT_RESPONSE" | jq -r '.certificates.serverCert' > "$TEMP_DIR/server.crt"
+    echo "$CERT_RESPONSE" | jq -r '.certificates.serverKey' > "$TEMP_DIR/server.key"
+
+    # Check if the temporary files have content
+    CA_SIZE=$(wc -c < "$TEMP_DIR/ca.crt")
+    CERT_SIZE=$(wc -c < "$TEMP_DIR/server.crt")
+    KEY_SIZE=$(wc -c < "$TEMP_DIR/server.key")
+
+    log "Certificate file sizes: CA=$CA_SIZE bytes, Cert=$CERT_SIZE bytes, Key=$KEY_SIZE bytes"
+
+    # Load from temporary files
+    CA_CERT=$(cat "$TEMP_DIR/ca.crt")
+    SERVER_CERT=$(cat "$TEMP_DIR/server.crt")
+    SERVER_KEY=$(cat "$TEMP_DIR/server.key")
+
+    # Clean up
+    rm -rf "$TEMP_DIR"
   elif echo "$CERT_RESPONSE" | jq -e '.config.certificates' > /dev/null 2>&1; then
     # Alternative structure: might be under config.certificates
     log "Using alternative certificate format (under config)"
-    CA_CERT=$(echo "$CERT_RESPONSE" | jq -r '.config.certificates.caCert')
-    SERVER_CERT=$(echo "$CERT_RESPONSE" | jq -r '.config.certificates.serverCert')
-    SERVER_KEY=$(echo "$CERT_RESPONSE" | jq -r '.config.certificates.serverKey')
+
+    # Save raw certificate data to temporary files
+    TEMP_DIR=$(mktemp -d)
+    echo "$CERT_RESPONSE" | jq -r '.config.certificates.caCert' > "$TEMP_DIR/ca.crt"
+    echo "$CERT_RESPONSE" | jq -r '.config.certificates.serverCert' > "$TEMP_DIR/server.crt"
+    echo "$CERT_RESPONSE" | jq -r '.config.certificates.serverKey' > "$TEMP_DIR/server.key"
+
+    # Load from temporary files
+    CA_CERT=$(cat "$TEMP_DIR/ca.crt")
+    SERVER_CERT=$(cat "$TEMP_DIR/server.crt")
+    SERVER_KEY=$(cat "$TEMP_DIR/server.key")
+
+    # Clean up
+    rm -rf "$TEMP_DIR"
   else
     # Try to find any certificate-like fields in the response
     log_warn "Certificate structure is non-standard, attempting to locate certificate data..."
-    log "Full response: $(echo "$CERT_RESPONSE" | jq .)"
 
-    # Look for most likely certificate fields anywhere in the response
-    CA_CERT=$(echo "$CERT_RESPONSE" | jq -r '.. | objects | select(has("caCert") or has("ca")) | .caCert? // .ca? // empty')
-    SERVER_CERT=$(echo "$CERT_RESPONSE" | jq -r '.. | objects | select(has("serverCert") or has("cert")) | .serverCert? // .cert? // empty')
-    SERVER_KEY=$(echo "$CERT_RESPONSE" | jq -r '.. | objects | select(has("serverKey") or has("key")) | .serverKey? // .key? // empty')
+    # Debug: Show all possible paths
+    log "All possible certificate paths:"
+    echo "$CERT_RESPONSE" | jq -r 'paths | select(.[-1] | tostring | test("cert|key|ca"; "i")) | join(".")'
 
-    if [ -z "$CA_CERT" ] || [ -z "$SERVER_CERT" ] || [ -z "$SERVER_KEY" ]; then
-      log_error "Could not locate certificate data in the response"
-      log_error "Please check the response structure and update the script accordingly"
-      return 1
-    else
-      log "Found certificate data in non-standard location"
-    fi
+    # Save the full response for manual inspection
+    TEMP_RESPONSE_FILE=$(mktemp)
+    echo "$CERT_RESPONSE" > "$TEMP_RESPONSE_FILE"
+    log "Full response saved to: $TEMP_RESPONSE_FILE for manual inspection"
+
+    # Extract using direct paths (from the debug output)
+    CA_CERT=$(echo "$CERT_RESPONSE" | jq -r '.certificates.caCert')
+    SERVER_CERT=$(echo "$CERT_RESPONSE" | jq -r '.certificates.serverCert')
+    SERVER_KEY=$(echo "$CERT_RESPONSE" | jq -r '.certificates.serverKey')
   fi
 
-  # Validate certificate data
-  if [ "$CA_CERT" = "null" ] || [ "$SERVER_CERT" = "null" ] || [ "$SERVER_KEY" = "null" ] \
-    || [ -z "$CA_CERT" ] || [ -z "$SERVER_CERT" ] || [ -z "$SERVER_KEY" ]; then
+  # Check if we have valid certificates
+  if [[ "$CA_CERT" != "null" && "$CA_CERT" == *"BEGIN CERTIFICATE"* && "$CA_CERT" == *"END CERTIFICATE"* ]]; then
+    log "CA certificate extracted successfully ($(echo "$CA_CERT" | wc -c) bytes)"
+    CA_CERT_PRESENT="Yes"
+  else
+    log_error "CA certificate missing or invalid"
+    log_error "CA cert value starts with: $(echo "$CA_CERT" | head -c 20)..."
+    CA_CERT_PRESENT="No"
+  fi
+
+  if [[ "$SERVER_CERT" != "null" && "$SERVER_CERT" == *"BEGIN CERTIFICATE"* && "$SERVER_CERT" == *"END CERTIFICATE"* ]]; then
+    log "Server certificate extracted successfully ($(echo "$SERVER_CERT" | wc -c) bytes)"
+    SERVER_CERT_PRESENT="Yes"
+  else
+    log_error "Server certificate missing or invalid"
+    log_error "Server cert value starts with: $(echo "$SERVER_CERT" | head -c 20)..."
+    SERVER_CERT_PRESENT="No"
+  fi
+
+  if [[ "$SERVER_KEY" != "null" && "$SERVER_KEY" == *"BEGIN PRIVATE KEY"* && "$SERVER_KEY" == *"END PRIVATE KEY"* ]]; then
+    log "Server key extracted successfully ($(echo "$SERVER_KEY" | wc -c) bytes)"
+    SERVER_KEY_PRESENT="Yes"
+  else
+    log_error "Server key missing or invalid"
+    log_error "Server key value starts with: $(echo "$SERVER_KEY" | head -c 20)..."
+    SERVER_KEY_PRESENT="No"
+  fi
+
+  # If any certificates are missing, report error and exit
+  if [[ "$CA_CERT_PRESENT" == "No" || "$SERVER_CERT_PRESENT" == "No" || "$SERVER_KEY_PRESENT" == "No" ]]; then
     log_error "Invalid certificate data in response"
-    log_error "CA cert present: $([ -n "$CA_CERT" ] && [ "$CA_CERT" != "null" ] && echo "Yes" || echo "No")"
-    log_error "Server cert present: $([ -n "$SERVER_CERT" ] && [ "$SERVER_CERT" != "null" ] && echo "Yes" || echo "No")"
-    log_error "Server key present: $([ -n "$SERVER_KEY" ] && [ "$SERVER_KEY" != "null" ] && echo "Yes" || echo "No")"
-    return 1
+    log_error "CA cert present: $CA_CERT_PRESENT"
+    log_error "Server cert present: $SERVER_CERT_PRESENT"
+    log_error "Server key present: $SERVER_KEY_PRESENT"
+
+    # Try alternative extraction directly from the saved response
+    if [ -n "$TEMP_RESPONSE_FILE" ]; then
+      log "Attempting direct certificate extraction from saved response..."
+
+      # Extract using grep/sed for more resilient extraction
+      CA_CERT=$(grep -ozP '(?<="caCert":")[^"]*(?=")' "$TEMP_RESPONSE_FILE" | sed 's/\\n/\n/g')
+      SERVER_CERT=$(grep -ozP '(?<="serverCert":")[^"]*(?=")' "$TEMP_RESPONSE_FILE" | sed 's/\\n/\n/g')
+      SERVER_KEY=$(grep -ozP '(?<="serverKey":")[^"]*(?=")' "$TEMP_RESPONSE_FILE" | sed 's/\\n/\n/g')
+
+      log "Direct extraction results:"
+      log "CA cert size: $(echo "$CA_CERT" | wc -c) bytes"
+      log "Server cert size: $(echo "$SERVER_CERT" | wc -c) bytes"
+      log "Server key size: $(echo "$SERVER_KEY" | wc -c) bytes"
+
+      # Recheck if certificates are valid now
+      if [[ "$CA_CERT" == *"BEGIN CERTIFICATE"* && "$SERVER_CERT" == *"BEGIN CERTIFICATE"* && "$SERVER_KEY" == *"BEGIN PRIVATE KEY"* ]]; then
+        log "Direct extraction successful, proceeding with certificates"
+      else
+        return 1
+      fi
+    else
+      return 1
+    fi
   fi
 
   # Save certificates
