@@ -44,7 +44,7 @@ async function registerAgent() {
     console.log(`Using FRONT_API_URL: ${FRONT_API_URL}`);
 
     const response = await axios.post(
-      `${FRONT_API_URL}/api/agent/register`,
+      `${FRONT_API_URL}/api/agents/register`,
       { agentId: SERVER_ID },
       {
         headers: {

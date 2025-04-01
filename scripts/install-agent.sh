@@ -478,7 +478,7 @@ register_agent() {
   log "register_agent ~ FRONT_API_URL, $FRONT_API_URL"
   log "register_agent ~ LOCAL_IP:, $LOCAL_IP"
 
-  RESPONSE=$(curl -s -X POST "${FRONT_API_URL}/api/agent/register" \
+  RESPONSE=$(curl -s -X POST "${FRONT_API_URL}/api/agents/register" \
     -H "Content-Type: application/json" \
     -H "X-Agent-IP: ${LOCAL_IP}" \
     -d "{\"agentId\": \"${SERVER_ID}\"}")
