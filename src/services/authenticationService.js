@@ -12,11 +12,6 @@ const config = require("../config");
 const websocketService = require("./websocketService");
 
 class AuthenticationService {
-  constructor() {
-    // Set the reference to this service in websocketService to avoid circular dependency
-    websocketService.setAuthService(this);
-  }
-
   /**
    * Authenticate with the backend and establish a WebSocket connection.
    */
@@ -32,16 +27,13 @@ class AuthenticationService {
         return;
       }
 
-      logger.info(
-        "Authenticating with Front Server for WebSocket connection...",
-      );
+      logger.info("Authenticating with backend...");
 
-      // Updated to use the Front Server API endpoint for authentication
       const response = await axios.post(
-        `${config.api.frontApiUrl}/api/agents/authenticate`,
+        `${config.api.backendUrl}/api/agent/authenticate`,
         {
-          agentId: config.serverId,
-          agentKey: config.api.token,
+          agentToken: config.api.token,
+          serverId: config.serverId,
         },
         {
           headers: {
@@ -51,14 +43,13 @@ class AuthenticationService {
       );
 
       // Check if we received a JWT token in the response and store it
-      if (response.data.token) {
-        await this.storeJwtToken(response.data.token);
-        logger.info("Authentication successful, received JWT token");
+      if (response.data.jwt) {
+        await this.storeJwtToken(response.data.jwt);
       }
 
       const { wsUrl } = response.data;
       if (!wsUrl) {
-        throw new Error("WebSocket URL not provided by Front Server.");
+        throw new Error("WebSocket URL not provided by backend.");
       }
 
       logger.info(`WebSocket URL received: ${wsUrl}`);
@@ -98,17 +89,14 @@ class AuthenticationService {
   handleAuthenticationError(error) {
     if (error.response) {
       logger.error(
-        `Front Server authentication failed with status ${
+        `Authentication failed with status ${
           error.response.status
         }: ${JSON.stringify(error.response.data)}`,
       );
     } else if (error.request) {
-      logger.error("No response received from Front Server:", error.request);
+      logger.error("No response received from backend:", error.request);
     } else {
-      logger.error(
-        "Error in Front Server authentication request:",
-        error.message,
-      );
+      logger.error("Error in authentication request:", error.message);
     }
   }
 }

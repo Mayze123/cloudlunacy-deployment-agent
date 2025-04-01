@@ -478,10 +478,17 @@ register_agent() {
   log "register_agent ~ FRONT_API_URL, $FRONT_API_URL"
   log "register_agent ~ LOCAL_IP:, $LOCAL_IP"
 
+  # Hostname as agent name, or use SERVER_ID if hostname is not available
+  AGENT_NAME=$(hostname || echo "${SERVER_ID}-agent")
+
   RESPONSE=$(curl -s -X POST "${FRONT_API_URL}/api/agents/register" \
     -H "Content-Type: application/json" \
-    -H "X-Agent-IP: ${LOCAL_IP}" \
-    -d "{\"agentId\": \"${SERVER_ID}\"}")
+    -d "{
+      \"agentId\": \"${SERVER_ID}\",
+      \"agentKey\": \"${AGENT_TOKEN}\",
+      \"agentName\": \"${AGENT_NAME}\",
+      \"targetIp\": \"${LOCAL_IP}\"
+    }")
 
   if echo "$RESPONSE" | grep -q "token"; then
     log "Agent registered successfully with front server. Response: $RESPONSE"
@@ -517,7 +524,7 @@ fetch_certificates() {
     log "Authenticating with HAProxy front server..."
     AUTH_RESPONSE=$(curl -s -X POST "${FRONT_API_URL}/api/agents/authenticate" \
       -H "Content-Type: application/json" \
-      -d "{\"agentId\":\"${SERVER_ID}\",\"agentKey\":\"${TOKEN}\"}")
+      -d "{\"agentId\":\"${SERVER_ID}\",\"agentKey\":\"${AGENT_TOKEN}\"}")
 
     if [ $? -ne 0 ] || [ -z "$AUTH_RESPONSE" ]; then
       log_error "Authentication request failed"
