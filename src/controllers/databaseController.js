@@ -116,6 +116,7 @@ class DatabaseController {
         uninstall: "uninstall",
         backup: "backup",
         restore: "restore",
+        install: "install",
       };
 
       // Check if operation is supported
@@ -132,10 +133,14 @@ class DatabaseController {
       let result;
 
       // Handle different types of operations
-      if (operation === "status" || operation === "uninstall") {
+      if (
+        operation === "status" ||
+        operation === "uninstall" ||
+        operation === "install"
+      ) {
         // These operations use the database manager's handleDatabaseOperation
         result = await databaseManager.handleDatabaseOperation(
-          operation === "uninstall" ? "uninstall" : "status",
+          operationMap[operation],
           dbType,
           options,
         );
@@ -164,24 +169,52 @@ class DatabaseController {
       }
 
       // Send success response
-      this.sendResponse(ws, {
-        type: "database_operation_completed",
-        success: true,
-        operation,
-        dbType,
-        dbName,
-        result,
-      });
+      if (operation === "install") {
+        // For installation operations, send a specific database_installed message
+        this.sendResponse(ws, {
+          type: "database_installed",
+          success: true,
+          installationId: payload.installationId,
+          dbType,
+          connectionDetails: {
+            dbName,
+            ...result,
+          },
+        });
+      } else {
+        // For other operations, send the standard operation completed message
+        this.sendResponse(ws, {
+          type: "database_operation_completed",
+          success: true,
+          operation,
+          dbType,
+          dbName,
+          result,
+        });
+      }
     } catch (error) {
       logger.error(`Database operation failed: ${error.message}`);
-      this.sendResponse(ws, {
-        type: "database_error",
-        success: false,
-        operation: payload.operation,
-        error: error.message,
-        dbType: payload.dbType,
-        dbName: payload.dbName,
-      });
+
+      if (payload.operation === "install") {
+        // For installation failures, send a specific database_installation_failed message
+        this.sendResponse(ws, {
+          type: "database_installation_failed",
+          success: false,
+          installationId: payload.installationId,
+          error: error.message,
+          dbType: payload.dbType,
+        });
+      } else {
+        // For other operation failures, send the standard error message
+        this.sendResponse(ws, {
+          type: "database_error",
+          success: false,
+          operation: payload.operation,
+          error: error.message,
+          dbType: payload.dbType,
+          dbName: payload.dbName,
+        });
+      }
     }
   }
 
@@ -245,6 +278,7 @@ class DatabaseController {
       "uninstall",
       "backup",
       "restore",
+      "install",
     ];
     if (!supportedOperations.includes(payload.operation)) {
       throw new Error(
