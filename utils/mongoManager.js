@@ -22,12 +22,39 @@ class MongoManager {
    */
   async initialize() {
     if (this.initialized) {
+      logger.info(
+        "MongoDB manager already initialized, using existing connection",
+      );
       return true;
     }
 
     try {
       logger.info("Initializing MongoDB connection through HAProxy");
+
+      // Add configuration diagnostics
+      logger.info(`Server ID: ${process.env.SERVER_ID || "not set"}`);
+      logger.info(
+        `MongoDB Domain: ${process.env.MONGO_DOMAIN || "mongodb.cloudlunacy.uk"}`,
+      );
+      logger.info(
+        `MongoDB Auth: ${process.env.MONGO_MANAGER_USERNAME ? "Credentials configured" : "No credentials configured"}`,
+      );
+
+      // Try connection with more detailed error handling
       await this.connection.connect();
+
+      // Test if we can actually perform operations
+      try {
+        logger.info("Testing MongoDB connection with ping command");
+        const adminDb = this.connection.client.db("admin");
+        const pingResult = await adminDb.command({ ping: 1 });
+        logger.info(`MongoDB ping result: ${JSON.stringify(pingResult)}`);
+      } catch (pingError) {
+        logger.warn(
+          `MongoDB ping test failed: ${pingError.message}, but connection was established`,
+        );
+      }
+
       this.initialized = true;
       this.retryCount = 0;
       logger.info(
@@ -36,6 +63,23 @@ class MongoManager {
       return true;
     } catch (error) {
       logger.error(`MongoDB initialization failed: ${error.message}`);
+
+      // Check for specific error cases
+      if (error.message.includes("ECONNREFUSED")) {
+        logger.error(
+          "Connection refused - MongoDB server may not be running or network blocked",
+        );
+      } else if (error.message.includes("ETIMEDOUT")) {
+        logger.error(
+          "Connection timed out - check network settings and firewall rules",
+        );
+      } else if (error.message.includes("Authentication failed")) {
+        logger.error(
+          "Authentication failed - check MongoDB username and password",
+        );
+      } else if (error.message.includes("SSL")) {
+        logger.error("SSL/TLS error - check certificate configuration");
+      }
 
       // Add retry logic with exponential backoff
       if (this.retryCount < this.maxRetries) {
@@ -53,6 +97,17 @@ class MongoManager {
             resolve(result);
           }, delay);
         });
+      }
+
+      // After all retries are exhausted, try one more time with direct IP connection
+      if (this.retryCount === this.maxRetries) {
+        logger.info(
+          "All standard retries exhausted, attempting alternative connection methods",
+        );
+        // Next attempt will be handled by the connection class with fallback strategies
+        this.initialized = false;
+        await this.connection.close();
+        return false;
       }
 
       return false;

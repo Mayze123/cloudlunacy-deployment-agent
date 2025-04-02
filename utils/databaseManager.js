@@ -369,6 +369,96 @@ REDIS_PASSWORD=${mergedConfig.password || ""}
   }
 
   /**
+   * Check MongoDB Docker container status and configuration
+   * @returns {Promise<Object>} Container status and configuration
+   */
+  async checkMongoDBContainer() {
+    try {
+      logger.info("Checking MongoDB Docker container status and configuration");
+
+      // Check if container exists and is running
+      const { stdout: containerOutput } = await executeCommand("sh", [
+        "-c",
+        'docker ps --filter "name=cloudlunacy-mongodb" --format "{{.Status}}" || echo "Container not found"',
+      ]);
+
+      const isRunning = containerOutput.includes("Up");
+
+      if (!isRunning) {
+        logger.error("MongoDB container is not running or doesn't exist");
+        return {
+          success: false,
+          running: false,
+          message: "MongoDB container is not running or doesn't exist",
+        };
+      }
+
+      logger.info(`MongoDB container status: ${containerOutput.trim()}`);
+
+      // Check container launch command to verify TLS configuration
+      const { stdout: cmdOutput } = await executeCommand("sh", [
+        "-c",
+        'docker inspect cloudlunacy-mongodb --format="{{.Config.Cmd}}" || echo "[]"',
+      ]);
+
+      logger.info(`MongoDB container command: ${cmdOutput.trim()}`);
+
+      const tlsEnabled =
+        cmdOutput.includes("--tlsMode") ||
+        cmdOutput.includes("--tls") ||
+        cmdOutput.includes("--tlsCertificateKeyFile");
+
+      // Check port mapping
+      const { stdout: portOutput } = await executeCommand("sh", [
+        "-c",
+        'docker inspect cloudlunacy-mongodb --format="{{.NetworkSettings.Ports}}" || echo "No port mapping"',
+      ]);
+
+      logger.info(`MongoDB container port mapping: ${portOutput.trim()}`);
+
+      // Check if certs volume is properly mounted
+      const { stdout: volOutput } = await executeCommand("sh", [
+        "-c",
+        'docker inspect cloudlunacy-mongodb --format="{{range .Mounts}}{{if eq .Destination \"/etc/mongodb/certs\"}}{{.Source}}{{end}}{{end}}" || echo "No certs volume mounted"',
+      ]);
+
+      const certsVolume = volOutput.trim();
+      logger.info(`MongoDB certs volume: ${certsVolume || "Not mounted"}`);
+
+      // Try to get MongoDB logs for troubleshooting
+      const { stdout: logOutput } = await executeCommand("sh", [
+        "-c",
+        'docker logs --tail 20 cloudlunacy-mongodb 2>&1 | grep -i "tls\\|ssl\\|cert\\|listening\\|accept" || echo "No relevant logs found"',
+      ]);
+
+      if (logOutput.trim().length > 0) {
+        logger.info("Recent MongoDB logs related to TLS/connections:");
+        logOutput
+          .trim()
+          .split("\n")
+          .forEach((line) => {
+            logger.info(`[MongoDB Log] ${line}`);
+          });
+      }
+
+      return {
+        success: true,
+        running: isRunning,
+        tlsEnabled,
+        certsVolume,
+        message: "MongoDB container is running",
+      };
+    } catch (error) {
+      logger.error(`Failed to check MongoDB container: ${error.message}`);
+      return {
+        success: false,
+        message: `Failed to check MongoDB container: ${error.message}`,
+        error: error.message,
+      };
+    }
+  }
+
+  /**
    * Install MongoDB
    * @param {Object} config - Configuration options
    * @returns {Promise<Object>} - Installation result
@@ -380,10 +470,23 @@ REDIS_PASSWORD=${mergedConfig.password || ""}
       // Check if MongoDB is already installed
       const isInstalled = await this.checkMongoDBStatus(config);
       if (isInstalled.success && isInstalled.installed) {
+        // If installed, validate the container configuration
+        const containerCheck = await this.checkMongoDBContainer();
+
+        if (containerCheck.success) {
+          logger.info("MongoDB container validation results:");
+          logger.info(`- Running: ${containerCheck.running}`);
+          logger.info(`- TLS Enabled: ${containerCheck.tlsEnabled}`);
+          logger.info(
+            `- Certs Volume: ${containerCheck.certsVolume || "Not found"}`,
+          );
+        }
+
         return {
           success: true,
           message: "MongoDB is already installed and running",
           status: isInstalled,
+          containerDetails: containerCheck,
         };
       }
 

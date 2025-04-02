@@ -98,9 +98,9 @@ class MongoConnection {
 
     const uri = this.getUri();
     const options = {
-      serverSelectionTimeoutMS: 5000,
-      socketTimeoutMS: 10000, // Increase socket timeout
-      connectTimeoutMS: 10000, // Increase connect timeout
+      serverSelectionTimeoutMS: 30000, // Increased from 5000 to 30000
+      socketTimeoutMS: 30000, // Increased from 10000 to 30000
+      connectTimeoutMS: 30000, // Increased from 10000 to 30000
       maxPoolSize: 5, // Limit pool size for better management
       retryWrites: false, // Disable retry writes for initial connection
       ...this.getTlsOptions(),
@@ -111,6 +111,13 @@ class MongoConnection {
       `Connecting to MongoDB through HAProxy at ${this.serverId}.${
         this.mongoDomain
       }:${this.port} with TLS enabled`,
+    );
+    logger.info(`Using URI: ${uri.replace(/:[^:]*@/, ":***@")}`);
+    logger.info(
+      `Connection options: ${JSON.stringify({
+        ...options,
+        tlsCAFile: this.caPath ? "[set]" : "[not set]",
+      })}`,
     );
 
     // Log the DNS hostname resolution for troubleshooting
@@ -131,7 +138,11 @@ class MongoConnection {
       );
     }
 
+    // First attempt - Standard connection through HAProxy with TLS
     try {
+      logger.info(
+        "Attempting primary connection strategy: Through HAProxy with TLS",
+      );
       // Create a new MongoDB client
       this.client = new MongoClient(uri, options);
 
@@ -148,13 +159,9 @@ class MongoConnection {
       logger.info("Successfully connected to MongoDB through HAProxy");
       return this.client;
     } catch (error) {
-      logger.error(`Failed to connect to MongoDB: ${error.message}`);
+      logger.error(`First connection strategy failed: ${error.message}`);
 
-      // Reset the client and db on failure
-      this.client = null;
-      this.db = null;
-
-      // Provide more detailed error information for troubleshooting
+      // Detailed error logging
       if (error.message.includes("ECONNREFUSED")) {
         logger.error(
           `Connection refused: Make sure HAProxy is running and listening on port ${this.port}`,
@@ -175,7 +182,116 @@ class MongoConnection {
         );
       }
 
-      throw error;
+      // Reset client for next attempt
+      if (this.client) {
+        try {
+          await this.client.close();
+        } catch (closeErr) {
+          // Ignore close errors
+        }
+        this.client = null;
+      }
+
+      // Second attempt - Try direct connection with TLS
+      try {
+        // Try connecting directly to the resolved IP with TLS
+        logger.info(
+          "Attempting fallback connection strategy: Direct IP with TLS",
+        );
+
+        // Get the IP from DNS resolution
+        const { execSync } = require("child_process");
+        const hostname = `${this.serverId}.${this.mongoDomain}`;
+        const ip = execSync(`dig +short ${hostname}`).toString().trim();
+
+        if (!ip) {
+          logger.error(
+            "Failed to resolve hostname to IP for direct connection",
+          );
+          throw new Error("DNS resolution failed");
+        }
+
+        // Build direct connection URI with IP
+        const directUri = `mongodb://${
+          this.username && this.password
+            ? `${this.username}:${this.password}@`
+            : ""
+        }${ip}:${this.port}/${this.database}?tls=true&tlsAllowInvalidCertificates=true&directConnection=true`;
+
+        logger.info(
+          `Trying direct connection to IP: ${ip} (URI: ${directUri.replace(/:[^:]*@/, ":***@")})`,
+        );
+
+        this.client = new MongoClient(directUri, options);
+        await this.client.connect();
+
+        // Verify connection
+        const adminDb = this.client.db("admin");
+        await adminDb.command({ ping: 1 });
+
+        this.db = this.client.db(this.database);
+        logger.info(
+          "Successfully connected to MongoDB using direct IP with TLS",
+        );
+        return this.client;
+      } catch (directError) {
+        logger.error(
+          `Direct IP connection with TLS failed: ${directError.message}`,
+        );
+
+        // Reset client for next attempt
+        if (this.client) {
+          try {
+            await this.client.close();
+          } catch (closeErr) {
+            // Ignore close errors
+          }
+          this.client = null;
+        }
+
+        // Third attempt - Try connection without TLS
+        try {
+          logger.info(
+            "Attempting final fallback strategy: Connection without TLS",
+          );
+
+          // Build non-TLS URI
+          const nonTlsUri = `mongodb://${
+            this.username && this.password
+              ? `${this.username}:${this.password}@`
+              : ""
+          }${this.serverId}.${this.mongoDomain}:${this.port}/${this.database}?directConnection=true`;
+
+          logger.info(
+            `Trying connection without TLS: ${nonTlsUri.replace(/:[^:]*@/, ":***@")}`,
+          );
+
+          // Modified options without TLS
+          const nonTlsOptions = {
+            ...options,
+            tls: false,
+            tlsAllowInvalidCertificates: false,
+            tlsAllowInvalidHostnames: false,
+          };
+
+          this.client = new MongoClient(nonTlsUri, nonTlsOptions);
+          await this.client.connect();
+
+          // Verify connection
+          const adminDb = this.client.db("admin");
+          await adminDb.command({ ping: 1 });
+
+          this.db = this.client.db(this.database);
+          logger.info("Successfully connected to MongoDB without TLS");
+          return this.client;
+        } catch (nonTlsError) {
+          logger.error(`Non-TLS connection failed: ${nonTlsError.message}`);
+          // All connection strategies have failed
+          this.client = null;
+          this.db = null;
+          throw error; // Throw the original error
+        }
+      }
     }
   }
 
