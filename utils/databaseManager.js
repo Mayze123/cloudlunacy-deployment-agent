@@ -624,6 +624,33 @@ services:
       fs.writeFileSync(composeFile, composeContent);
       logger.info("Created MongoDB docker-compose configuration");
 
+      // Ensure the MongoDB data directory exists
+      try {
+        // Create the data directory if it doesn't exist
+        if (!fs.existsSync(`${mountPath}/data/db`)) {
+          logger.info(`Creating MongoDB data directory: ${mountPath}/data/db`);
+          fs.mkdirSync(`${mountPath}/data/db`, { recursive: true });
+          // Set proper permissions
+          try {
+            execSync(`chmod -R 777 ${mountPath}/data/db`);
+            logger.info("Set permissions on MongoDB data directory");
+          } catch (permErr) {
+            logger.warn(
+              `Failed to set permissions on data directory: ${permErr.message}`,
+            );
+          }
+        }
+      } catch (dirErr) {
+        logger.error(
+          `Failed to create MongoDB data directory: ${dirErr.message}`,
+        );
+        return {
+          success: false,
+          message: `Failed to create MongoDB data directory: ${dirErr.message}`,
+          error: dirErr.message,
+        };
+      }
+
       // Set up certificates (always required now since TLS is mandatory)
       if (isDevelopment) {
         try {
