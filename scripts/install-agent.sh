@@ -481,12 +481,7 @@ register_agent() {
   # Hostname as agent name, or use SERVER_ID if hostname is not available
   AGENT_NAME=$(hostname || echo "${SERVER_ID}-agent")
 
-  # Print debug information
-  log "Sending registration request to ${FRONT_API_URL}/api/agent/register..."
-  log "Request payload: agentId=${SERVER_ID}, agentName=${AGENT_NAME}, targetIp=${LOCAL_IP}"
-
-  # Use the new standardized endpoint /api/agent/register with 30s timeout
-  RESPONSE=$(curl -s -m 30 --connect-timeout 10 -X POST "${FRONT_API_URL}/api/agent/register" \
+  RESPONSE=$(curl -s -X POST "${FRONT_API_URL}/api/agents/register" \
     -H "Content-Type: application/json" \
     -d "{
       \"agentId\": \"${SERVER_ID}\",
@@ -495,56 +490,22 @@ register_agent() {
       \"targetIp\": \"${LOCAL_IP}\"
     }")
 
-  # Check curl exit status
-  CURL_STATUS=$?
-  if [ $CURL_STATUS -ne 0 ]; then
-    log_error "curl command failed with exit code $CURL_STATUS"
-    case $CURL_STATUS in
-      7) log_error "Failed to connect to server. Check if server is running and reachable." ;;
-      28) log_error "Connection timeout. The server is taking too long to respond." ;;
-      *) log_error "Unknown curl error. See curl man page for error code $CURL_STATUS." ;;
-    esac
-    exit 1
-  fi
-
-  log "Received response from server"
-
-  # Save raw response to file for inspection
-  RESP_FILE="/tmp/agent_registration_response.json"
-  echo "$RESPONSE" > "$RESP_FILE"
-  log "Full response saved to $RESP_FILE"
-
-  # First, check if the response is valid JSON
-  if ! echo "$RESPONSE" | jq . > /dev/null 2>&1; then
-    log_error "Received invalid JSON response"
-    log_error "Raw response: ${RESPONSE:0:200}..."
-    exit 1
-  fi
-
-  # Print full response for debugging (limited to prevent overwhelming logs)
-  RESPONSE_BRIEF=$(echo "$RESPONSE" | jq -c '.' | cut -c 1-300)
-  log "Response brief: $RESPONSE_BRIEF..."
-
-  # Extract status and check success field first
-  SUCCESS=$(echo "$RESPONSE" | jq -r '.success // "false"')
-
-  if [ "$SUCCESS" == "true" ]; then
-    log "Agent registered successfully with front server."
+  if echo "$RESPONSE" | grep -q "token"; then
+    log "Agent registered successfully with front server. Response: $RESPONSE"
 
     # Extract the JWT token from the response
-    JWT_TOKEN=$(echo "$RESPONSE" | jq -r '.token // ""')
+    JWT_TOKEN=$(echo "$RESPONSE" | jq -r '.token')
 
     if [ -z "$JWT_TOKEN" ] || [ "$JWT_TOKEN" = "null" ]; then
       log_error "Failed to extract JWT token from registration response"
-      log_error "Success was true but no token field found"
-      log_error "Response: $RESPONSE_BRIEF..."
+      log_error "Response: $RESPONSE"
       exit 1
     fi
 
     log "JWT token extracted successfully from registration response"
 
     # Extract MongoDB URL from response if available
-    MONGO_URL=$(echo "$RESPONSE" | jq -r '.mongodbUrl // ""')
+    MONGO_URL=$(echo "$RESPONSE" | grep -o '"mongodbUrl":"[^"]*"' | cut -d'"' -f4 || echo "")
     if [ -n "$MONGO_URL" ]; then
       log "MongoDB will be accessible via HAProxy at: $MONGO_URL"
     fi
@@ -556,13 +517,9 @@ register_agent() {
     # Change ownership to the cloudlunacy user
     chown $USERNAME:$USERNAME "$JWT_FILE"
     log "JWT file permissions updated for $USERNAME user"
-
-    # Return success code
-    return 0
   else
-    ERROR_MSG=$(echo "$RESPONSE" | jq -r '.message // .error // "Unknown error"')
-    log_error "Agent registration failed with front server: $ERROR_MSG"
-    log_error "Error response: $RESPONSE_BRIEF..."
+    log "Agent registration failed with front server. Response: $RESPONSE"
+    log_error "Agent registration failed with front server. Response: $RESPONSE"
     exit 1
   fi
 }
@@ -576,111 +533,50 @@ fetch_certificates() {
   # First authenticate to get JWT token if not already available
   if [ -z "${JWT_TOKEN:-}" ]; then
     log "No JWT token available, authenticating with HAProxy front server..."
+    AUTH_RESPONSE=$(curl -s -X POST "${FRONT_API_URL}/api/agents/authenticate" \
+      -H "Content-Type: application/json" \
+      -d "{\"agentId\":\"${SERVER_ID}\",\"agentKey\":\"${AGENT_TOKEN}\"}")
 
-    MAX_RETRIES=3
-    RETRY_COUNT=0
-    RETRY_DELAY=5
+    if [ $? -ne 0 ] || [ -z "$AUTH_RESPONSE" ]; then
+      log_error "Authentication request failed"
+      return 1
+    fi
 
-    while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-      log "Authentication attempt $(($RETRY_COUNT + 1))/$MAX_RETRIES"
+    # Extract JWT token
+    JWT_TOKEN=$(echo "$AUTH_RESPONSE" | jq -r '.token')
 
-      AUTH_RESPONSE=$(curl -s --max-time 30 -X POST "${FRONT_API_URL}/api/agents/authenticate" \
-        -H "Content-Type: application/json" \
-        -d "{\"agentId\":\"${SERVER_ID}\",\"agentKey\":\"${AGENT_TOKEN}\"}")
+    if [ -z "$JWT_TOKEN" ] || [ "$JWT_TOKEN" = "null" ]; then
+      log_error "Failed to extract JWT token from response"
+      log_error "Response: $AUTH_RESPONSE"
+      return 1
+    fi
 
-      if [ $? -ne 0 ] || [ -z "$AUTH_RESPONSE" ]; then
-        log_error "Authentication request failed or timed out"
-        RETRY_COUNT=$((RETRY_COUNT + 1))
-
-        if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
-          log "Retrying in $RETRY_DELAY seconds..."
-          sleep $RETRY_DELAY
-          continue
-        fi
-
-        log_error "Authentication failed after $MAX_RETRIES attempts"
-        return 1
-      fi
-
-      # Extract JWT token
-      JWT_TOKEN=$(echo "$AUTH_RESPONSE" | jq -r '.token')
-
-      if [ -z "$JWT_TOKEN" ] || [ "$JWT_TOKEN" = "null" ]; then
-        log_error "Failed to extract JWT token from response"
-        log_error "Response: $AUTH_RESPONSE"
-
-        RETRY_COUNT=$((RETRY_COUNT + 1))
-        if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
-          log "Retrying in $RETRY_DELAY seconds..."
-          sleep $RETRY_DELAY
-          continue
-        fi
-
-        return 1
-      fi
-
-      log "JWT token obtained successfully through authentication"
-      break
-    done
+    log "JWT token obtained successfully through authentication"
   else
     log "Using JWT token from previous registration"
   fi
 
-  # Fetch certificates using the HAProxy Data Plane API endpoint
-  log "Requesting certificate configuration from front server..."
-
-  MAX_RETRIES=3
-  RETRY_COUNT=0
-  RETRY_DELAY=5
-
-  while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-    log "Certificate request attempt $(($RETRY_COUNT + 1))/$MAX_RETRIES"
-
-    CERT_RESPONSE=$(curl -s --max-time 60 -H "Authorization: Bearer $JWT_TOKEN" "${FRONT_API_URL}/api/config/${SERVER_ID}")
-
-    # Check if response is valid JSON
-    if ! echo "$CERT_RESPONSE" | jq . > /dev/null 2>&1; then
-      log_error "Invalid JSON response from certificate endpoint"
-      log_error "Raw response: $CERT_RESPONSE"
-
-      RETRY_COUNT=$((RETRY_COUNT + 1))
-      if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
-        log "Retrying in $RETRY_DELAY seconds..."
-        sleep $RETRY_DELAY
-        continue
-      fi
-
-      # Even if certificate fetching fails, we can still proceed with agent setup
-      # but TLS will be disabled
-      log_warn "Proceeding without certificates - TLS will be disabled"
-      return 0
-    fi
-
-    # Check if the response indicates success
-    SUCCESS=$(echo "$CERT_RESPONSE" | jq -r '.success')
-    if [ "$SUCCESS" != "true" ]; then
-      ERROR_MSG=$(echo "$CERT_RESPONSE" | jq -r '.message')
-      log_error "Certificate request failed: $ERROR_MSG"
-
-      RETRY_COUNT=$((RETRY_COUNT + 1))
-      if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
-        log "Retrying in $RETRY_DELAY seconds..."
-        sleep $RETRY_DELAY
-        continue
-      fi
-
-      # Continue with agent setup even if certificate fetching fails
-      log_warn "Proceeding without certificates - TLS will be disabled"
-      return 0
-    fi
-
-    # Certificate response was successful, break out of retry loop
-    break
-  done
+  # Fetch certificates using the new HAProxy Data Plane API endpoint
+  CERT_RESPONSE=$(curl -s -H "Authorization: Bearer $JWT_TOKEN" "${FRONT_API_URL}/api/config/${SERVER_ID}")
 
   # Debug: Print the certificate response structure
   log "Certificate response structure:"
   echo "$CERT_RESPONSE" | jq .
+
+  # Check if response is valid JSON
+  if ! echo "$CERT_RESPONSE" | jq . > /dev/null 2>&1; then
+    log_error "Invalid JSON response from certificate endpoint"
+    log_error "Raw response: $CERT_RESPONSE"
+    return 1
+  fi
+
+  # Check if the response indicates success
+  SUCCESS=$(echo "$CERT_RESPONSE" | jq -r '.success')
+  if [ "$SUCCESS" != "true" ]; then
+    ERROR_MSG=$(echo "$CERT_RESPONSE" | jq -r '.message')
+    log_error "Certificate request failed: $ERROR_MSG"
+    return 1
+  fi
 
   # Check if certificates exist in the expected structure
   if echo "$CERT_RESPONSE" | jq -e '.certificates' > /dev/null 2>&1; then
@@ -775,12 +671,12 @@ fetch_certificates() {
     SERVER_KEY_PRESENT="No"
   fi
 
-  # If any certificates are missing, we can proceed but with TLS disabled
+  # If any certificates are missing, report error and exit
   if [[ "$CA_CERT_PRESENT" == "No" || "$SERVER_CERT_PRESENT" == "No" || "$SERVER_KEY_PRESENT" == "No" ]]; then
-    log_warn "One or more certificate components are missing"
-    log_warn "CA cert present: $CA_CERT_PRESENT"
-    log_warn "Server cert present: $SERVER_CERT_PRESENT"
-    log_warn "Server key present: $SERVER_KEY_PRESENT"
+    log_error "Invalid certificate data in response"
+    log_error "CA cert present: $CA_CERT_PRESENT"
+    log_error "Server cert present: $SERVER_CERT_PRESENT"
+    log_error "Server key present: $SERVER_KEY_PRESENT"
 
     # Try alternative extraction directly from the saved response
     if [ -n "$TEMP_RESPONSE_FILE" ]; then
@@ -800,19 +696,14 @@ fetch_certificates() {
       if [[ "$CA_CERT" == *"BEGIN CERTIFICATE"* && "$SERVER_CERT" == *"BEGIN CERTIFICATE"* && "$SERVER_KEY" == *"BEGIN PRIVATE KEY"* ]]; then
         log "Direct extraction successful, proceeding with certificates"
       else
-        log_warn "Direct extraction failed, proceeding without TLS"
-        # Continue without certificates - agent will work but without TLS
-        return 0
+        return 1
       fi
     else
-      log_warn "Proceeding without certificates - TLS will be disabled"
-      # Continue without certificates - agent will work but without TLS
-      return 0
+      return 1
     fi
   fi
 
   # Save certificates
-  mkdir -p "${CERTS_DIR}"
   echo "$CA_CERT" > "${CERTS_DIR}/ca.crt"
   echo "$SERVER_CERT" > "${CERTS_DIR}/server.crt"
   echo "$SERVER_KEY" > "${CERTS_DIR}/server.key"
@@ -831,8 +722,8 @@ fetch_certificates() {
   if openssl x509 -in "${CERTS_DIR}/server.crt" -noout -text > /dev/null 2>&1; then
     log "Server certificate is valid"
   else
-    log_error "Server certificate verification failed, but proceeding with agent setup"
-    # Don't return error, just continue with invalid certificates
+    log_error "Server certificate verification failed"
+    return 1
   fi
 
   log "Certificates fetched and saved successfully"
