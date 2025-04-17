@@ -509,23 +509,42 @@ register_agent() {
 
   log "Received response from server"
 
-  if echo "$RESPONSE" | grep -q "token"; then
+  # Save raw response to file for inspection
+  RESP_FILE="/tmp/agent_registration_response.json"
+  echo "$RESPONSE" > "$RESP_FILE"
+  log "Full response saved to $RESP_FILE"
+
+  # First, check if the response is valid JSON
+  if ! echo "$RESPONSE" | jq . > /dev/null 2>&1; then
+    log_error "Received invalid JSON response"
+    log_error "Raw response: ${RESPONSE:0:200}..."
+    exit 1
+  fi
+
+  # Print full response for debugging (limited to prevent overwhelming logs)
+  RESPONSE_BRIEF=$(echo "$RESPONSE" | jq -c '.' | cut -c 1-300)
+  log "Response brief: $RESPONSE_BRIEF..."
+
+  # Extract status and check success field first
+  SUCCESS=$(echo "$RESPONSE" | jq -r '.success // "false"')
+
+  if [ "$SUCCESS" == "true" ]; then
     log "Agent registered successfully with front server."
-    log "Response summary: $(echo "$RESPONSE" | grep -o '\"success\":[^,]*')"
 
     # Extract the JWT token from the response
-    JWT_TOKEN=$(echo "$RESPONSE" | jq -r '.token')
+    JWT_TOKEN=$(echo "$RESPONSE" | jq -r '.token // ""')
 
     if [ -z "$JWT_TOKEN" ] || [ "$JWT_TOKEN" = "null" ]; then
       log_error "Failed to extract JWT token from registration response"
-      log_error "Response: $RESPONSE"
+      log_error "Success was true but no token field found"
+      log_error "Response: $RESPONSE_BRIEF..."
       exit 1
     fi
 
     log "JWT token extracted successfully from registration response"
 
     # Extract MongoDB URL from response if available
-    MONGO_URL=$(echo "$RESPONSE" | grep -o '"mongodbUrl":"[^"]*"' | cut -d'"' -f4 || echo "")
+    MONGO_URL=$(echo "$RESPONSE" | jq -r '.mongodbUrl // ""')
     if [ -n "$MONGO_URL" ]; then
       log "MongoDB will be accessible via HAProxy at: $MONGO_URL"
     fi
@@ -541,8 +560,9 @@ register_agent() {
     # Return success code
     return 0
   else
-    log "Agent registration failed with front server."
-    log_error "Error response: $RESPONSE"
+    ERROR_MSG=$(echo "$RESPONSE" | jq -r '.message // .error // "Unknown error"')
+    log_error "Agent registration failed with front server: $ERROR_MSG"
+    log_error "Error response: $RESPONSE_BRIEF..."
     exit 1
   fi
 }
