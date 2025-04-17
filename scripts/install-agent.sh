@@ -481,7 +481,8 @@ register_agent() {
   # Hostname as agent name, or use SERVER_ID if hostname is not available
   AGENT_NAME=$(hostname || echo "${SERVER_ID}-agent")
 
-  RESPONSE=$(curl -s -X POST "${FRONT_API_URL}/api/agents/register" \
+  # Use the new standardized endpoint /api/agent/register
+  RESPONSE=$(curl -s -X POST "${FRONT_API_URL}/api/agent/register" \
     -H "Content-Type: application/json" \
     -d "{
       \"agentId\": \"${SERVER_ID}\",
