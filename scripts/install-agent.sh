@@ -481,17 +481,72 @@ register_agent() {
   # Hostname as agent name, or use SERVER_ID if hostname is not available
   AGENT_NAME=$(hostname || echo "${SERVER_ID}-agent")
 
-  RESPONSE=$(curl -s -X POST "${FRONT_API_URL}/api/agents/register" \
+  # Add detailed logging for debugging
+  log "Preparing registration payload with:"
+  log "  - Agent ID: ${SERVER_ID}"
+  log "  - Agent Name: ${AGENT_NAME}"
+  log "  - Target IP: ${LOCAL_IP}"
+
+  log "Sending registration request to ${FRONT_API_URL}/api/agent/register"
+
+  # Add timeout and more verbose output to curl
+  RESPONSE=$(curl -v -s --max-time 30 -X POST "${FRONT_API_URL}/api/agent/register" \
     -H "Content-Type: application/json" \
     -d "{
       \"agentId\": \"${SERVER_ID}\",
       \"agentKey\": \"${AGENT_TOKEN}\",
       \"agentName\": \"${AGENT_NAME}\",
       \"targetIp\": \"${LOCAL_IP}\"
-    }")
+    }" 2>&1)
+
+  CURL_EXIT_CODE=$?
+
+  # Log curl exit code
+  log "curl exit code: ${CURL_EXIT_CODE}"
+
+  # Check curl exit code
+  if [ $CURL_EXIT_CODE -ne 0 ]; then
+    log_error "curl command failed with exit code ${CURL_EXIT_CODE}"
+    log_error "Detailed response/error: ${RESPONSE}"
+
+    # Check for common curl errors
+    if [ $CURL_EXIT_CODE -eq 7 ]; then
+      log_error "Failed to connect to the front server. Please check if the server is reachable."
+    elif [ $CURL_EXIT_CODE -eq 28 ]; then
+      log_error "Connection timed out. The front server might be slow to respond or unreachable."
+    fi
+
+    exit 1
+  fi
+
+  # Log the raw response for debugging
+  log "Raw response from server: ${RESPONSE}"
+
+  # Extract the HTTP status code if possible
+  HTTP_STATUS=$(echo "$RESPONSE" | grep -o "HTTP/[0-9.]* [0-9]*" | tail -1 | awk '{print $2}')
+  if [ -n "$HTTP_STATUS" ]; then
+    log "HTTP Status Code: ${HTTP_STATUS}"
+    if [ "$HTTP_STATUS" != "200" ] && [ "$HTTP_STATUS" != "201" ]; then
+      log_error "Server returned non-success status code: ${HTTP_STATUS}"
+    fi
+  fi
+
+  # Extract the response body (the actual JSON)
+  RESPONSE_BODY=$(echo "$RESPONSE" | awk 'BEGIN{flag=0} /^\{/{flag=1} flag')
+
+  # Check if we have a valid JSON response
+  if echo "$RESPONSE_BODY" | jq . > /dev/null 2>&1; then
+    log "Received valid JSON response"
+    RESPONSE=$RESPONSE_BODY
+  else
+    log_error "Failed to parse JSON from response"
+    log_error "Response may not be valid JSON: ${RESPONSE_BODY}"
+    exit 1
+  fi
 
   if echo "$RESPONSE" | grep -q "token"; then
-    log "Agent registered successfully with front server. Response: $RESPONSE"
+    log "Agent registered successfully with front server."
+    log "Response contains token field"
 
     # Extract the JWT token from the response
     JWT_TOKEN=$(echo "$RESPONSE" | jq -r '.token')
@@ -503,11 +558,14 @@ register_agent() {
     fi
 
     log "JWT token extracted successfully from registration response"
+    log "JWT token length: $(echo -n $JWT_TOKEN | wc -c) characters"
 
     # Extract MongoDB URL from response if available
     MONGO_URL=$(echo "$RESPONSE" | grep -o '"mongodbUrl":"[^"]*"' | cut -d'"' -f4 || echo "")
     if [ -n "$MONGO_URL" ]; then
       log "MongoDB will be accessible via HAProxy at: $MONGO_URL"
+    else
+      log "No MongoDB URL found in the response"
     fi
 
     # Save the JWT to a file (separate from any static AGENT_API_TOKEN)
@@ -516,10 +574,10 @@ register_agent() {
     chmod 600 "$JWT_FILE"
     # Change ownership to the cloudlunacy user
     chown $USERNAME:$USERNAME "$JWT_FILE"
-    log "JWT file permissions updated for $USERNAME user"
+    log "JWT file saved to $JWT_FILE and permissions updated for $USERNAME user"
   else
-    log "Agent registration failed with front server. Response: $RESPONSE"
-    log_error "Agent registration failed with front server. Response: $RESPONSE"
+    log_error "Agent registration failed with front server. Response does not contain token."
+    log_error "Full response: $RESPONSE"
     exit 1
   fi
 }
