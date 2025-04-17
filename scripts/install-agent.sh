@@ -487,17 +487,21 @@ register_agent() {
   log "  - Agent Name: ${AGENT_NAME}"
   log "  - Target IP: ${LOCAL_IP}"
 
+  # Fix the URL path - changing from /api/agents/register to /api/agent/register
   log "Sending registration request to ${FRONT_API_URL}/api/agent/register"
 
-  # Add timeout and more verbose output to curl
-  RESPONSE=$(curl -v -s --max-time 30 -X POST "${FRONT_API_URL}/api/agent/register" \
+  # Store verbose output separately, and only capture actual response to RESPONSE variable
+  VERBOSE_OUTPUT=$(curl -v -s --max-time 30 -X POST "${FRONT_API_URL}/api/agent/register" \
     -H "Content-Type: application/json" \
     -d "{
       \"agentId\": \"${SERVER_ID}\",
       \"agentKey\": \"${AGENT_TOKEN}\",
       \"agentName\": \"${AGENT_NAME}\",
       \"targetIp\": \"${LOCAL_IP}\"
-    }" 2>&1)
+    }" 2>&1 > /tmp/response.json)
+
+  # Get the actual response content
+  RESPONSE=$(cat /tmp/response.json)
 
   CURL_EXIT_CODE=$?
 
@@ -507,7 +511,7 @@ register_agent() {
   # Check curl exit code
   if [ $CURL_EXIT_CODE -ne 0 ]; then
     log_error "curl command failed with exit code ${CURL_EXIT_CODE}"
-    log_error "Detailed response/error: ${RESPONSE}"
+    log_error "Detailed response/error: ${VERBOSE_OUTPUT}"
 
     # Check for common curl errors
     if [ $CURL_EXIT_CODE -eq 7 ]; then
@@ -519,11 +523,11 @@ register_agent() {
     exit 1
   fi
 
-  # Log the raw response for debugging
-  log "Raw response from server: ${RESPONSE}"
+  # Log the curl verbose output for debugging
+  log "Curl verbose output: ${VERBOSE_OUTPUT}"
 
   # Extract the HTTP status code if possible
-  HTTP_STATUS=$(echo "$RESPONSE" | grep -o "HTTP/[0-9.]* [0-9]*" | tail -1 | awk '{print $2}')
+  HTTP_STATUS=$(echo "$VERBOSE_OUTPUT" | grep -o "HTTP/[0-9.]* [0-9]*" | tail -1 | awk '{print $2}')
   if [ -n "$HTTP_STATUS" ]; then
     log "HTTP Status Code: ${HTTP_STATUS}"
     if [ "$HTTP_STATUS" != "200" ] && [ "$HTTP_STATUS" != "201" ]; then
@@ -531,16 +535,12 @@ register_agent() {
     fi
   fi
 
-  # Extract the response body (the actual JSON)
-  RESPONSE_BODY=$(echo "$RESPONSE" | awk 'BEGIN{flag=0} /^\{/{flag=1} flag')
-
   # Check if we have a valid JSON response
-  if echo "$RESPONSE_BODY" | jq . > /dev/null 2>&1; then
+  if echo "$RESPONSE" | jq . > /dev/null 2>&1; then
     log "Received valid JSON response"
-    RESPONSE=$RESPONSE_BODY
   else
     log_error "Failed to parse JSON from response"
-    log_error "Response may not be valid JSON: ${RESPONSE_BODY}"
+    log_error "Response may not be valid JSON: ${RESPONSE}"
     exit 1
   fi
 
