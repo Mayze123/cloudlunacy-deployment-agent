@@ -481,8 +481,12 @@ register_agent() {
   # Hostname as agent name, or use SERVER_ID if hostname is not available
   AGENT_NAME=$(hostname || echo "${SERVER_ID}-agent")
 
-  # Use the new standardized endpoint /api/agent/register
-  RESPONSE=$(curl -s -X POST "${FRONT_API_URL}/api/agent/register" \
+  # Print debug information
+  log "Sending registration request to ${FRONT_API_URL}/api/agent/register..."
+  log "Request payload: agentId=${SERVER_ID}, agentName=${AGENT_NAME}, targetIp=${LOCAL_IP}"
+
+  # Use the new standardized endpoint /api/agent/register with 30s timeout
+  RESPONSE=$(curl -s -m 30 --connect-timeout 10 -X POST "${FRONT_API_URL}/api/agent/register" \
     -H "Content-Type: application/json" \
     -d "{
       \"agentId\": \"${SERVER_ID}\",
@@ -491,8 +495,23 @@ register_agent() {
       \"targetIp\": \"${LOCAL_IP}\"
     }")
 
+  # Check curl exit status
+  CURL_STATUS=$?
+  if [ $CURL_STATUS -ne 0 ]; then
+    log_error "curl command failed with exit code $CURL_STATUS"
+    case $CURL_STATUS in
+      7) log_error "Failed to connect to server. Check if server is running and reachable." ;;
+      28) log_error "Connection timeout. The server is taking too long to respond." ;;
+      *) log_error "Unknown curl error. See curl man page for error code $CURL_STATUS." ;;
+    esac
+    exit 1
+  fi
+
+  log "Received response from server"
+
   if echo "$RESPONSE" | grep -q "token"; then
-    log "Agent registered successfully with front server. Response: $RESPONSE"
+    log "Agent registered successfully with front server."
+    log "Response summary: $(echo "$RESPONSE" | grep -o '\"success\":[^,]*')"
 
     # Extract the JWT token from the response
     JWT_TOKEN=$(echo "$RESPONSE" | jq -r '.token')
@@ -518,9 +537,12 @@ register_agent() {
     # Change ownership to the cloudlunacy user
     chown $USERNAME:$USERNAME "$JWT_FILE"
     log "JWT file permissions updated for $USERNAME user"
+
+    # Return success code
+    return 0
   else
-    log "Agent registration failed with front server. Response: $RESPONSE"
-    log_error "Agent registration failed with front server. Response: $RESPONSE"
+    log "Agent registration failed with front server."
+    log_error "Error response: $RESPONSE"
     exit 1
   fi
 }
