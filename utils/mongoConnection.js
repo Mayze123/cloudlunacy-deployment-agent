@@ -35,6 +35,36 @@ class MongoConnection {
     // Connection instance
     this.client = null;
     this.db = null;
+
+    // Check certificate existence right at initialization
+    this.checkCertificateFiles();
+  }
+
+  /**
+   * Check if certificate files exist and log their status
+   */
+  checkCertificateFiles() {
+    try {
+      const certFiles = {
+        ca: this.caPath,
+        server_cert: path.join(this.certsDir, "server.crt"),
+        server_key: path.join(this.certsDir, "server.key"),
+        server_pem: path.join(this.certsDir, "server.pem"),
+      };
+
+      for (const [type, filePath] of Object.entries(certFiles)) {
+        if (fs.existsSync(filePath)) {
+          const stats = fs.statSync(filePath);
+          logger.info(
+            `Certificate ${type} exists at ${filePath} (${stats.size} bytes)`,
+          );
+        } else {
+          logger.warn(`Certificate ${type} does not exist at ${filePath}`);
+        }
+      }
+    } catch (error) {
+      logger.error(`Error checking certificate files: ${error.message}`);
+    }
   }
 
   /**
@@ -71,12 +101,30 @@ class MongoConnection {
    * @returns {Object} TLS options
    */
   getTlsOptions() {
-    // TLS is always enabled and we allow invalid certificates and hostnames
-    // because TLS verification is handled by HAProxy
-    return {
+    const tlsOptions = {
       tlsAllowInvalidCertificates: true,
       tlsAllowInvalidHostnames: true,
     };
+
+    // Check and add CA certificate if it exists
+    if (fs.existsSync(this.caPath)) {
+      try {
+        tlsOptions.tlsCAFile = this.caPath;
+        logger.info(`Using CA certificate from: ${this.caPath}`);
+
+        // Log the first few lines of the cert for verification
+        const certContent = fs.readFileSync(this.caPath, "utf8");
+        logger.info(
+          `CA certificate begins with: ${certContent.substring(0, 50)}...`,
+        );
+      } catch (error) {
+        logger.error(`Error loading CA certificate: ${error.message}`);
+      }
+    } else {
+      logger.warn(`CA certificate file not found at: ${this.caPath}`);
+    }
+
+    return tlsOptions;
   }
 
   /**
@@ -97,13 +145,14 @@ class MongoConnection {
     this.db = null;
 
     const uri = this.getUri();
+    const tlsOptions = this.getTlsOptions();
     const options = {
       serverSelectionTimeoutMS: 30000, // Increased from 5000 to 30000
       socketTimeoutMS: 30000, // Increased from 10000 to 30000
       connectTimeoutMS: 30000, // Increased from 10000 to 30000
       maxPoolSize: 5, // Limit pool size for better management
       retryWrites: false, // Disable retry writes for initial connection
-      ...this.getTlsOptions(),
+      ...tlsOptions,
     };
 
     // Log connection details for troubleshooting
@@ -116,7 +165,7 @@ class MongoConnection {
     logger.info(
       `Connection options: ${JSON.stringify({
         ...options,
-        tlsCAFile: this.caPath ? "[set]" : "[not set]",
+        tlsCAFile: options.tlsCAFile ? "[set]" : "[not set]",
       })}`,
     );
 
