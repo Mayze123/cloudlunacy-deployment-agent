@@ -490,6 +490,99 @@ REDIS_PASSWORD=${mergedConfig.password || ""}
           );
         }
 
+        // Even if MongoDB is installed, we should register it with the front server
+        // This ensures registration is always attempted during installation
+        logger.info(
+          "MongoDB is already installed, proceeding with front server registration",
+        );
+
+        try {
+          // Get server ID and JWT token for registration
+          const agentId = process.env.SERVER_ID || config.serverId;
+          const jwt = process.env.AGENT_JWT || config.api.jwt;
+          const frontApiUrl =
+            process.env.FRONT_API_URL || config.api.frontApiUrl;
+
+          // Get the IP address for registration
+          const { networkInterfaces } = require("os");
+          const nets = networkInterfaces();
+          let publicIp = "localhost";
+
+          // Find the primary public IP
+          for (const name of Object.keys(nets)) {
+            for (const net of nets[name]) {
+              if (net.family === "IPv4" && !net.internal) {
+                publicIp = net.address;
+                break;
+              }
+            }
+          }
+
+          logger.info(`Using IP address for MongoDB registration: ${publicIp}`);
+
+          if (frontApiUrl && jwt && agentId) {
+            logger.info(
+              `Registering MongoDB with front server at ${frontApiUrl}`,
+            );
+
+            // Make the API request directly instead of using registerWithFrontServer
+            const axios = require("axios");
+            const response = await axios.post(
+              `${frontApiUrl}/api/mongodb/register`,
+              {
+                agentId,
+                targetIp: publicIp,
+                targetPort: parseInt(config.port || 27017, 10),
+                useTls: true,
+              },
+              {
+                headers: {
+                  "Content-Type": "application/json",
+                  Authorization: `Bearer ${jwt}`,
+                },
+              },
+            );
+
+            if (response.data && response.data.success) {
+              logger.info(
+                `MongoDB successfully registered with domain: ${response.data.domain}`,
+              );
+              logger.info(
+                `Connection string: ${response.data.connectionString}`,
+              );
+
+              // Return success with registration details
+              return {
+                success: true,
+                message:
+                  "MongoDB is already installed and registered successfully",
+                domain: response.data.domain,
+                connectionString: response.data.connectionString,
+                status: isInstalled,
+                containerDetails: containerCheck,
+              };
+            } else {
+              logger.warn(
+                `Unexpected response when registering MongoDB: ${JSON.stringify(response.data)}`,
+              );
+            }
+          } else {
+            logger.warn(
+              "Missing required environment variables for MongoDB registration",
+            );
+          }
+        } catch (regError) {
+          logger.error(
+            `Failed to register MongoDB with front server: ${regError.message}`,
+          );
+          if (regError.response) {
+            logger.error(
+              `Response status: ${regError.response.status}, data: ${JSON.stringify(regError.response.data)}`,
+            );
+          }
+        }
+
+        // Return success even if registration failed
         return {
           success: true,
           message: "MongoDB is already installed and running",
