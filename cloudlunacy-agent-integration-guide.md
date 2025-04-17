@@ -73,7 +73,7 @@
 
 #### MongoDB Route Setup
 
-**Endpoint:** `POST /api/proxy/mongodb`
+**Endpoint:** `POST /api/mongodb/register`
 
 **Authentication:** Required (agentId + agentKey)
 
@@ -82,11 +82,9 @@
 ```json
 {
   "agentId": "unique-agent-identifier",
-  "targetHost": "mongodb-host",
+  "targetIp": "mongodb-host-ip",
   "targetPort": 27017,
-  "options": {
-    "useTls": true
-  }
+  "useTls": true
 }
 ```
 
@@ -95,8 +93,12 @@
 ```json
 {
   "success": true,
+  "message": "MongoDB registered successfully",
   "domain": "unique-agent-identifier.mongodb.cloudlunacy.uk",
-  "useTls": true
+  "connectionString": "mongodb://username:password@unique-agent-identifier.mongodb.cloudlunacy.uk:27017/admin?tls=true&tlsAllowInvalidCertificates=true",
+  "targetIp": "mongodb-host-ip",
+  "targetPort": 27017,
+  "tlsEnabled": true
 }
 ```
 
@@ -104,6 +106,7 @@
 
 - Only one MongoDB route per agent is supported
 - When useTls is true, certificates will be automatically generated
+- The returned connectionString can be used directly by MongoDB clients
 
 ### Step 3: Certificate Management
 

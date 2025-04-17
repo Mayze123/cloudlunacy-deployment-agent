@@ -307,25 +307,32 @@ REDIS_PASSWORD=${mergedConfig.password || ""}
         };
       }
 
-      logger.info(`Registering ${dbType} with HAProxy front server...`);
+      logger.info(`Registering ${dbType} with front server...`);
 
       // Updated to use the new API endpoint based on database type
-      const endpoint =
-        dbType === "mongodb"
-          ? `${FRONT_API_URL}/api/proxy/mongodb`
-          : `${FRONT_API_URL}/api/proxy/${dbType}`;
+      let endpoint, payload;
+
+      if (dbType === "mongodb") {
+        endpoint = `${FRONT_API_URL}/api/mongodb/register`;
+        payload = {
+          agentId,
+          targetIp: targetHost,
+          targetPort,
+          useTls: options.useTls !== false, // Default to true for TLS
+        };
+      } else {
+        endpoint = `${FRONT_API_URL}/api/proxy/${dbType}`;
+        payload = {
+          agentId,
+          targetHost,
+          targetPort,
+          options: {
+            useTls: options.useTls !== false, // Default to true for TLS
+          },
+        };
+      }
 
       logger.info(`Using endpoint: ${endpoint}`);
-
-      // Construct payload according to the HAProxy Data Plane API specification
-      const payload = {
-        agentId,
-        targetHost,
-        targetPort,
-        options: {
-          useTls: options.useTls !== false, // Default to true for TLS
-        },
-      };
 
       // Make the API request
       const response = await axios.post(endpoint, payload, {
@@ -338,12 +345,13 @@ REDIS_PASSWORD=${mergedConfig.password || ""}
       if (response.data && response.data.success) {
         logger.info(`${dbType} successfully registered with front server`, {
           domain: response.data.domain,
-          useTls: response.data.useTls,
+          useTls: response.data.tlsEnabled || response.data.useTls,
         });
         return {
           success: true,
           domain: response.data.domain,
-          useTls: response.data.useTls,
+          useTls: response.data.tlsEnabled || response.data.useTls,
+          connectionString: response.data.connectionString,
         };
       } else {
         return {
