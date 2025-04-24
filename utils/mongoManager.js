@@ -2,10 +2,10 @@ const mongoConnection = require("./mongoConnection");
 const logger = require("./logger");
 
 /**
- * MongoDB Manager adapted for HAProxy TLS termination
+ * MongoDB Manager adapted for Traefik TLS termination
  *
- * This class manages MongoDB operations through the HAProxy connection.
- * TLS termination is handled by HAProxy.
+ * This class manages MongoDB operations through the Traefik connection.
+ * TLS termination is handled by Traefik.
  */
 class MongoManager {
   constructor() {
@@ -157,7 +157,7 @@ class MongoManager {
 
   /**
    * Create a new database user
-   * Uses HAProxy for TLS termination and SNI-based routing
+   * Uses Traefik for TLS termination and SNI-based routing
    *
    * @param {string} username - Username
    * @param {string} password - Password
@@ -168,7 +168,7 @@ class MongoManager {
   async createUser(username, password, dbName, roles = ["readWrite"]) {
     try {
       logger.info(
-        `Creating user ${username} for database ${dbName} through HAProxy`,
+        `Creating user ${username} for database ${dbName} through Traefik`,
       );
 
       // Ensure we're connected
@@ -185,12 +185,12 @@ class MongoManager {
       });
 
       logger.info(
-        `Created user ${username} for database ${dbName} through HAProxy`,
+        `Created user ${username} for database ${dbName} through Traefik`,
       );
       return true;
     } catch (error) {
       logger.error(
-        `Failed to create user ${username} through HAProxy: ${error.message}`,
+        `Failed to create user ${username} through Traefik: ${error.message}`,
       );
 
       // If connection error, try to reinitialize
@@ -208,7 +208,7 @@ class MongoManager {
 
   /**
    * Create a new database and user
-   * Uses HAProxy for TLS termination
+   * Uses Traefik for TLS termination
    *
    * @param {string} dbName - Database name
    * @param {string} username - Username
@@ -218,7 +218,7 @@ class MongoManager {
   async createDatabaseAndUser(dbName, username, password) {
     try {
       logger.info(
-        `Creating database ${dbName} and user ${username} through HAProxy`,
+        `Creating database ${dbName} and user ${username} through Traefik`,
       );
 
       // Ensure we're connected
@@ -246,12 +246,12 @@ class MongoManager {
       });
 
       logger.info(
-        `Created database ${dbName} and user ${username} through HAProxy`,
+        `Created database ${dbName} and user ${username} through Traefik`,
       );
       return true;
     } catch (error) {
       logger.error(
-        `Failed to create database and user through HAProxy: ${error.message}`,
+        `Failed to create database and user through Traefik: ${error.message}`,
       );
 
       // If connection error, try to reinitialize
@@ -268,7 +268,7 @@ class MongoManager {
   }
 
   /**
-   * Test MongoDB connection through HAProxy
+   * Test MongoDB connection through Traefik
    * @returns {Promise<{success: boolean, message: string}>} Test result
    */
   async testConnection() {

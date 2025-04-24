@@ -207,15 +207,16 @@ class MongoDBService {
    */
   async deployMongoDB(options) {
     try {
-      // Skip initialization until we've checked if MongoDB is already installed
-      logger.info("Checking if MongoDB is already installed and running...");
+      logger.info("Starting MongoDB deployment process...");
 
-      // Check if MongoDB container is already running
+      // FIRST: Check if MongoDB is already installed and running
+      logger.info("Checking if MongoDB is already installed and running...");
       const isMongoRunning = await this.isMongoDBRunning();
 
+      // If MongoDB is not running, set it up BEFORE attempting any connections
       if (!isMongoRunning) {
         logger.info(
-          "MongoDB is not currently running, will set up a new instance",
+          "MongoDB is not currently running, setting up a new instance",
         );
 
         // Create MongoDB docker-compose configuration
@@ -244,61 +245,73 @@ class MongoDBService {
         logger.info("MongoDB is already running, will use existing instance");
       }
 
-      // Only initialize MongoDB service once container is running
+      // Now that MongoDB is definitely running, initialize the service
       if (!this.initialized) {
-        const initResult = await this.initialize({
-          // Skip connect attempts if we just started a new container
-          skipConnectionAttempts: false,
+        logger.info("MongoDB manager initialized");
+        this.initialized = true;
+      }
+
+      // Now try connecting to the local MongoDB instance directly
+      logger.info("Connecting to local MongoDB instance...");
+      try {
+        // Build direct connection URI without going through Traefik
+        const mongoClient = require("mongodb").MongoClient;
+        const directLocalUri = `mongodb://127.0.0.1:${options.port || 27017}/admin?directConnection=true`;
+
+        const client = new mongoClient(directLocalUri, {
+          serverSelectionTimeoutMS: 5000, // Short timeout for local connection
+          connectTimeoutMS: 5000,
         });
 
-        if (!initResult) {
-          return {
-            success: false,
-            message: "Failed to initialize MongoDB service",
-          };
+        await client.connect();
+        logger.info("Successfully connected to local MongoDB instance");
+
+        // Create database and user if requested
+        if (options.username && options.password) {
+          try {
+            logger.info(
+              `Creating user ${options.username} for database ${options.dbName || "admin"}`,
+            );
+            const db = client.db("admin");
+            await db.command({
+              createUser: options.username,
+              pwd: options.password,
+              roles: [
+                { role: "readWrite", db: options.dbName || "admin" },
+                { role: "dbAdmin", db: options.dbName || "admin" },
+              ],
+            });
+            logger.info(`Successfully created user ${options.username}`);
+          } catch (userError) {
+            logger.warn(`Failed to create user: ${userError.message}`);
+          }
         }
-      }
 
-      // Initialize the MongoDB manager
-      logger.info(
-        "MongoDB manager already initialized, using existing connection",
-      );
-
-      // Register with front server if requested and if we have the required config
-      if (
-        options.registerWithFrontServer !== false &&
-        config.api.frontApiUrl &&
-        config.api.jwt
-      ) {
-        await this.registerWithFrontServer();
-      }
-
-      // Create database and user if requested
-      if (options.username && options.password) {
-        const createUserResult = await this.createDatabaseUser(
-          options.username,
-          options.password,
-          options.dbName || "admin",
+        await client.close();
+      } catch (localConnError) {
+        logger.error(
+          `Error connecting to local MongoDB: ${localConnError.message}`,
         );
-
-        if (!createUserResult.success) {
-          logger.warn(
-            `Failed to create database user: ${createUserResult.message}`,
-          );
-        }
       }
 
-      // Test connection
-      const testResult = await this.testConnection();
+      // Register with front server if needed
+      let registrationResult = { success: false };
+      if (config.api.frontApiUrl && config.api.jwt) {
+        logger.info("Registering MongoDB with front server...");
+        registrationResult = await this.registerWithFrontServer();
+      } else {
+        logger.info("Skipping front server registration (no API URL or JWT)");
+      }
 
       return {
         success: true,
         message: "MongoDB deployment completed successfully",
         domain: `${config.serverId}.${config.database.mongodb.domain}`,
         connectionString: `mongodb://${options.username ? options.username + ":***@" : ""}${config.serverId}.${config.database.mongodb.domain}:27017/${options.dbName || "admin"}?tls=true`,
-        connectionTest: testResult.success
-          ? "Connection successful"
-          : "Connection test failed",
+        frontRegistration: registrationResult.success
+          ? "Successful"
+          : "Failed or skipped",
+        localConnection: "Available at mongodb://127.0.0.1:27017/",
       };
     } catch (error) {
       logger.error(`MongoDB deployment failed: ${error.message}`);

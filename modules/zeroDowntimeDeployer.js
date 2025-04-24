@@ -78,9 +78,9 @@ class ZeroDowntimeDeployer {
         };
       }
 
-      logger.info(`Registering ${serviceName} with HAProxy front server...`);
+      logger.info(`Registering ${serviceName} with Traefik front server...`);
 
-      // Use the HAProxy Data Plane API endpoint for HTTP routes only
+      // Use the Traefik API endpoint for HTTP routes only
       const response = await axios.post(
         `${frontApiUrl}/api/proxy/http`,
         {
@@ -107,7 +107,7 @@ class ZeroDowntimeDeployer {
         return {
           success: true,
           domain: response.data.domain,
-          message: "Service registered successfully with HAProxy",
+          message: "Service registered successfully with Traefik",
         };
       } else {
         const errorMessage =
@@ -140,7 +140,7 @@ class ZeroDowntimeDeployer {
       }
 
       logger.info(
-        `Verifying service accessibility through HAProxy for ${domain}`,
+        `Verifying service accessibility through Traefik for ${domain}`,
       );
 
       // Get the base service name from domain (remove the .apps.cloudlunacy.uk part)
@@ -164,22 +164,22 @@ class ZeroDowntimeDeployer {
 
           if (serviceFound) {
             logger.info(
-              `Service ${baseServiceName} is accessible through HAProxy`,
+              `Service ${baseServiceName} is accessible through Traefik`,
             );
             return true;
           } else {
             logger.warn(
-              `Service ${baseServiceName} is not configured in HAProxy`,
+              `Service ${baseServiceName} is not configured in Traefik`,
             );
             return false;
           }
         } else {
-          logger.warn("Invalid response from HAProxy routes API");
+          logger.warn("Invalid response from Traefik routes API");
           return false;
         }
       } catch (apiError) {
         logger.error(
-          `Error checking HAProxy configuration: ${apiError.message}`,
+          `Error checking Traefik configuration: ${apiError.message}`,
         );
         return false;
       }
