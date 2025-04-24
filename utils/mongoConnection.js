@@ -222,76 +222,70 @@ class MongoConnection {
   }
 
   /**
-   * Check Traefik configuration
-   * @returns {Promise<Object>} Traefik check results
+   * Check front server Traefik connectivity
+   * @returns {Promise<Object>} Front server connectivity check results
    */
-  async checkTraefikConfig() {
+  async checkFrontServerConnectivity() {
     const results = {
       success: false,
-      traefikRunning: false,
-      routerConfig: null,
-      serviceConfig: null,
+      frontServerReachable: false,
+      mongodbRouteConfigured: false,
     };
 
     try {
       const { execSync } = require("child_process");
+      const hostname = `${this.serverId}.${this.mongoDomain}`;
 
-      // Check if Traefik is running
+      // Check if the front server hostname is reachable
       try {
-        logger.info("Checking if Traefik is running...");
-        const traefikStatus = execSync(
-          "systemctl status traefik || echo 'Not running'",
+        logger.info(
+          `Checking if front server hostname (${hostname}) is reachable...`,
+        );
+        const dnsOutput = execSync(
+          `dig +short ${hostname} || echo "DNS resolution failed"`,
         )
           .toString()
           .trim();
-        results.traefikRunning = traefikStatus.includes("active (running)");
-        logger.info(`Traefik running: ${results.traefikRunning}`);
-      } catch (statusErr) {
-        logger.warn(`Failed to check Traefik status: ${statusErr.message}`);
+
+        if (dnsOutput && !dnsOutput.includes("failed")) {
+          results.frontServerReachable = true;
+          results.frontServerIp = dnsOutput;
+          logger.info(`Front server hostname resolves to IP: ${dnsOutput}`);
+        } else {
+          logger.warn(
+            `Front server hostname (${hostname}) DNS resolution failed`,
+          );
+        }
+      } catch (dnsErr) {
+        logger.warn(
+          `Failed to resolve front server hostname: ${dnsErr.message}`,
+        );
       }
 
-      // Look for MongoDB-related config in Traefik
-      try {
-        const configPaths = [
-          "/etc/traefik/traefik.yml",
-          "/etc/traefik/dynamic",
-          "/etc/traefik/config",
-        ];
-
-        for (const configPath of configPaths) {
-          try {
-            // Check if path exists
-            execSync(`ls ${configPath} 2>/dev/null`);
-
-            // Search for MongoDB configuration
-            const grepOutput = execSync(
-              `grep -r "mongodb" ${configPath} 2>/dev/null || echo "MongoDB config not found"`,
-            )
-              .toString()
-              .trim();
-            if (!grepOutput.includes("MongoDB config not found")) {
-              logger.info(
-                `Found MongoDB configuration in Traefik at ${configPath}:`,
-              );
-              logger.info(grepOutput);
-              results.mongodbConfig = grepOutput;
-              break;
-            }
-          } catch (pathErr) {
-            // Path doesn't exist or is not accessible
-          }
+      // Check if the MongoDB route is accessible
+      if (results.frontServerReachable) {
+        try {
+          logger.info(
+            `Testing TCP connectivity to ${hostname}:${this.port}...`,
+          );
+          execSync(`nc -z -w 5 ${hostname} ${this.port}`);
+          results.mongodbRouteConfigured = true;
+          logger.info(
+            `MongoDB route is properly configured on front server Traefik`,
+          );
+        } catch (ncErr) {
+          logger.warn(
+            `MongoDB route not accessible on front server: ${ncErr.message}`,
+          );
+          logger.warn(
+            "This suggests Traefik on the front server is not properly configured for MongoDB routing",
+          );
         }
-
-        if (!results.mongodbConfig) {
-          logger.warn("MongoDB configuration not found in Traefik config");
-        }
-      } catch (grepErr) {
-        logger.warn(`Failed to search for MongoDB config: ${grepErr.message}`);
       }
 
       results.success = true;
     } catch (error) {
-      logger.error(`Traefik check error: ${error.message}`);
+      logger.error(`Front server connectivity check error: ${error.message}`);
     }
 
     return results;
@@ -413,10 +407,6 @@ class MongoConnection {
         parseInt(this.port, 10),
       );
     }
-
-    // Check Traefik configuration
-    logger.info("Checking Traefik configuration...");
-    const traefikCheck = await this.checkTraefikConfig();
 
     // Log the DNS hostname resolution for troubleshooting
     try {
