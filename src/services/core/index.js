@@ -41,7 +41,22 @@ async function initializeServices() {
 
     // Step 4: Initialize MongoDB service (if enabled)
     if (configService.get("database.mongodb.enabled")) {
-      const mongoInitialized = await mongodbService.initialize();
+      // Check if MongoDB database connections are really needed
+      // This prevents unnecessary connection attempts at startup
+      const skipConnectionAttempts =
+        process.env.MONGO_SKIP_CONNECTION === "true" ||
+        !process.env.MONGO_FORCE_CONNECT === "true";
+
+      logger.info(
+        `MongoDB connection attempts will ${skipConnectionAttempts ? "be skipped" : "be attempted"} at startup`,
+      );
+
+      const mongoInitialized = await mongodbService.initialize({
+        skipConnectionAttempts: skipConnectionAttempts,
+        registerWithFrontServer:
+          process.env.MONGO_REGISTER_WITH_FRONT === "true",
+      });
+
       if (!mongoInitialized) {
         logger.warn(
           "MongoDB service initialization failed, continuing without MongoDB",

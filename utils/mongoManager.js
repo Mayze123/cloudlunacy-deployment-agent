@@ -17,10 +17,12 @@ class MongoManager {
   }
 
   /**
-   * Initialize MongoDB connection through HAProxy
+   * Initialize MongoDB connection through Traefik
+   * @param {Object} options - Initialization options
+   * @param {boolean} options.skipConnection - Skip connection attempt
    * @returns {Promise<boolean>} Success status
    */
-  async initialize() {
+  async initialize(options = {}) {
     if (this.initialized) {
       logger.info(
         "MongoDB manager already initialized, using existing connection",
@@ -29,7 +31,7 @@ class MongoManager {
     }
 
     try {
-      logger.info("Initializing MongoDB connection through HAProxy");
+      logger.info("Initializing MongoDB connection management");
 
       // Add configuration diagnostics
       logger.info(`Server ID: ${process.env.SERVER_ID || "not set"}`);
@@ -39,6 +41,13 @@ class MongoManager {
       logger.info(
         `MongoDB Auth: ${process.env.MONGO_MANAGER_USERNAME ? "Credentials configured" : "No credentials configured"}`,
       );
+
+      // Skip connection if requested
+      if (options.skipConnection) {
+        logger.info("Skipping MongoDB connection attempt as requested");
+        this.initialized = true;
+        return true;
+      }
 
       // Try connection with more detailed error handling
       await this.connection.connect();
@@ -58,7 +67,7 @@ class MongoManager {
       this.initialized = true;
       this.retryCount = 0;
       logger.info(
-        "MongoDB connection through HAProxy initialized successfully",
+        "MongoDB connection through Traefik initialized successfully",
       );
       return true;
     } catch (error) {

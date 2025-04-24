@@ -22,7 +22,7 @@ class MongoDBService {
    * Initialize the MongoDB service
    * @returns {Promise<boolean>} Success status
    */
-  async initialize() {
+  async initialize(options = {}) {
     try {
       if (this.initialized) {
         return true;
@@ -35,21 +35,45 @@ class MongoDBService {
         logger.info(
           "MongoDB is not enabled in configuration, skipping initialization",
         );
-        return false;
+        this.initialized = true; // Mark as initialized even though we're skipping
+        return true;
       }
 
-      // Initialize the MongoDB manager
-      const initSuccess = await mongoManager.initialize();
+      // Check if we should skip connection attempts - this is a new option
+      if (options.skipConnectionAttempts) {
+        logger.info("Skipping MongoDB connection attempts as requested");
+        this.initialized = true;
+        return true;
+      }
+
+      // Check if MongoDB is actually installed/running - we'll check for the MongoDB process
+      const isMongoRunning = await this.isMongoDBRunning();
+      if (!isMongoRunning) {
+        logger.info(
+          "MongoDB does not appear to be running, skipping connection attempts",
+        );
+        this.initialized = true;
+        return true;
+      }
+
+      // Initialize the MongoDB manager - but don't try to connect yet
+      const initSuccess = await mongoManager.initialize({
+        skipConnection: true,
+      });
       if (!initSuccess) {
         throw new Error("Failed to initialize MongoDB manager");
       }
 
-      // Register with front server if we have the required config
-      if (config.api.frontApiUrl && config.api.jwt) {
+      // Register with front server only if explicitly enabled and we have the required config
+      if (
+        options.registerWithFrontServer &&
+        config.api.frontApiUrl &&
+        config.api.jwt
+      ) {
         await this.registerWithFrontServer();
       } else {
-        logger.warn(
-          "Missing front API URL or JWT, cannot register MongoDB with front server",
+        logger.info(
+          "Skipping MongoDB registration with front server - not required for current operation",
         );
       }
 
@@ -58,6 +82,23 @@ class MongoDBService {
       return true;
     } catch (error) {
       logger.error(`Failed to initialize MongoDB service: ${error.message}`);
+      return false;
+    }
+  }
+
+  /**
+   * Check if MongoDB is actually running
+   * @returns {Promise<boolean>} Whether MongoDB is running
+   */
+  async isMongoDBRunning() {
+    try {
+      const { execSync } = require("child_process");
+      // Try to detect if MongoDB is running using ps
+      const output = execSync("ps aux | grep -v grep | grep mongod").toString();
+      return output.includes("mongod");
+    } catch (error) {
+      // If command fails, MongoDB is likely not running
+      logger.info("MongoDB process not detected on the system");
       return false;
     }
   }
