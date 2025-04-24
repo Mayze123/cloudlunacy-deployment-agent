@@ -8,6 +8,7 @@ const logger = require("../../utils/logger");
 const databaseManager = require("../../utils/databaseManager");
 const config = require("../config");
 const mongodbService = require("../services/mongodbService");
+const axios = require("axios");
 
 class DatabaseController {
   /**
@@ -52,7 +53,7 @@ class DatabaseController {
             payload.hostname || "localhost",
             payload.port,
             {
-              useTls: true, // Always enable TLS with HAProxy Data Plane API
+              useTls: true, // Always enable TLS with Traefik
             },
             config.api.jwt,
           );
@@ -387,6 +388,23 @@ class DatabaseController {
         authEnabled: dbPayload.authEnabled,
         dbName: dbPayload.dbName,
       });
+
+      // Register MongoDB with front server
+      const response = await axios.post(
+        `${config.api.frontApiUrl}/api/mongodb/register`,
+        {
+          agentId: config.serverId,
+          targetIp: publicIp,
+          targetPort: mongoConfig.port || 27017,
+          useTls: true, // Always enable TLS with Traefik
+        },
+        {
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${config.api.jwt}`,
+          },
+        },
+      );
 
       return result;
     } catch (error) {

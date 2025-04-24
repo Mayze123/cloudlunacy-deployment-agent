@@ -118,10 +118,10 @@ class AuthenticationService {
         websocketService.establishConnection(wsUrl);
       } catch (error) {
         logger.warn(`Could not connect to backend service: ${error.message}`);
-        logger.warn("Agent will run in standalone mode with HAProxy only");
+        logger.warn("Agent will run in standalone mode with Traefik only");
 
-        // Continue without WebSocket connection in HAProxy-only mode
-        // This allows the agent to work with HAProxy for proxying even without backend connection
+        // Continue without WebSocket connection in Traefik-only mode
+        // This allows the agent to work with Traefik for proxying even without backend connection
       }
     } catch (error) {
       this.handleAuthenticationError(error);
@@ -166,6 +166,61 @@ class AuthenticationService {
       logger.error("No response received from backend:", error.request);
     } else {
       logger.error("Error in authentication request:", error.message);
+    }
+  }
+
+  /**
+   * Connect to the front server via WebSocket
+   * @returns {Promise<boolean>} Connection success
+   */
+  async connectWebSocket() {
+    try {
+      logger.info("Establishing WebSocket connection to front server...");
+
+      // Skip in development mode
+      if (config.isDevelopment) {
+        logger.info("Development mode: Using mock WebSocket connection");
+        return true;
+      }
+
+      // Verify we have the required configuration
+      if (!config.api.websocketUrl) {
+        logger.warn("WebSocket URL not configured, skipping connection");
+        return false;
+      }
+
+      if (!config.api.jwt) {
+        logger.warn("JWT not available, unable to authenticate WebSocket");
+        return false;
+      }
+
+      // Create WebSocket connection
+      try {
+        this.websocketService.connect(
+          config.api.websocketUrl,
+          config.api.jwt,
+          config.serverId,
+        );
+        logger.info("WebSocket connection initiated");
+        return true;
+      } catch (wsError) {
+        logger.error(
+          `Failed to establish WebSocket connection: ${wsError.message}`,
+        );
+
+        // Allow continuing without WebSocket in standalone mode
+        if (config.standalone) {
+          logger.warn("Agent will run in standalone mode with Traefik only");
+          // Continue without WebSocket connection in Traefik-only mode
+          // This allows the agent to work with Traefik for proxying even without backend connection
+          return true;
+        }
+
+        return false;
+      }
+    } catch (error) {
+      logger.error(`Error connecting to WebSocket server: ${error.message}`);
+      return false;
     }
   }
 }

@@ -241,7 +241,7 @@
 - Authentication is required for most endpoints
 - HTTPS is used for all API communications
 - The CloudLunacy Front Server handles certificate creation and renewal
-- HAProxy Data Plane API manages all proxy configuration
+- Traefik manages all proxy configuration dynamically
 - Keep the agent ID and key secure as they provide administrative access
 
 ## Error Handling
@@ -264,4 +264,4 @@ Common errors:
 - 409: Conflict (resource already exists)
 - 500: Internal Server Error
 
-This document outlines the integration process for CloudLunacy agents with the refactored front server using HAProxy Data Plane API.
+This document outlines the integration process for CloudLunacy agents with the front server using Traefik.

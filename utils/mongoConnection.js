@@ -4,11 +4,11 @@ const path = require("path");
 const logger = require("./logger");
 
 /**
- * MongoDB Connection Utility for HAProxy TLS termination
+ * MongoDB Connection Utility for Traefik TLS termination
  *
  * This utility provides a secure connection to MongoDB with TLS enabled.
- * After the migration from Traefik to HAProxy, TLS termination is handled by HAProxy.
- * The SNI-based routing is used to direct traffic to the correct MongoDB instance.
+ * TLS termination is handled by Traefik on the front server.
+ * The hostname-based routing is used to direct traffic to the correct MongoDB instance.
  */
 class MongoConnection {
   constructor() {
@@ -77,12 +77,12 @@ class MongoConnection {
         ? `${this.username}:${this.password}@`
         : "";
 
-    // IMPORTANT: Always use the agent subdomain format for HAProxy routing
-    // This enables SNI-based routing to reach the correct MongoDB instance
+    // IMPORTANT: Always use the agent subdomain format for Traefik routing
+    // This enables hostname-based routing to reach the correct MongoDB instance
     // Format: {agentId}.mongodb.cloudlunacy.uk
     const host = `${this.serverId}.${this.mongoDomain}`;
 
-    // TLS is always enabled with HAProxy Data Plane API
+    // TLS is always enabled with Traefik
     const tlsParams =
       "?tls=true&tlsAllowInvalidCertificates=true&directConnection=true";
 
@@ -95,8 +95,8 @@ class MongoConnection {
   /**
    * Get TLS options for MongoDB connection
    *
-   * With HAProxy Data Plane API, we don't need to verify certificates on the agent side
-   * because HAProxy handles TLS termination
+   * With Traefik, we don't need to verify certificates on the agent side
+   * because Traefik handles TLS termination
    *
    * @returns {Object} TLS options
    */
@@ -128,7 +128,177 @@ class MongoConnection {
   }
 
   /**
-   * Connect to MongoDB through HAProxy
+   * Perform network diagnostics to check connectivity
+   * @param {string} host - Hostname or IP to check
+   * @param {number} port - Port to check
+   * @returns {Promise<Object>} Diagnostic results
+   */
+  async performNetworkDiagnostics(host, port) {
+    const diagnostics = {
+      ping: null,
+      traceroute: null,
+      portCheck: null,
+      dnsResolution: null,
+    };
+
+    try {
+      const { execSync } = require("child_process");
+
+      // Test DNS resolution
+      try {
+        logger.info(`Testing DNS resolution for ${host}...`);
+        const dnsOutput = execSync(
+          `dig +short ${host} || echo "DNS resolution failed"`,
+        )
+          .toString()
+          .trim();
+        diagnostics.dnsResolution = dnsOutput || "No records found";
+        logger.info(`DNS resolution for ${host}: ${diagnostics.dnsResolution}`);
+      } catch (dnsErr) {
+        diagnostics.dnsResolution = `Error: ${dnsErr.message}`;
+        logger.warn(`DNS resolution failed: ${dnsErr.message}`);
+      }
+
+      // Test basic connectivity with ping
+      try {
+        logger.info(`Testing ping to ${host}...`);
+        // Limit to 3 packets with 1 second timeout
+        const pingOutput = execSync(
+          `ping -c 3 -W 1 ${host} || echo "Ping failed"`,
+        )
+          .toString()
+          .trim();
+        diagnostics.ping = pingOutput.includes("bytes from")
+          ? "Success"
+          : "Failed";
+        logger.info(`Ping to ${host}: ${diagnostics.ping}`);
+      } catch (pingErr) {
+        diagnostics.ping = `Error: ${pingErr.message}`;
+        logger.warn(`Ping failed: ${pingErr.message}`);
+      }
+
+      // Check port connectivity with nc (netcat)
+      try {
+        logger.info(`Testing port connectivity to ${host}:${port}...`);
+        // Try connecting with a 5 second timeout
+        execSync(`nc -z -w 5 ${host} ${port}`);
+        diagnostics.portCheck = "Success";
+        logger.info(`Port ${port} on ${host} is open`);
+      } catch (portErr) {
+        diagnostics.portCheck = "Failed";
+        logger.warn(
+          `Port ${port} on ${host} is not accessible: ${portErr.message}`,
+        );
+      }
+
+      // Trace route to host
+      try {
+        logger.info(`Tracing route to ${host}...`);
+        // Limit to 15 hops max, with 1 second timeout
+        const traceOutput = execSync(
+          `traceroute -m 15 -w 1 ${host} || echo "Traceroute failed"`,
+        )
+          .toString()
+          .trim();
+        diagnostics.traceroute = traceOutput.includes("traceroute")
+          ? "Completed"
+          : "Failed";
+        logger.info(
+          `Traceroute to ${host}: ${diagnostics.traceroute === "Completed" ? "Route found" : "Failed"}`,
+        );
+      } catch (traceErr) {
+        diagnostics.traceroute = `Error: ${traceErr.message}`;
+        logger.warn(`Traceroute failed: ${traceErr.message}`);
+      }
+    } catch (error) {
+      logger.error(`Network diagnostics error: ${error.message}`);
+    }
+
+    logger.info(
+      `Network diagnostics summary for ${host}:${port}:`,
+      diagnostics,
+    );
+    return diagnostics;
+  }
+
+  /**
+   * Check Traefik configuration
+   * @returns {Promise<Object>} Traefik check results
+   */
+  async checkTraefikConfig() {
+    const results = {
+      success: false,
+      traefikRunning: false,
+      routerConfig: null,
+      serviceConfig: null,
+    };
+
+    try {
+      const { execSync } = require("child_process");
+
+      // Check if Traefik is running
+      try {
+        logger.info("Checking if Traefik is running...");
+        const traefikStatus = execSync(
+          "systemctl status traefik || echo 'Not running'",
+        )
+          .toString()
+          .trim();
+        results.traefikRunning = traefikStatus.includes("active (running)");
+        logger.info(`Traefik running: ${results.traefikRunning}`);
+      } catch (statusErr) {
+        logger.warn(`Failed to check Traefik status: ${statusErr.message}`);
+      }
+
+      // Look for MongoDB-related config in Traefik
+      try {
+        const configPaths = [
+          "/etc/traefik/traefik.yml",
+          "/etc/traefik/dynamic",
+          "/etc/traefik/config",
+        ];
+
+        for (const configPath of configPaths) {
+          try {
+            // Check if path exists
+            execSync(`ls ${configPath} 2>/dev/null`);
+
+            // Search for MongoDB configuration
+            const grepOutput = execSync(
+              `grep -r "mongodb" ${configPath} 2>/dev/null || echo "MongoDB config not found"`,
+            )
+              .toString()
+              .trim();
+            if (!grepOutput.includes("MongoDB config not found")) {
+              logger.info(
+                `Found MongoDB configuration in Traefik at ${configPath}:`,
+              );
+              logger.info(grepOutput);
+              results.mongodbConfig = grepOutput;
+              break;
+            }
+          } catch (pathErr) {
+            // Path doesn't exist or is not accessible
+          }
+        }
+
+        if (!results.mongodbConfig) {
+          logger.warn("MongoDB configuration not found in Traefik config");
+        }
+      } catch (grepErr) {
+        logger.warn(`Failed to search for MongoDB config: ${grepErr.message}`);
+      }
+
+      results.success = true;
+    } catch (error) {
+      logger.error(`Traefik check error: ${error.message}`);
+    }
+
+    return results;
+  }
+
+  /**
+   * Connect to MongoDB through Traefik
    * @returns {Promise<MongoClient>} MongoDB client
    */
   async connect() {
@@ -157,7 +327,7 @@ class MongoConnection {
 
     // Log connection details for troubleshooting
     logger.info(
-      `Connecting to MongoDB through HAProxy at ${this.serverId}.${
+      `Connecting to MongoDB through Traefik at ${this.serverId}.${
         this.mongoDomain
       }:${this.port} with TLS enabled`,
     );
@@ -169,10 +339,88 @@ class MongoConnection {
       })}`,
     );
 
+    // TEMPORARY DIRECT CONNECTION BYPASS
+    // Try local connection first - this is a temporary workaround until Traefik is properly configured
+    try {
+      logger.info(
+        "Attempting direct connection to local MongoDB (bypassing Traefik)",
+      );
+
+      // Build direct connection URI without going through Traefik
+      const directLocalUri = `mongodb://${
+        this.username && this.password
+          ? `${this.username}:${this.password}@`
+          : ""
+      }127.0.0.1:${this.port}/${this.database}?directConnection=true`;
+
+      logger.info(
+        `Trying direct connection to local MongoDB: ${directLocalUri.replace(/:[^:]*@/, ":***@")}`,
+      );
+
+      // Modified options for direct connection
+      const directOptions = {
+        ...options,
+        tls: false, // Disable TLS for local connection
+        tlsAllowInvalidCertificates: false,
+        tlsAllowInvalidHostnames: false,
+      };
+
+      this.client = new MongoClient(directLocalUri, directOptions);
+      await this.client.connect();
+
+      // Verify connection
+      const adminDb = this.client.db("admin");
+      await adminDb.command({ ping: 1 });
+
+      this.db = this.client.db(this.database);
+      logger.info("Successfully connected to MongoDB directly on localhost");
+      return this.client;
+    } catch (localError) {
+      logger.error(
+        `Direct local MongoDB connection failed: ${localError.message}`,
+      );
+
+      // Reset client for next attempt
+      if (this.client) {
+        try {
+          await this.client.close();
+        } catch (closeErr) {
+          // Ignore close errors
+        }
+        this.client = null;
+      }
+    }
+
+    // Perform network diagnostics before attempting connection
+    const hostname = `${this.serverId}.${this.mongoDomain}`;
+    logger.info(`Running network diagnostics for ${hostname}:${this.port}...`);
+    const diagnostics = await this.performNetworkDiagnostics(
+      hostname,
+      parseInt(this.port, 10),
+    );
+
+    // If DNS resolves to an IP, also check direct IP connectivity
+    if (
+      diagnostics.dnsResolution &&
+      !diagnostics.dnsResolution.includes("No records") &&
+      !diagnostics.dnsResolution.includes("Error")
+    ) {
+      logger.info(
+        `Running network diagnostics for direct IP ${diagnostics.dnsResolution}:${this.port}...`,
+      );
+      await this.performNetworkDiagnostics(
+        diagnostics.dnsResolution,
+        parseInt(this.port, 10),
+      );
+    }
+
+    // Check Traefik configuration
+    logger.info("Checking Traefik configuration...");
+    const traefikCheck = await this.checkTraefikConfig();
+
     // Log the DNS hostname resolution for troubleshooting
     try {
       const { execSync } = require("child_process");
-      const hostname = `${this.serverId}.${this.mongoDomain}`;
       const dnsOutput = execSync(
         `dig +short ${hostname} || echo "DNS resolution failed"`,
       )
@@ -187,10 +435,10 @@ class MongoConnection {
       );
     }
 
-    // First attempt - Standard connection through HAProxy with TLS
+    // First attempt - Standard connection through Traefik with TLS
     try {
       logger.info(
-        "Attempting primary connection strategy: Through HAProxy with TLS",
+        "Attempting primary connection strategy: Through Traefik with TLS",
       );
       // Create a new MongoDB client
       this.client = new MongoClient(uri, options);
@@ -205,7 +453,7 @@ class MongoConnection {
       // Only set this.db after successful connection verification
       this.db = this.client.db(this.database);
 
-      logger.info("Successfully connected to MongoDB through HAProxy");
+      logger.info("Successfully connected to MongoDB through Traefik");
       return this.client;
     } catch (error) {
       logger.error(`First connection strategy failed: ${error.message}`);
@@ -213,21 +461,50 @@ class MongoConnection {
       // Detailed error logging
       if (error.message.includes("ECONNREFUSED")) {
         logger.error(
-          `Connection refused: Make sure HAProxy is running and listening on port ${this.port}`,
+          `Connection refused: Make sure Traefik is running and the route is properly configured`,
         );
         logger.error(
-          `Also verify that the HAProxy configuration has the MongoDB frontend enabled`,
+          `Also verify that the Traefik configuration has the MongoDB frontend enabled`,
         );
       } else if (error.message.includes("ETIMEDOUT")) {
         logger.error(
           `Connection timeout: Check network connectivity and firewall settings`,
+        );
+        // Provide additional troubleshooting suggestions for timeout
+        logger.error("Additional troubleshooting steps for timeouts:");
+        logger.error(
+          "1. Verify that MongoDB server is actually running and listening on port 27017",
+        );
+        logger.error(
+          "2. Check if there's a firewall blocking connections (iptables, ufw, etc.)",
+        );
+        logger.error(
+          "3. Confirm that Traefik configuration has the correct MongoDB route configured",
+        );
+        logger.error(
+          "4. Check if the server can connect to itself on the MongoDB port",
+        );
+        logger.error(
+          `5. Try running: curl -v telnet://${this.serverId}.${this.mongoDomain}:${this.port} to test TCP connectivity`,
         );
       } else if (
         error.message.includes("certificate") ||
         error.message.includes("TLS")
       ) {
         logger.error(
-          `TLS certificate error: Check HAProxy SSL configuration and agent certificates`,
+          `TLS certificate error: Check Traefik SSL configuration and agent certificates`,
+        );
+        // Provide additional troubleshooting for certificate issues
+        logger.error("Certificate troubleshooting steps:");
+        logger.error(
+          "1. Verify certificate files are correct and not corrupted",
+        );
+        logger.error("2. Check certificate expiration dates");
+        logger.error(
+          "3. Ensure the certificate's CN or SAN matches the hostname being used",
+        );
+        logger.error(
+          "4. Confirm Traefik is correctly configured to present these certificates",
         );
       }
 

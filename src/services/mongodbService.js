@@ -2,7 +2,7 @@
  * MongoDB Service
  *
  * Handles MongoDB initialization and registration with the front server.
- * Uses HAProxy Data Plane API for TLS termination.
+ * Uses Traefik for TLS termination and routing.
  */
 
 const fs = require("fs").promises;
@@ -68,7 +68,7 @@ class MongoDBService {
    */
   async registerWithFrontServer() {
     try {
-      logger.info("Registering MongoDB with front server...");
+      logger.info("Registering MongoDB with front server (Traefik)...");
 
       // Skip in development mode
       if (config.isDevelopment) {
@@ -79,7 +79,7 @@ class MongoDBService {
       // Get the public IP address for registration
       const publicIp = await getPublicIp();
 
-      // Use the new MongoDB registration endpoint
+      // Use the MongoDB registration endpoint
       const response = await axios.post(
         `${config.api.frontApiUrl}/api/mongodb/register`,
         {
@@ -97,11 +97,14 @@ class MongoDBService {
       );
 
       if (response.data && response.data.success) {
-        logger.info("MongoDB successfully registered with front server", {
-          domain: response.data.domain,
-          tlsEnabled: response.data.tlsEnabled,
-          connectionString: response.data.connectionString,
-        });
+        logger.info(
+          "MongoDB successfully registered with front server (Traefik)",
+          {
+            domain: response.data.domain,
+            tlsEnabled: response.data.tlsEnabled,
+            connectionString: response.data.connectionString,
+          },
+        );
 
         // Test the connection to confirm it's working
         try {
@@ -179,7 +182,7 @@ class MongoDBService {
         username: options.username,
         password: options.password,
         authEnabled: options.authEnabled !== false,
-        useTls: true, // Always use TLS with HAProxy
+        useTls: true, // Always use TLS with Traefik
       };
 
       // Install MongoDB

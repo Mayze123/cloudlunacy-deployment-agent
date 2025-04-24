@@ -57,14 +57,14 @@ const config = {
       process.env.DATABASE_ENABLED === "true" ||
       process.env.MONGODB_ENABLED === "true",
     mongodb: {
-      enabled: process.env.MONGODB_ENABLED === "true",
+      enabled: process.env.MONGO_ENABLED === "true" || true,
       host: process.env.MONGO_HOST || "localhost",
       port: process.env.MONGO_PORT || 27017,
       username: process.env.MONGO_MANAGER_USERNAME,
       password: process.env.MONGO_MANAGER_PASSWORD,
       database: process.env.MONGO_DATABASE || "admin",
       domain: process.env.MONGO_DOMAIN || "mongodb.cloudlunacy.uk",
-      useTls: true, // Always true with HAProxy Data Plane API
+      useTls: true, // Always true with Traefik
     },
   },
 
