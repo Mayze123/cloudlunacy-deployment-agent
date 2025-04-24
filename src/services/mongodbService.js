@@ -207,8 +207,50 @@ class MongoDBService {
    */
   async deployMongoDB(options) {
     try {
+      // Skip initialization until we've checked if MongoDB is already installed
+      logger.info("Checking if MongoDB is already installed and running...");
+
+      // Check if MongoDB container is already running
+      const isMongoRunning = await this.isMongoDBRunning();
+
+      if (!isMongoRunning) {
+        logger.info(
+          "MongoDB is not currently running, will set up a new instance",
+        );
+
+        // Create MongoDB docker-compose configuration
+        const dockerComposeResult =
+          await this.createMongoDBDockerCompose(options);
+        if (!dockerComposeResult.success) {
+          return {
+            success: false,
+            message: `Failed to create MongoDB configuration: ${dockerComposeResult.message}`,
+          };
+        }
+
+        // Start MongoDB container
+        const startResult = await this.startMongoDBContainer();
+        if (!startResult.success) {
+          return {
+            success: false,
+            message: `Failed to start MongoDB container: ${startResult.message}`,
+          };
+        }
+
+        // Wait for MongoDB to initialize
+        logger.info("Waiting for MongoDB to initialize...");
+        await new Promise((resolve) => setTimeout(resolve, 5000));
+      } else {
+        logger.info("MongoDB is already running, will use existing instance");
+      }
+
+      // Only initialize MongoDB service once container is running
       if (!this.initialized) {
-        const initResult = await this.initialize();
+        const initResult = await this.initialize({
+          // Skip connect attempts if we just started a new container
+          skipConnectionAttempts: false,
+        });
+
         if (!initResult) {
           return {
             success: false,
@@ -217,33 +259,33 @@ class MongoDBService {
         }
       }
 
-      // Prepare MongoDB installation options
-      const installOptions = {
-        port: options.port || 27017,
-        username: options.username,
-        password: options.password,
-        authEnabled: options.authEnabled !== false,
-        useTls: true, // Always use TLS with Traefik
-      };
+      // Initialize the MongoDB manager
+      logger.info(
+        "MongoDB manager already initialized, using existing connection",
+      );
 
-      // Install MongoDB
-      const installResult = await mongoManager.initialize();
-
-      if (!installResult) {
-        return {
-          success: false,
-          message: "Failed to initialize MongoDB",
-        };
+      // Register with front server if requested and if we have the required config
+      if (
+        options.registerWithFrontServer !== false &&
+        config.api.frontApiUrl &&
+        config.api.jwt
+      ) {
+        await this.registerWithFrontServer();
       }
 
-      // Register with front server
-      const registerResult = await this.registerWithFrontServer();
+      // Create database and user if requested
+      if (options.username && options.password) {
+        const createUserResult = await this.createDatabaseUser(
+          options.username,
+          options.password,
+          options.dbName || "admin",
+        );
 
-      if (!registerResult) {
-        return {
-          success: false,
-          message: "Failed to register MongoDB with front server",
-        };
+        if (!createUserResult.success) {
+          logger.warn(
+            `Failed to create database user: ${createUserResult.message}`,
+          );
+        }
       }
 
       // Test connection
@@ -253,7 +295,7 @@ class MongoDBService {
         success: true,
         message: "MongoDB deployment completed successfully",
         domain: `${config.serverId}.${config.database.mongodb.domain}`,
-        connectionString: `mongodb://${config.database.mongodb.username}:***@${config.serverId}.${config.database.mongodb.domain}:27017/?tls=true`,
+        connectionString: `mongodb://${options.username ? options.username + ":***@" : ""}${config.serverId}.${config.database.mongodb.domain}:27017/${options.dbName || "admin"}?tls=true`,
         connectionTest: testResult.success
           ? "Connection successful"
           : "Connection test failed",
@@ -264,6 +306,146 @@ class MongoDBService {
         success: false,
         message: `MongoDB deployment failed: ${error.message}`,
       };
+    }
+  }
+
+  /**
+   * Create MongoDB docker-compose configuration
+   * @param {Object} options Options for MongoDB setup
+   * @returns {Promise<Object>} Result of configuration creation
+   */
+  async createMongoDBDockerCompose(options) {
+    try {
+      logger.info("Creating MongoDB docker-compose configuration");
+
+      // Check directories
+      const fs = require("fs").promises;
+      const path = require("path");
+      const { execSync } = require("child_process");
+
+      const dirs = [
+        "/opt/cloudlunacy/mongodb/data",
+        "/opt/cloudlunacy/mongodb/config",
+        "/opt/cloudlunacy/mongodb/logs",
+      ];
+
+      // Create required directories
+      let allDirsExist = true;
+      for (const dir of dirs) {
+        try {
+          await fs.access(dir, fs.constants.W_OK);
+        } catch (err) {
+          allDirsExist = false;
+          await fs.mkdir(dir, { recursive: true });
+        }
+      }
+
+      logger.info(
+        allDirsExist
+          ? "All required directories exist and are writable"
+          : "Created required directories for MongoDB",
+      );
+
+      // Create docker-compose.yml file
+      const dockerComposeYml = `
+version: '3.8'
+services:
+  mongodb:
+    container_name: cloudlunacy-mongodb
+    image: mongo:latest
+    restart: always
+    ports:
+      - "127.0.0.1:27017:27017"
+    volumes:
+      - /opt/cloudlunacy/mongodb/data:/data/db
+      - /opt/cloudlunacy/mongodb/config:/data/configdb
+      - /opt/cloudlunacy/mongodb/logs:/var/log/mongodb
+      - /opt/cloudlunacy/certs:/etc/ssl/certs
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=${options.username || ""}
+      - MONGO_INITDB_ROOT_PASSWORD=${options.password || ""}
+    command: mongod --bind_ip_all ${options.username && options.password ? "--auth" : ""} --tlsMode preferTLS --tlsCertificateKeyFile /etc/ssl/certs/server.pem --tlsCAFile /etc/ssl/certs/ca.crt
+`;
+
+      await fs.writeFile(
+        "/opt/cloudlunacy/mongodb/docker-compose.yml",
+        dockerComposeYml,
+      );
+      logger.info("Created MongoDB docker-compose configuration");
+
+      return { success: true };
+    } catch (error) {
+      logger.error(`Failed to create MongoDB configuration: ${error.message}`);
+      return { success: false, message: error.message };
+    }
+  }
+
+  /**
+   * Start MongoDB container
+   * @returns {Promise<Object>} Result of starting the container
+   */
+  async startMongoDBContainer() {
+    try {
+      logger.info("Starting MongoDB container");
+
+      const { exec } = require("child_process");
+
+      // Function to execute commands and log output
+      const execCommand = (command) => {
+        return new Promise((resolve, reject) => {
+          exec(command, (error, stdout, stderr) => {
+            if (stdout) logger.info(`[stdout] ${stdout}`);
+            if (stderr) logger.info(`[stderr] ${stderr}`);
+
+            if (error) {
+              logger.error(`Command error: ${error.message}`);
+              reject(error);
+            } else {
+              resolve({ stdout, stderr });
+            }
+          });
+        });
+      };
+
+      // Start MongoDB using docker-compose
+      await execCommand("cd /opt/cloudlunacy/mongodb && docker-compose up -d");
+
+      logger.info("Started MongoDB container");
+      return { success: true };
+    } catch (error) {
+      logger.error(`Failed to start MongoDB container: ${error.message}`);
+      return { success: false, message: error.message };
+    }
+  }
+
+  /**
+   * Create a database user
+   * @param {string} username Username to create
+   * @param {string} password Password for the user
+   * @param {string} dbName Database name
+   * @returns {Promise<Object>} Result of user creation
+   */
+  async createDatabaseUser(username, password, dbName = "admin") {
+    try {
+      logger.info(`Creating database user ${username} for database ${dbName}`);
+
+      const mongoManager = require("../../utils/mongoManager");
+      const result = await mongoManager.createUser(username, password, dbName, [
+        "readWrite",
+        "dbAdmin",
+      ]);
+
+      if (result) {
+        logger.info(
+          `Successfully created user ${username} for database ${dbName}`,
+        );
+        return { success: true };
+      } else {
+        throw new Error("User creation returned false");
+      }
+    } catch (error) {
+      logger.error(`Failed to create database user: ${error.message}`);
+      return { success: false, message: error.message };
     }
   }
 }
