@@ -225,7 +225,9 @@ setup_user_directories() {
 
   # Set initial ownership of the base directory
   chown -R "$USERNAME":"$USERNAME" "$BASE_DIR"
-  chmod 750 "$BASE_DIR"
+  # Set correct permissions (755) for the base directory
+  chmod 755 "$BASE_DIR"
+  log "Set ownership and permissions for $BASE_DIR"
 }
 
 download_agent() {
