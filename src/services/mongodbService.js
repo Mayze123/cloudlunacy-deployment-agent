@@ -373,11 +373,11 @@ services:
       - /opt/cloudlunacy/mongodb/data:/data/db
       - /opt/cloudlunacy/mongodb/config:/data/configdb
       - /opt/cloudlunacy/mongodb/logs:/var/log/mongodb
-      - /opt/cloudlunacy/certs:/etc/ssl/certs
+      - /opt/cloudlunacy/certs:/etc/mongodb/certs
     environment:
       - MONGO_INITDB_ROOT_USERNAME=${options.username || ""}
       - MONGO_INITDB_ROOT_PASSWORD=${options.password || ""}
-    command: mongod --bind_ip_all ${options.username && options.password ? "--auth" : ""} --tlsMode preferTLS --tlsCertificateKeyFile /etc/ssl/certs/server.pem --tlsCAFile /etc/ssl/certs/ca.crt
+    command: mongod --bind_ip_all ${options.username && options.password ? "--auth" : ""} --tlsMode preferTLS --tlsCertificateKeyFile /etc/mongodb/certs/server.pem --tlsCAFile /etc/mongodb/certs/ca.crt --tlsAllowConnectionsWithoutCertificates
 `;
 
       await fs.writeFile(
