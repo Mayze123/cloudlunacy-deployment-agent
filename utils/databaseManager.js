@@ -5,7 +5,7 @@ const axios = require("axios");
 const logger = require("./logger");
 const mongoManager = require("./mongoManager");
 const { executeCommand } = require("./executor");
-const { getPublicIp } = require("../utils/networkUtils");
+const { getPublicIp } = require("../src/utils/networkUtils");
 
 /**
  * Generic Database Manager
