@@ -427,7 +427,7 @@ REDIS_PASSWORD=${mergedConfig.password || ""}
       // Check if certs volume is properly mounted
       const { stdout: volOutput } = await executeCommand("sh", [
         "-c",
-        'docker inspect cloudlunacy-mongodb --format="{{range .Mounts}}{{if eq .Destination \"/etc/mongodb/certs\"}}{{.Source}}{{end}}{{end}}" || echo "No certs volume mounted"',
+        'docker inspect cloudlunacy-mongodb --format "{{range .Mounts}}{{if eq .Destination \\\"/etc/mongodb/certs\\\"}}{{.Source}}{{end}}{{end}}" || echo "No certs volume mounted"',
       ]);
 
       const certsVolume = volOutput.trim();

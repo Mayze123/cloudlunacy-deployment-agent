@@ -49,11 +49,37 @@ class MessageHandler {
           repositoryController.checkRepositoryAccess(message.payload, ws);
           break;
 
+        case "register_ack":
+          this.handleRegistrationAcknowledgement(message, ws);
+          break;
+
         default:
           this.handleUnknownMessageType(message, ws);
       }
     } catch (error) {
       this.handleMessageError(error, message, ws);
+    }
+  }
+
+  /**
+   * Handle registration acknowledgement from the backend.
+   * @param {Object} message - The message object.
+   * @param {WebSocket} ws - The WebSocket connection object.
+   */
+  handleRegistrationAcknowledgement(message, ws) {
+    logger.info("Registration acknowledged by backend server");
+
+    // If there are any specific actions needed upon registration confirmation,
+    // they can be implemented here
+
+    // Optionally send a confirmation back to the backend
+    if (ws && ws.readyState === 1) {
+      ws.send(
+        JSON.stringify({
+          type: "register_ack_received",
+          requestId: message.requestId || null,
+        }),
+      );
     }
   }
 
