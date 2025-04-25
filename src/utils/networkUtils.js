@@ -20,7 +20,25 @@ const execAsync = util.promisify(exec);
  */
 async function getPublicIp() {
   try {
-    // First try to get the server's own IP address using execSync
+    // First, try external service to get the public IP
+    try {
+      logger.debug(
+        "Attempting to get public IP from external service ipify.org",
+      );
+      const response = await axios.get("https://api.ipify.org?format=json", {
+        timeout: 5000,
+      }); // Add timeout
+      if (response.data && response.data.ip) {
+        logger.debug(`Found public IP via ipify.org: ${response.data.ip}`);
+        return response.data.ip;
+      }
+    } catch (extErr) {
+      logger.warn(
+        `Failed to get public IP from ipify.org: ${extErr.message}. Falling back to local methods.`,
+      );
+    }
+
+    // If external service fails, try local command hostname -I
     try {
       const { stdout } = await execAsync("hostname -I");
       const localIp = stdout.toString().trim().split(" ")[0];
@@ -28,11 +46,13 @@ async function getPublicIp() {
         logger.debug(`Found local IP using hostname command: ${localIp}`);
         return localIp;
       }
-    } catch (err) {
-      logger.warn(`Failed to get local IP with hostname -I: ${err.message}`);
+    } catch (hostErr) {
+      logger.warn(
+        `Failed to get local IP with hostname -I: ${hostErr.message}`,
+      );
     }
 
-    // If local command fails, try network interfaces from os module
+    // If hostname -I fails, try network interfaces from os module
     try {
       const interfaces = os.networkInterfaces();
       for (const name of Object.keys(interfaces)) {
@@ -46,20 +66,21 @@ async function getPublicIp() {
           }
         }
       }
-    } catch (err) {
+    } catch (netErr) {
       logger.warn(
-        `Failed to get local IP from network interfaces: ${err.message}`,
+        `Failed to get local IP from network interfaces: ${netErr.message}`,
       );
     }
 
-    // If all local methods fail, try external service
-    logger.debug("Attempting to get IP from external service ipify.org");
-    const response = await axios.get("https://api.ipify.org?format=json");
-    return response.data.ip;
-  } catch (error) {
-    logger.error(`Failed to determine IP address: ${error.message}`);
-    // Fallback to localhost as a last resort
+    // If all methods fail, fallback to localhost
+    logger.warn(
+      "All methods to determine IP failed. Falling back to 127.0.0.1",
+    );
     return "127.0.0.1";
+  } catch (error) {
+    // Catch any unexpected errors in the outer try block
+    logger.error(`Unexpected error in getPublicIp: ${error.message}`);
+    return "127.0.0.1"; // Fallback in case of unexpected errors
   }
 }
 

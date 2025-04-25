@@ -389,23 +389,6 @@ class DatabaseController {
         dbName: dbPayload.dbName,
       });
 
-      // Register MongoDB with front server
-      const response = await axios.post(
-        `${config.api.frontApiUrl}/api/mongodb/register`,
-        {
-          agentId: config.serverId,
-          targetIp: publicIp,
-          targetPort: mongoConfig.port || 27017,
-          useTls: true, // Always enable TLS with Traefik
-        },
-        {
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${config.api.jwt}`,
-          },
-        },
-      );
-
       return result;
     } catch (error) {
       logger.error(`MongoDB deployment failed: ${error.message}`);

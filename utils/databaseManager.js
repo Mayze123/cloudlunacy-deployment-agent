@@ -5,6 +5,7 @@ const axios = require("axios");
 const logger = require("./logger");
 const mongoManager = require("./mongoManager");
 const { executeCommand } = require("./executor");
+const { getPublicIp } = require("../utils/networkUtils");
 
 /**
  * Generic Database Manager
@@ -503,20 +504,8 @@ REDIS_PASSWORD=${mergedConfig.password || ""}
           const frontApiUrl =
             process.env.FRONT_API_URL || config.api.frontApiUrl;
 
-          // Get the IP address for registration
-          const { networkInterfaces } = require("os");
-          const nets = networkInterfaces();
-          let publicIp = "localhost";
-
-          // Find the primary public IP
-          for (const name of Object.keys(nets)) {
-            for (const net of nets[name]) {
-              if (net.family === "IPv4" && !net.internal) {
-                publicIp = net.address;
-                break;
-              }
-            }
-          }
+          // Get the public IP address for registration using the utility function
+          const publicIp = await getPublicIp();
 
           logger.info(`Using IP address for MongoDB registration: ${publicIp}`);
 
