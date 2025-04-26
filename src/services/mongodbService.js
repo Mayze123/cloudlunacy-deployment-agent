@@ -46,14 +46,40 @@ class MongoDBService {
         return true;
       }
 
-      // Check if MongoDB is actually installed/running - we'll check for the MongoDB process
+      // Check if MongoDB is actually installed/running
       const isMongoRunning = await this.isMongoDBRunning();
+
+      // Check if MongoDB is installed but not running
       if (!isMongoRunning) {
-        logger.info(
-          "MongoDB does not appear to be running, skipping connection attempts",
-        );
-        this.initialized = true;
-        return true;
+        logger.info("MongoDB is not running, checking if it's installed...");
+
+        // Check if MongoDB container configuration exists
+        const isMongoInstalled = await this.isMongoDBInstalled();
+
+        if (isMongoInstalled) {
+          logger.info(
+            "MongoDB is installed but not running, starting container...",
+          );
+
+          // Start the MongoDB container
+          const startResult = await this.startMongoDBContainer();
+          if (startResult.success) {
+            logger.info("MongoDB container started successfully");
+
+            // Wait for MongoDB to initialize
+            logger.info("Waiting for MongoDB to initialize...");
+            await new Promise((resolve) => setTimeout(resolve, 5000));
+          } else {
+            logger.error(
+              `Failed to start MongoDB container: ${startResult.message}`,
+            );
+            // Continue with initialization even if startup fails
+          }
+        } else {
+          logger.info(
+            "MongoDB does not appear to be installed, skipping connection attempts",
+          );
+        }
       }
 
       // Initialize the MongoDB manager - but don't try to connect yet
@@ -99,6 +125,41 @@ class MongoDBService {
     } catch (error) {
       // If command fails, MongoDB is likely not running
       logger.info("MongoDB process not detected on the system");
+      return false;
+    }
+  }
+
+  /**
+   * Check if MongoDB is installed
+   * @returns {Promise<boolean>} Whether MongoDB is installed
+   */
+  async isMongoDBInstalled() {
+    try {
+      const fs = require("fs").promises;
+
+      // Check if the MongoDB docker-compose file exists
+      const dockerComposePath = "/opt/cloudlunacy/mongodb/docker-compose.yml";
+      try {
+        await fs.access(dockerComposePath, fs.constants.F_OK);
+        logger.info("MongoDB docker-compose configuration found");
+        return true;
+      } catch (err) {
+        // Check alternative docker-compose location
+        const altDockerComposePath =
+          "/opt/cloudlunacy/docker-compose.mongodb.yml";
+        try {
+          await fs.access(altDockerComposePath, fs.constants.F_OK);
+          logger.info(
+            "MongoDB docker-compose configuration found at alternative location",
+          );
+          return true;
+        } catch (err) {
+          logger.info("MongoDB docker-compose configuration not found");
+          return false;
+        }
+      }
+    } catch (error) {
+      logger.error(`Error checking if MongoDB is installed: ${error.message}`);
       return false;
     }
   }
