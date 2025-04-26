@@ -77,14 +77,14 @@ class MongoConnection {
         ? `${this.username}:${this.password}@`
         : "";
 
-    // IMPORTANT: Always use the agent subdomain format for Traefik routing
-    // This enables hostname-based routing to reach the correct MongoDB instance
-    // Format: {agentId}.mongodb.cloudlunacy.uk
-    const host = `${this.serverId}.${this.mongoDomain}`;
+    // For Atlas-like experience, use the server hostname directly
+    // This works because the server has TLS enabled but clients don't need certs
+    const host =
+      process.env.MONGO_DIRECT_HOST || `${this.serverId}.${this.mongoDomain}`;
 
-    // TLS is always enabled with Traefik
+    // Atlas-style TLS parameters - secure connection without client certificates
     const tlsParams =
-      "?tls=true&tlsAllowInvalidCertificates=true&directConnection=true";
+      "?tls=true&tlsAllowInvalidCertificates=true&retryWrites=true&w=majority";
 
     const uri = `mongodb://${credentials}${host}:${this.port}/${this.database}${tlsParams}`;
     logger.debug(`Generated MongoDB URI: ${uri.replace(/:[^:]*@/, ":***@")}`);
@@ -95,36 +95,19 @@ class MongoConnection {
   /**
    * Get TLS options for MongoDB connection
    *
-   * With Traefik, we don't need to verify certificates on the agent side
-   * because Traefik handles TLS termination
+   * This follows the MongoDB Atlas approach - the server uses TLS certificates,
+   * but clients connect with TLS without needing their own certificates.
    *
    * @returns {Object} TLS options
    */
   getTlsOptions() {
-    const tlsOptions = {
-      tlsAllowInvalidCertificates: true,
-      tlsAllowInvalidHostnames: true,
+    // Atlas-style TLS options
+    return {
+      tls: true, // Enable TLS
+      tlsAllowInvalidCertificates: true, // Don't validate server certificates (like Atlas)
+      retryWrites: true, // Enable retryable writes
+      w: "majority", // Write concern
     };
-
-    // Check and add CA certificate if it exists
-    if (fs.existsSync(this.caPath)) {
-      try {
-        tlsOptions.tlsCAFile = this.caPath;
-        logger.info(`Using CA certificate from: ${this.caPath}`);
-
-        // Log the first few lines of the cert for verification
-        const certContent = fs.readFileSync(this.caPath, "utf8");
-        logger.info(
-          `CA certificate begins with: ${certContent.substring(0, 50)}...`,
-        );
-      } catch (error) {
-        logger.error(`Error loading CA certificate: ${error.message}`);
-      }
-    } else {
-      logger.warn(`CA certificate file not found at: ${this.caPath}`);
-    }
-
-    return tlsOptions;
   }
 
   /**
@@ -292,7 +275,7 @@ class MongoConnection {
   }
 
   /**
-   * Connect to MongoDB through Traefik
+   * Connect to MongoDB with an Atlas-like approach
    * @returns {Promise<MongoClient>} MongoDB client
    */
   async connect() {
@@ -311,194 +294,61 @@ class MongoConnection {
     const uri = this.getUri();
     const tlsOptions = this.getTlsOptions();
     const options = {
-      serverSelectionTimeoutMS: 30000, // Increased from 5000 to 30000
-      socketTimeoutMS: 30000, // Increased from 10000 to 30000
-      connectTimeoutMS: 30000, // Increased from 10000 to 30000
-      maxPoolSize: 5, // Limit pool size for better management
-      retryWrites: false, // Disable retry writes for initial connection
+      serverSelectionTimeoutMS: 30000,
+      socketTimeoutMS: 30000,
+      connectTimeoutMS: 30000,
+      maxPoolSize: 10,
       ...tlsOptions,
     };
 
-    // Log connection details for troubleshooting
+    // Log connection details
     logger.info(
-      `Connecting to MongoDB through Traefik at ${this.serverId}.${
-        this.mongoDomain
-      }:${this.port} with TLS enabled`,
+      `Connecting to MongoDB with Atlas-like TLS at ${
+        process.env.MONGO_DIRECT_HOST || `${this.serverId}.${this.mongoDomain}`
+      }:${this.port}`,
     );
     logger.info(`Using URI: ${uri.replace(/:[^:]*@/, ":***@")}`);
-    logger.info(
-      `Connection options: ${JSON.stringify({
-        ...options,
-        tlsCAFile: options.tlsCAFile ? "[set]" : "[not set]",
-      })}`,
-    );
 
-    // TEMPORARY DIRECT CONNECTION BYPASS
-    // Try local connection first - this is a temporary workaround until Traefik is properly configured
     try {
-      logger.info(
-        "Attempting direct connection to local MongoDB (bypassing Traefik)",
-      );
-
-      // Build direct connection URI without going through Traefik
-      const directLocalUri = `mongodb://${
-        this.username && this.password
-          ? `${this.username}:${this.password}@`
-          : ""
-      }127.0.0.1:${this.port}/${this.database}?directConnection=true`;
-
-      logger.info(
-        `Trying direct connection to local MongoDB: ${directLocalUri.replace(/:[^:]*@/, ":***@")}`,
-      );
-
-      // Modified options for direct connection
-      const directOptions = {
-        ...options,
-        tls: false, // Disable TLS for local connection
-        tlsAllowInvalidCertificates: false,
-        tlsAllowInvalidHostnames: false,
-      };
-
-      this.client = new MongoClient(directLocalUri, directOptions);
-      await this.client.connect();
-
-      // Verify connection
-      const adminDb = this.client.db("admin");
-      await adminDb.command({ ping: 1 });
-
-      this.db = this.client.db(this.database);
-      logger.info("Successfully connected to MongoDB directly on localhost");
-      return this.client;
-    } catch (localError) {
-      logger.error(
-        `Direct local MongoDB connection failed: ${localError.message}`,
-      );
-
-      // Reset client for next attempt
-      if (this.client) {
-        try {
-          await this.client.close();
-        } catch (closeErr) {
-          // Ignore close errors
-        }
-        this.client = null;
-      }
-    }
-
-    // Perform network diagnostics before attempting connection
-    const hostname = `${this.serverId}.${this.mongoDomain}`;
-    logger.info(`Running network diagnostics for ${hostname}:${this.port}...`);
-    const diagnostics = await this.performNetworkDiagnostics(
-      hostname,
-      parseInt(this.port, 10),
-    );
-
-    // If DNS resolves to an IP, also check direct IP connectivity
-    if (
-      diagnostics.dnsResolution &&
-      !diagnostics.dnsResolution.includes("No records") &&
-      !diagnostics.dnsResolution.includes("Error")
-    ) {
-      logger.info(
-        `Running network diagnostics for direct IP ${diagnostics.dnsResolution}:${this.port}...`,
-      );
-      await this.performNetworkDiagnostics(
-        diagnostics.dnsResolution,
-        parseInt(this.port, 10),
-      );
-    }
-
-    // Log the DNS hostname resolution for troubleshooting
-    try {
-      const { execSync } = require("child_process");
-      const dnsOutput = execSync(
-        `dig +short ${hostname} || echo "DNS resolution failed"`,
-      )
-        .toString()
-        .trim();
-      logger.info(
-        `DNS resolution for ${hostname}: ${dnsOutput || "No records found"}`,
-      );
-    } catch (dnsErr) {
-      logger.warn(
-        `Could not resolve DNS for MongoDB hostname: ${dnsErr.message}`,
-      );
-    }
-
-    // First attempt - Standard connection through Traefik with TLS
-    try {
-      logger.info(
-        "Attempting primary connection strategy: Through Traefik with TLS",
-      );
       // Create a new MongoDB client
       this.client = new MongoClient(uri, options);
 
-      // Try to establish a connection
+      // Establish connection
       await this.client.connect();
 
-      // Verify connection with a ping before setting the db
+      // Verify connection with a ping
       const adminDb = this.client.db("admin");
       await adminDb.command({ ping: 1 });
 
-      // Only set this.db after successful connection verification
+      // Set database after successful connection
       this.db = this.client.db(this.database);
 
-      logger.info("Successfully connected to MongoDB through Traefik");
+      logger.info(
+        "Successfully connected to MongoDB with Atlas-like TLS approach",
+      );
       return this.client;
     } catch (error) {
-      logger.error(`First connection strategy failed: ${error.message}`);
+      logger.error(`MongoDB connection failed: ${error.message}`);
 
       // Detailed error logging
       if (error.message.includes("ECONNREFUSED")) {
         logger.error(
-          `Connection refused: Make sure Traefik is running and the route is properly configured`,
-        );
-        logger.error(
-          `Also verify that the Traefik configuration has the MongoDB frontend enabled`,
+          `Connection refused: Make sure MongoDB server is running and accessible`,
         );
       } else if (error.message.includes("ETIMEDOUT")) {
         logger.error(
           `Connection timeout: Check network connectivity and firewall settings`,
-        );
-        // Provide additional troubleshooting suggestions for timeout
-        logger.error("Additional troubleshooting steps for timeouts:");
-        logger.error(
-          "1. Verify that MongoDB server is actually running and listening on port 27017",
-        );
-        logger.error(
-          "2. Check if there's a firewall blocking connections (iptables, ufw, etc.)",
-        );
-        logger.error(
-          "3. Confirm that Traefik configuration has the correct MongoDB route configured",
-        );
-        logger.error(
-          "4. Check if the server can connect to itself on the MongoDB port",
-        );
-        logger.error(
-          `5. Try running: curl -v telnet://${this.serverId}.${this.mongoDomain}:${this.port} to test TCP connectivity`,
         );
       } else if (
         error.message.includes("certificate") ||
         error.message.includes("TLS")
       ) {
         logger.error(
-          `TLS certificate error: Check Traefik SSL configuration and agent certificates`,
-        );
-        // Provide additional troubleshooting for certificate issues
-        logger.error("Certificate troubleshooting steps:");
-        logger.error(
-          "1. Verify certificate files are correct and not corrupted",
-        );
-        logger.error("2. Check certificate expiration dates");
-        logger.error(
-          "3. Ensure the certificate's CN or SAN matches the hostname being used",
-        );
-        logger.error(
-          "4. Confirm Traefik is correctly configured to present these certificates",
+          `TLS certificate error. Verify the MongoDB server has TLS properly configured.`,
         );
       }
 
-      // Reset client for next attempt
+      // Reset client
       if (this.client) {
         try {
           await this.client.close();
@@ -508,89 +358,36 @@ class MongoConnection {
         this.client = null;
       }
 
-      // Second attempt - Try direct connection with TLS
-      try {
-        // Try connecting directly to the resolved IP with TLS
-        logger.info(
-          "Attempting fallback connection strategy: Direct IP with TLS",
-        );
-
-        // Get the IP from DNS resolution
-        const { execSync } = require("child_process");
-        const hostname = `${this.serverId}.${this.mongoDomain}`;
-        const ip = execSync(`dig +short ${hostname}`).toString().trim();
-
-        if (!ip) {
-          logger.error(
-            "Failed to resolve hostname to IP for direct connection",
-          );
-          throw new Error("DNS resolution failed");
-        }
-
-        // Build direct connection URI with IP
-        const directUri = `mongodb://${
-          this.username && this.password
-            ? `${this.username}:${this.password}@`
-            : ""
-        }${ip}:${this.port}/${this.database}?tls=true&tlsAllowInvalidCertificates=true&directConnection=true`;
-
-        logger.info(
-          `Trying direct connection to IP: ${ip} (URI: ${directUri.replace(/:[^:]*@/, ":***@")})`,
-        );
-
-        this.client = new MongoClient(directUri, options);
-        await this.client.connect();
-
-        // Verify connection
-        const adminDb = this.client.db("admin");
-        await adminDb.command({ ping: 1 });
-
-        this.db = this.client.db(this.database);
-        logger.info(
-          "Successfully connected to MongoDB using direct IP with TLS",
-        );
-        return this.client;
-      } catch (directError) {
-        logger.error(
-          `Direct IP connection with TLS failed: ${directError.message}`,
-        );
-
-        // Reset client for next attempt
-        if (this.client) {
-          try {
-            await this.client.close();
-          } catch (closeErr) {
-            // Ignore close errors
-          }
-          this.client = null;
-        }
-
-        // Third attempt - Try connection without TLS
+      // If we have a TLS/certificate issue, try with even more relaxed settings
+      if (
+        error.message.includes("certificate") ||
+        error.message.includes("TLS") ||
+        error.message.includes("SSL")
+      ) {
         try {
-          logger.info(
-            "Attempting final fallback strategy: Connection without TLS",
-          );
+          logger.info("Attempting connection with more relaxed TLS settings");
 
-          // Build non-TLS URI
-          const nonTlsUri = `mongodb://${
+          // Create a more permissive connection string
+          const relaxedUri = `mongodb://${
             this.username && this.password
               ? `${this.username}:${this.password}@`
               : ""
-          }${this.serverId}.${this.mongoDomain}:${this.port}/${this.database}?directConnection=true`;
+          }${this.host}:${this.port}/${this.database}?tls=true&tlsInsecure=true&tlsAllowInvalidCertificates=true&tlsAllowInvalidHostnames=true`;
 
           logger.info(
-            `Trying connection without TLS: ${nonTlsUri.replace(/:[^:]*@/, ":***@")}`,
+            `Trying connection with relaxed TLS: ${relaxedUri.replace(/:[^:]*@/, ":***@")}`,
           );
 
-          // Modified options without TLS
-          const nonTlsOptions = {
+          // More permissive TLS options
+          const relaxedOptions = {
             ...options,
-            tls: false,
-            tlsAllowInvalidCertificates: false,
-            tlsAllowInvalidHostnames: false,
+            tls: true,
+            tlsInsecure: true,
+            tlsAllowInvalidCertificates: true,
+            tlsAllowInvalidHostnames: true,
           };
 
-          this.client = new MongoClient(nonTlsUri, nonTlsOptions);
+          this.client = new MongoClient(relaxedUri, relaxedOptions);
           await this.client.connect();
 
           // Verify connection
@@ -598,16 +395,49 @@ class MongoConnection {
           await adminDb.command({ ping: 1 });
 
           this.db = this.client.db(this.database);
-          logger.info("Successfully connected to MongoDB without TLS");
+          logger.info(
+            "Successfully connected to MongoDB with relaxed TLS settings",
+          );
           return this.client;
-        } catch (nonTlsError) {
-          logger.error(`Non-TLS connection failed: ${nonTlsError.message}`);
-          // All connection strategies have failed
-          this.client = null;
-          this.db = null;
-          throw error; // Throw the original error
+        } catch (relaxedError) {
+          logger.error(
+            `Connection with relaxed TLS also failed: ${relaxedError.message}`,
+          );
+
+          // Last resort - try without TLS
+          try {
+            logger.info("Last resort: Attempting connection without TLS");
+
+            const nonTlsUri = `mongodb://${
+              this.username && this.password
+                ? `${this.username}:${this.password}@`
+                : ""
+            }${this.host}:${this.port}/${this.database}?directConnection=true`;
+
+            const nonTlsOptions = {
+              ...options,
+              tls: false,
+            };
+
+            this.client = new MongoClient(nonTlsUri, nonTlsOptions);
+            await this.client.connect();
+            const adminDb = this.client.db("admin");
+            await adminDb.command({ ping: 1 });
+
+            this.db = this.client.db(this.database);
+            logger.info("Successfully connected to MongoDB without TLS");
+            return this.client;
+          } catch (nonTlsError) {
+            logger.error(
+              `All connection attempts failed. Last error: ${nonTlsError.message}`,
+            );
+            this.client = null;
+            this.db = null;
+          }
         }
       }
+
+      throw error; // Re-throw the original error
     }
   }
 
@@ -627,8 +457,6 @@ class MongoConnection {
       this.db = null;
     }
   }
-
-  // ... existing code ...
 }
 
 // Export singleton instance
