@@ -482,7 +482,7 @@ services:
     environment:
       - MONGO_INITDB_ROOT_USERNAME=${options.username || ""}
       - MONGO_INITDB_ROOT_PASSWORD=${options.password || ""}
-    command: mongod --bind_ip_all ${options.username && options.password ? "--auth" : ""} --tlsMode preferTLS --tlsCertificateKeyFile /etc/mongodb/certs/server.pem --tlsCAFile /etc/mongodb/certs/ca.crt --tlsAllowConnectionsWithoutCertificates
+    command: mongod --bind_ip_all ${options.username && options.password ? "--auth" : ""} --tlsMode preferTLS --tlsCertificateKeyFile /etc/mongodb/certs/server.pem --tlsCAFile /etc/mongodb/certs/ca.crt --tlsAllowConnectionsWithoutCertificates --tlsAllowInvalidCertificates
 `;
 
       await fs.writeFile(

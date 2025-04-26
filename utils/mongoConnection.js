@@ -78,14 +78,51 @@ class MongoConnection {
         : "";
 
     // For Atlas-like experience, use the server hostname directly
-    const host = process.env.MONGO_DIRECT_HOST || `${this.serverId}.${this.mongoDomain}`;
-    
+    const host =
+      process.env.MONGO_DIRECT_HOST || `${this.serverId}.${this.mongoDomain}`;
+
     // Configuration to bypass the KEY_USAGE_BIT_INCORRECT error
     // This addresses the boringssl error in MongoDB Compass
-    const tlsParams = "?tls=true&tlsInsecure=true&tlsAllowInvalidCertificates=true&tlsAllowInvalidHostnames=true";
+    const tlsParams =
+      "?tls=true&tlsAllowInvalidCertificates=true&tlsAllowInvalidHostnames=true";
 
     const uri = `mongodb://${credentials}${host}:${this.port}/${this.database}${tlsParams}`;
     logger.debug(`Generated MongoDB URI: ${uri.replace(/:[^:]*@/, ":***@")}`);
+
+    return uri;
+  }
+
+  /**
+   * Get a MongoDB connection string compatible with MongoDB Compass
+   * This specifically addresses the KEY_USAGE_BIT_INCORRECT error in BoringSSL
+   *
+   * @param {Object} options - Options for the connection string
+   * @param {string} options.username - Username for MongoDB authentication
+   * @param {string} options.password - Password for MongoDB authentication
+   * @param {string} options.database - Database name
+   * @returns {string} MongoDB connection string for Compass
+   */
+  getCompassConnectionString(options = {}) {
+    const username = options.username || this.username || "";
+    const password = options.password || this.password || "";
+    const database = options.database || this.database || "admin";
+
+    const credentials = username && password ? `${username}:${password}@` : "";
+    const host =
+      process.env.MONGO_DIRECT_HOST || `${this.serverId}.${this.mongoDomain}`;
+
+    // Special parameters to fix the BoringSSL KEY_USAGE_BIT_INCORRECT error in Compass
+    // Note: tlsInsecure cannot be used with tlsAllowInvalidCertificates
+    const compassParams = [
+      "tls=true",
+      "tlsAllowInvalidCertificates=true",
+      "tlsAllowInvalidHostnames=true",
+      "directConnection=true",
+      "retryWrites=true",
+      "w=majority",
+    ].join("&");
+
+    const uri = `mongodb://${credentials}${host}:${this.port}/${database}?${compassParams}`;
 
     return uri;
   }
@@ -100,10 +137,10 @@ class MongoConnection {
    */
   getTlsOptions() {
     return {
-      tls: true,                           // Enable TLS
-      tlsInsecure: true,                   // Skip TLS validation entirely
-      tlsAllowInvalidCertificates: true,   // Don't validate server certificates
-      tlsAllowInvalidHostnames: true       // Don't validate hostnames in the certificate
+      tls: true, // Enable TLS
+      tlsAllowInvalidCertificates: true, // Don't validate server certificates
+      tlsAllowInvalidHostnames: true, // Don't validate hostnames in the certificate
+      // Note: tlsInsecure cannot be used with tlsAllowInvalidCertificates
     };
   }
 
@@ -369,7 +406,7 @@ class MongoConnection {
             this.username && this.password
               ? `${this.username}:${this.password}@`
               : ""
-          }${this.host}:${this.port}/${this.database}?tls=true&tlsInsecure=true&tlsAllowInvalidCertificates=true&tlsAllowInvalidHostnames=true`;
+          }${this.host}:${this.port}/${this.database}?tls=true&tlsAllowInvalidCertificates=true&tlsAllowInvalidHostnames=true`;
 
           logger.info(
             `Trying connection with relaxed TLS: ${relaxedUri.replace(/:[^:]*@/, ":***@")}`,
@@ -379,7 +416,6 @@ class MongoConnection {
           const relaxedOptions = {
             ...options,
             tls: true,
-            tlsInsecure: true,
             tlsAllowInvalidCertificates: true,
             tlsAllowInvalidHostnames: true,
           };

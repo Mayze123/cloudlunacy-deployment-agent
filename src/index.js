@@ -35,10 +35,38 @@ function ensureDirectoriesExist() {
 function startHealthServer() {
   try {
     const server = http.createServer((req, res) => {
+      // Health check endpoint
       if (req.url === "/health") {
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(
           JSON.stringify({ status: "ok", timestamp: new Date().toISOString() }),
+        );
+      }
+      // MongoDB Compass connection string endpoint
+      else if (req.url === "/api/mongodb/compass-connection") {
+        // Import the MongoDB connection utility
+        const mongoConnection = require("../utils/mongoConnection");
+
+        // Generate connection string specifically for MongoDB Compass
+        const connectionString = mongoConnection.getCompassConnectionString({
+          username: config.database.mongodb.username || "admin",
+          password: config.database.mongodb.password || "",
+          database: "admin",
+        });
+
+        // Return the connection string as JSON
+        res.writeHead(200, {
+          "Content-Type": "application/json",
+          "Access-Control-Allow-Origin": "*",
+        });
+        res.end(
+          JSON.stringify({
+            success: true,
+            connection_string: connectionString,
+            usage_info:
+              "Use this connection string in MongoDB Compass to avoid SSL KEY_USAGE_BIT_INCORRECT errors",
+            server_id: config.serverId,
+          }),
         );
       } else {
         res.writeHead(404);
@@ -46,9 +74,12 @@ function startHealthServer() {
       }
     });
 
-    const port = config.health.port;
+    const port = process.env.HEALTH_PORT || 3006;
     server.listen(port, () => {
       logger.info(`Health check server running on port ${port}`);
+      logger.info(
+        `MongoDB Compass connection string available at: http://localhost:${port}/api/mongodb/compass-connection`,
+      );
     });
 
     return server;
