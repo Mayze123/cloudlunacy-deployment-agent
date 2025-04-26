@@ -78,13 +78,11 @@ class MongoConnection {
         : "";
 
     // For Atlas-like experience, use the server hostname directly
-    // This works because the server has TLS enabled but clients don't need certs
-    const host =
-      process.env.MONGO_DIRECT_HOST || `${this.serverId}.${this.mongoDomain}`;
-
-    // Atlas-style TLS parameters - secure connection without client certificates
-    const tlsParams =
-      "?tls=true&tlsAllowInvalidCertificates=true&retryWrites=true&w=majority";
+    const host = process.env.MONGO_DIRECT_HOST || `${this.serverId}.${this.mongoDomain}`;
+    
+    // Configuration to bypass the KEY_USAGE_BIT_INCORRECT error
+    // This addresses the boringssl error in MongoDB Compass
+    const tlsParams = "?tls=true&tlsInsecure=true&tlsAllowInvalidCertificates=true&tlsAllowInvalidHostnames=true";
 
     const uri = `mongodb://${credentials}${host}:${this.port}/${this.database}${tlsParams}`;
     logger.debug(`Generated MongoDB URI: ${uri.replace(/:[^:]*@/, ":***@")}`);
@@ -95,18 +93,17 @@ class MongoConnection {
   /**
    * Get TLS options for MongoDB connection
    *
-   * This follows the MongoDB Atlas approach - the server uses TLS certificates,
-   * but clients connect with TLS without needing their own certificates.
+   * This configuration bypasses the KEY_USAGE_BIT_INCORRECT error
+   * that occurs with MongoDB Compass
    *
    * @returns {Object} TLS options
    */
   getTlsOptions() {
-    // Atlas-style TLS options
     return {
-      tls: true, // Enable TLS
-      tlsAllowInvalidCertificates: true, // Don't validate server certificates (like Atlas)
-      retryWrites: true, // Enable retryable writes
-      w: "majority", // Write concern
+      tls: true,                           // Enable TLS
+      tlsInsecure: true,                   // Skip TLS validation entirely
+      tlsAllowInvalidCertificates: true,   // Don't validate server certificates
+      tlsAllowInvalidHostnames: true       // Don't validate hostnames in the certificate
     };
   }
 
