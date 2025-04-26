@@ -119,12 +119,56 @@ class MongoDBService {
   async isMongoDBRunning() {
     try {
       const { execSync } = require("child_process");
-      // Try to detect if MongoDB is running using ps
-      const output = execSync("ps aux | grep -v grep | grep mongod").toString();
-      return output.includes("mongod");
+
+      // First check for MongoDB Docker container
+      try {
+        logger.info("Checking for MongoDB Docker container...");
+        const dockerOutput = execSync("docker ps | grep mongo").toString();
+
+        if (dockerOutput.includes("mongo")) {
+          logger.info("MongoDB Docker container is running");
+          return true;
+        }
+      } catch (dockerErr) {
+        logger.info("No MongoDB Docker container detected");
+      }
+
+      // Then check for local MongoDB process
+      try {
+        logger.info("Checking for local MongoDB process...");
+        const output = execSync(
+          "ps aux | grep -v grep | grep mongod",
+        ).toString();
+
+        if (output.includes("mongod")) {
+          logger.info("Local MongoDB process is running");
+          return true;
+        }
+      } catch (psErr) {
+        logger.info("No local MongoDB process detected");
+      }
+
+      // Check if port 27017 is in use as a final check
+      try {
+        logger.info("Checking if port 27017 is in use...");
+        const lsofOutput = execSync("lsof -i :27017 | grep LISTEN").toString();
+
+        if (lsofOutput.length > 0) {
+          logger.info("Port 27017 is in use, assuming MongoDB is running");
+          return true;
+        }
+      } catch (lsofErr) {
+        logger.info("Port 27017 is not in use");
+      }
+
+      logger.info("MongoDB is not running");
+      return false;
     } catch (error) {
-      // If command fails, MongoDB is likely not running
-      logger.info("MongoDB process not detected on the system");
+      // If all commands fail, MongoDB is likely not running
+      logger.info(
+        "Error checking MongoDB status, assuming it's not running: " +
+          error.message,
+      );
       return false;
     }
   }
@@ -462,7 +506,7 @@ services:
     try {
       logger.info("Starting MongoDB container");
 
-      const { exec } = require("child_process");
+      const { exec, execSync } = require("child_process");
 
       // Function to execute commands and log output
       const execCommand = (command) => {
@@ -481,11 +525,76 @@ services:
         });
       };
 
-      // Start MongoDB using docker-compose
-      await execCommand("cd /opt/cloudlunacy/mongodb && docker-compose up -d");
+      // First check if a MongoDB container already exists but is stopped
+      try {
+        logger.info("Checking for existing MongoDB containers...");
+        const existingContainers = execSync(
+          "docker ps -a -f name=mongodb -f name=mongo --format '{{.Names}}'",
+        )
+          .toString()
+          .trim();
 
-      logger.info("Started MongoDB container");
-      return { success: true };
+        if (existingContainers) {
+          logger.info(
+            `Found existing MongoDB containers: ${existingContainers}`,
+          );
+          const containerArray = existingContainers.split("\n");
+
+          for (const container of containerArray) {
+            // Check if container is stopped
+            const containerStatus = execSync(
+              `docker container inspect --format='{{.State.Status}}' ${container}`,
+            )
+              .toString()
+              .trim();
+
+            if (containerStatus === "exited") {
+              logger.info(
+                `Found stopped MongoDB container: ${container}, starting it...`,
+              );
+              await execCommand(`docker start ${container}`);
+              logger.info(
+                `Successfully started existing MongoDB container: ${container}`,
+              );
+              return { success: true };
+            }
+          }
+        }
+      } catch (checkError) {
+        logger.warn(
+          `Error checking for existing MongoDB containers: ${checkError.message}`,
+        );
+      }
+
+      // If no existing container found or couldn't be started, try docker-compose
+      // Check if docker-compose file exists
+      const fs = require("fs");
+      if (fs.existsSync("/opt/cloudlunacy/mongodb/docker-compose.yml")) {
+        logger.info("Starting MongoDB using docker-compose file");
+        await execCommand(
+          "cd /opt/cloudlunacy/mongodb && docker-compose up -d",
+        );
+        logger.info("Started MongoDB container using docker-compose");
+        return { success: true };
+      }
+
+      // If no docker-compose file exists in the expected location, check alternate location
+      if (fs.existsSync("/opt/cloudlunacy/docker-compose.mongodb.yml")) {
+        logger.info("Starting MongoDB using alternate docker-compose file");
+        await execCommand(
+          "cd /opt/cloudlunacy && docker-compose -f docker-compose.mongodb.yml up -d",
+        );
+        logger.info(
+          "Started MongoDB container using alternate docker-compose file",
+        );
+        return { success: true };
+      }
+
+      // If we get here, we couldn't find or start a container
+      logger.warn(
+        "No MongoDB docker-compose file found, MongoDB might need to be deployed first",
+      );
+      return { success: false, message: "No MongoDB configuration found" };
     } catch (error) {
       logger.error(`Failed to start MongoDB container: ${error.message}`);
       return { success: false, message: error.message };

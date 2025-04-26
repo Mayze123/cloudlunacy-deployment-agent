@@ -114,12 +114,23 @@ install_dependencies() {
 
 stop_conflicting_containers() {
   log "Checking for Docker containers using port 27017..."
-  CONTAINER_ID=$(docker ps -q --filter "publish=27017")
-  if [ -n "$CONTAINER_ID" ]; then
-    log "Stopping container using port 27017 (ID: $CONTAINER_ID)..."
-    docker stop "$CONTAINER_ID"
-    docker rm "$CONTAINER_ID"
-    log "Container stopped and removed."
+  MONGO_CONTAINER_ID=$(docker ps -q --filter "publish=27017")
+  MONGO_CONTAINER_NAME=""
+
+  if [ -n "$MONGO_CONTAINER_ID" ]; then
+    # Store the container name before stopping it
+    MONGO_CONTAINER_NAME=$(docker inspect --format '{{.Name}}' "$MONGO_CONTAINER_ID" | sed 's/^\///')
+    log "Found MongoDB container using port 27017 (ID: $MONGO_CONTAINER_ID, Name: $MONGO_CONTAINER_NAME)"
+
+    # Save container details for restore
+    if [ -n "$MONGO_CONTAINER_NAME" ]; then
+      echo "$MONGO_CONTAINER_NAME" > /tmp/mongodb_container_name
+    fi
+
+    log "Temporarily stopping container $MONGO_CONTAINER_NAME..."
+    docker stop "$MONGO_CONTAINER_ID"
+    # Don't remove the container, just stop it
+    log "Container stopped, will restore after installation."
   else
     log "No Docker containers are using port 27017."
   fi
@@ -465,6 +476,10 @@ main() {
 
   # Setup service and verify installation
   setup_service
+
+  # Restore MongoDB container if it was running before
+  restore_mongodb_container
+
   verify_installation
 
   log "Installation completed successfully with HAProxy support!"
@@ -819,6 +834,39 @@ EOL
   chown "$USERNAME:$USERNAME" "$ENV_FILE"
   chmod 600 "$ENV_FILE"
   log "Environment configuration completed."
+}
+
+# Add new function to restore MongoDB container
+restore_mongodb_container() {
+  if [ -f "/tmp/mongodb_container_name" ]; then
+    MONGO_CONTAINER_NAME=$(cat /tmp/mongodb_container_name)
+    log "Restoring previously running MongoDB container: $MONGO_CONTAINER_NAME"
+
+    if docker container inspect "$MONGO_CONTAINER_NAME" &> /dev/null; then
+      log "Starting MongoDB container $MONGO_CONTAINER_NAME..."
+      docker start "$MONGO_CONTAINER_NAME"
+      log "MongoDB container restored successfully."
+    else
+      log_warn "Cannot restore MongoDB container $MONGO_CONTAINER_NAME - not found."
+      # Try to start using docker-compose if container not found but files exist
+      if [ -f "/opt/cloudlunacy/mongodb/docker-compose.yml" ]; then
+        log "Found MongoDB docker-compose file, attempting to start container..."
+        (cd /opt/cloudlunacy/mongodb && docker-compose up -d)
+        log "MongoDB container started from docker-compose configuration."
+      fi
+    fi
+
+    # Remove temporary file
+    rm -f /tmp/mongodb_container_name
+  else
+    # Check if MongoDB should be running and start it if needed
+    if [ -f "/opt/cloudlunacy/mongodb/docker-compose.yml" ]; then
+      log "No previous MongoDB container saved, but docker-compose file exists."
+      log "Starting MongoDB using docker-compose configuration..."
+      (cd /opt/cloudlunacy/mongodb && docker-compose up -d)
+      log "MongoDB container started from docker-compose configuration."
+    fi
+  fi
 }
 
 main "$@"
