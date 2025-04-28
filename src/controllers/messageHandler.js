@@ -45,6 +45,10 @@ class MessageHandler {
           databaseController.handleDatabaseManagement(message.payload, ws);
           break;
 
+        case "mongodb_status_check":
+          databaseController.checkMongoDBStatus(message.payload, ws);
+          break;
+
         case "check_repository":
           repositoryController.checkRepositoryAccess(message.payload, ws);
           break;

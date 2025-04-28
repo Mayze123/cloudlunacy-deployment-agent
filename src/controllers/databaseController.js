@@ -398,6 +398,50 @@ class DatabaseController {
       };
     }
   }
+
+  /**
+   * Check MongoDB installation and container status
+   * @param {Object} payload - Status check payload
+   * @param {WebSocket} ws - WebSocket connection to respond on
+   */
+  async checkMongoDBStatus(payload, ws) {
+    try {
+      logger.info("Checking MongoDB installation and container status");
+
+      // Get MongoDB installation status
+      const installationStatus = await databaseManager.handleDatabaseOperation(
+        "status",
+        "mongodb",
+        {},
+      );
+
+      // Get MongoDB container details if installed
+      let containerDetails = { success: false, running: false };
+      if (installationStatus.success && installationStatus.installed) {
+        containerDetails = await databaseManager.checkMongoDBContainer();
+      }
+
+      // Send status update response
+      this.sendResponse(ws, {
+        type: "mongodb_status_update",
+        success: true,
+        requestId: payload.requestId,
+        result: {
+          installation: installationStatus,
+          container: containerDetails,
+          timestamp: new Date().toISOString(),
+        },
+      });
+    } catch (error) {
+      logger.error(`MongoDB status check failed: ${error.message}`);
+      this.sendResponse(ws, {
+        type: "mongodb_status_update",
+        success: false,
+        requestId: payload.requestId,
+        error: error.message,
+      });
+    }
+  }
 }
 
 module.exports = new DatabaseController();
