@@ -94,6 +94,16 @@ class AuthenticationService {
         // Extract connection details from response based on updated backend API
         const { wsUrl, rabbitmq } = response.data;
 
+        // Log the full authentication response for debugging (redact any sensitive info)
+        const responseCopy = { ...response.data };
+        if (responseCopy.rabbitmq && responseCopy.rabbitmq.url) {
+          responseCopy.rabbitmq.url = responseCopy.rabbitmq.url.replace(
+            /:([^:@]+)@/,
+            ":***@",
+          );
+        }
+        logger.info(`Authentication response: ${JSON.stringify(responseCopy)}`);
+
         // Try RabbitMQ connection first if rabbitmq details were provided
         if (rabbitmq && rabbitmq.url) {
           logger.info("RabbitMQ connection details received from backend");
@@ -102,23 +112,57 @@ class AuthenticationService {
             // Store RabbitMQ URL in environment variable for immediate use
             process.env.RABBITMQ_URL = rabbitmq.url;
 
+            // Store the RabbitMQ credentials securely for future use
+            await this.storeRabbitMQConfig(rabbitmq.url);
+
             // Initialize the queue service
+            logger.info("Initializing queue service with RabbitMQ URL");
             const queueInitialized = await queueService.initialize();
 
             if (queueInitialized) {
               logger.info("Successfully connected to RabbitMQ");
-              this.isConnected = true;
 
-              // Start sending heartbeats
-              queueService.startHeartbeats();
-              return;
+              // Start consuming messages from the command queue
+              logger.info("Setting up command queue consumer");
+              this.commandConsumer = await queueService.consumeCommands(
+                async (job) => {
+                  try {
+                    // Pass the job to the command handler for processing
+                    await require("../core/commandHandler").processJob(job);
+                  } catch (error) {
+                    logger.error(
+                      `Error processing job from queue: ${error.message}`,
+                    );
+                  }
+                },
+              );
+
+              if (this.commandConsumer) {
+                logger.info(
+                  "Command queue consumer set up successfully with consumer tag: " +
+                    (this.commandConsumer.consumerTag ||
+                      JSON.stringify(this.commandConsumer)),
+                );
+
+                // Start sending heartbeats
+                queueService.startHeartbeats();
+
+                this.isConnected = true;
+                return;
+              } else {
+                logger.error(
+                  "Failed to set up command consumer - no consumer tag returned",
+                );
+              }
             } else {
               logger.warn(
                 "Failed to initialize queue service, will try WebSocket fallback",
               );
             }
           } catch (queueError) {
-            logger.warn(`Failed to connect to RabbitMQ: ${queueError.message}`);
+            logger.error(
+              `Failed to connect to RabbitMQ: ${queueError.message}`,
+            );
             logger.info("Falling back to WebSocket communication");
           }
         } else {
