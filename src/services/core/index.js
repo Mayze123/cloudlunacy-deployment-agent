@@ -12,6 +12,8 @@ const deploymentService = require("../deploymentService");
 const websocketService = require("../websocketService");
 const metricsService = require("../metricsService");
 const mongodbService = require("../mongodbService");
+const queueService = require("../queueService");
+const commandHandler = require("../../core/commandHandler");
 
 /**
  * Initialize all core services
@@ -27,24 +29,49 @@ async function initializeServices() {
       throw new Error("Failed to initialize configuration service");
     }
 
-    // Step 2: Initialize authentication service and login
-    const authInitialized = await authService.initialize();
-    if (!authInitialized) {
-      throw new Error("Failed to initialize authentication service");
-    }
-
-    // Step 3: Initialize certificate service
+    // Step 2: Initialize certificate service
     const certInitialized = await certificateService.initialize();
     if (!certInitialized) {
-      throw new Error("Failed to initialize certificate service");
+      logger.warn(
+        "Certificate service initialization failed, continuing without certificates",
+      );
     }
 
-    // Step 4: Initialize MongoDB service (if enabled)
-    if (configService.get("database.mongodb.enabled")) {
-      // MongoDB should attempt to connect and restart if needed
-      // Only skip connection if explicitly requested
-      const skipConnectionAttempts = process.env.MONGO_SKIP_CONNECTION === "true";
-      
+    // Step 3: Initialize command handler
+    const commandHandlerInitialized = await commandHandler.initialize();
+    if (!commandHandlerInitialized) {
+      logger.warn(
+        "Command handler initialization failed, continuing with limited functionality",
+      );
+    }
+
+    // Step 4: Initialize queue service
+    const queueInitialized = await queueService.initialize();
+    if (!queueInitialized) {
+      logger.warn(
+        "Queue service initialization failed, will attempt to use WebSocket fallback",
+      );
+    } else {
+      // Start sending heartbeats
+      queueService.startHeartbeats();
+
+      // Setup command processor
+      await setupCommandProcessor();
+    }
+
+    // Step 5: Initialize authentication service and WebSocket as fallback
+    const authInitialized = await authService.initialize();
+    if (!authInitialized) {
+      logger.warn(
+        "Authentication service initialization failed, continuing in limited mode",
+      );
+    }
+
+    // Step 6: Initialize MongoDB service if it's enabled
+    if (configService.isMongoDBEnabled()) {
+      // Skip connection attempts at startup if specified in config
+      const skipConnectionAttempts = process.env.MONGO_SKIP_CONNECT === "true";
+
       // Always try to restart MongoDB if it's installed but not running
       const forceStartIfInstalled = true;
 
@@ -54,8 +81,9 @@ async function initializeServices() {
 
       const mongoInitialized = await mongodbService.initialize({
         skipConnectionAttempts: skipConnectionAttempts,
-        registerWithFrontServer: process.env.MONGO_REGISTER_WITH_FRONT === "true",
-        forceStartIfInstalled: forceStartIfInstalled
+        registerWithFrontServer:
+          process.env.MONGO_REGISTER_WITH_FRONT === "true",
+        forceStartIfInstalled: forceStartIfInstalled,
       });
 
       if (!mongoInitialized) {
@@ -65,19 +93,21 @@ async function initializeServices() {
       }
     }
 
-    // Step 5: Initialize deployment service
+    // Step 7: Initialize deployment service
     const deploymentInitialized = await deploymentService.initialize();
     if (!deploymentInitialized) {
       throw new Error("Failed to initialize deployment service");
     }
 
-    // Step 6: Initialize WebSocket service
+    // Step 8: Initialize WebSocket service for fallback
     const websocketInitialized = await websocketService.initialize();
-    if (!websocketInitialized) {
-      throw new Error("Failed to initialize WebSocket service");
+    if (!websocketInitialized && !queueInitialized) {
+      throw new Error(
+        "Failed to initialize both Queue and WebSocket services, cannot continue",
+      );
     }
 
-    // Step 7: Initialize metrics service
+    // Step 9: Initialize metrics service
     const metricsInitialized = await metricsService.initialize();
     if (!metricsInitialized) {
       logger.warn(
@@ -85,12 +115,91 @@ async function initializeServices() {
       );
     }
 
-    logger.info("All core services initialized successfully");
+    logger.info("Core services initialized successfully");
     return true;
   } catch (error) {
-    logger.error(`Core services initialization failed: ${error.message}`);
+    logger.error(`Failed to initialize core services: ${error.message}`);
     return false;
   }
+}
+
+/**
+ * Set up command processor to handle incoming RabbitMQ jobs
+ */
+async function setupCommandProcessor() {
+  try {
+    await queueService.consumeCommands(async (job) => {
+      // Use the command handler to process the job
+      return await commandHandler.processJob(job);
+    });
+
+    logger.info("Command processor successfully configured");
+  } catch (error) {
+    logger.error(`Failed to set up command processor: ${error.message}`);
+    throw error;
+  }
+}
+
+/**
+ * Create a WebSocket-like adapter that sends messages to RabbitMQ
+ * This allows us to reuse existing code that expects a WebSocket
+ * @param {string} jobId The job ID
+ * @returns {Object} A WebSocket-like object
+ */
+function createQueueWebSocketAdapter(jobId) {
+  return {
+    readyState: 1, // Simulate OPEN state
+    send: function (data) {
+      try {
+        const message = JSON.parse(data);
+
+        // Handle different message types
+        switch (message.type) {
+          case "status":
+          case "deployment_status":
+          case "database_installed":
+          case "database_installation_failed":
+          case "database_operation_completed":
+            // Convert to a result message for the job
+            queueService.publishResult({
+              jobId: jobId,
+              status:
+                message.status === "success" ||
+                message.status === "completed" ||
+                message.success === true
+                  ? "SUCCESS"
+                  : message.status === "failed" || message.success === false
+                    ? "FAILED"
+                    : "PROCESSING",
+              result: message,
+              error: message.error || null,
+            });
+            break;
+
+          case "error":
+            // Handle error messages
+            queueService.publishResult({
+              jobId: jobId,
+              status: "FAILED",
+              error: message.error || "Unknown error",
+            });
+            break;
+
+          default:
+            // For any other message type, just log it
+            queueService.publishLog({
+              jobId: jobId,
+              content: `Agent message: ${JSON.stringify(message)}`,
+              timestamp: new Date().toISOString(),
+            });
+        }
+      } catch (error) {
+        logger.error(
+          `Error processing WebSocket message in adapter: ${error.message}`,
+        );
+      }
+    },
+  };
 }
 
 /**
@@ -99,22 +208,38 @@ async function initializeServices() {
  */
 async function shutdownServices() {
   try {
-    logger.info("Shutting down core services...");
+    logger.info("Gracefully shutting down core services...");
 
-    // Shutdown in reverse order of initialization
+    // Shutdown metrics service first (non-critical)
     await metricsService.shutdown();
+
+    // Shutdown queue service
+    await queueService.shutdown();
+
+    // Shutdown WebSocket service
     await websocketService.shutdown();
+
+    // Shutdown deployment service
     await deploymentService.shutdown();
 
-    if (configService.get("database.mongodb.enabled")) {
-      // MongoDB shutdown handled by the process exit handler
-      logger.info("MongoDB will be shut down by the process exit handler");
+    // Shutdown MongoDB service if it's enabled
+    if (configService.isMongoDBEnabled()) {
+      await mongodbService.shutdown();
     }
+
+    // Shutdown certificate service
+    await certificateService.shutdown();
+
+    // Shutdown authentication service
+    await authService.shutdown();
+
+    // Shutdown configuration service last
+    await configService.shutdown();
 
     logger.info("All core services shut down successfully");
     return true;
   } catch (error) {
-    logger.error(`Error shutting down core services: ${error.message}`);
+    logger.error(`Error during service shutdown: ${error.message}`);
     return false;
   }
 }
@@ -131,5 +256,7 @@ module.exports = {
     websocket: websocketService,
     metrics: metricsService,
     mongodb: mongodbService,
+    queue: queueService,
+    commandHandler: commandHandler,
   },
 };

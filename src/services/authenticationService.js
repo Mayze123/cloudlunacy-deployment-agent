@@ -10,10 +10,13 @@ const fs = require("fs").promises;
 const logger = require("../../utils/logger");
 const config = require("../config");
 const websocketService = require("./websocketService");
+const queueService = require("./queueService");
 
 class AuthenticationService {
   constructor() {
     this.initialized = false;
+    this.isConnected = false;
+    this.usingWebsocketFallback = false;
   }
 
   /**
@@ -22,34 +25,10 @@ class AuthenticationService {
    */
   async initialize() {
     try {
-      if (this.initialized) {
-        return true;
-      }
-
       logger.info("Initializing authentication service...");
 
-      // Check if we have a stored JWT token
-      try {
-        const jwtPath = config.paths.jwtFile;
-        const jwtData = await fs.readFile(jwtPath, "utf8");
-        const parsedData = JSON.parse(jwtData);
-
-        if (parsedData && parsedData.token) {
-          config.api.jwt = parsedData.token;
-          process.env.AGENT_JWT = parsedData.token;
-          logger.info(
-            "Loaded JWT token from file (previously stored by install script)",
-          );
-        } else {
-          logger.warn("JWT token file exists but contains no valid token");
-        }
-      } catch (readError) {
-        logger.warn(`No JWT token file found: ${readError.message}`);
-        logger.info(
-          "JWT token should have been created by the installation script",
-        );
-        // This is not a critical error since we might be using a different auth mechanism
-      }
+      // Initialize based on available connections
+      await this.authenticateAndConnect();
 
       this.initialized = true;
       logger.info("Authentication service initialized successfully");
@@ -63,7 +42,8 @@ class AuthenticationService {
   }
 
   /**
-   * Authenticate with the backend and establish a WebSocket connection.
+   * Authenticate with the backend and establish connections.
+   * First, try RabbitMQ, then fallback to WebSocket if needed.
    */
   async authenticateAndConnect() {
     try {
@@ -74,12 +54,14 @@ class AuthenticationService {
         const wsUrl = "ws://host.docker.internal:8080/agent";
         logger.info(`Using development WebSocket URL: ${wsUrl}`);
         websocketService.establishConnection(wsUrl);
+        this.usingWebsocketFallback = true;
+        this.isConnected = true;
         return;
       }
 
       if (!config.api.backendUrl) {
         logger.error(
-          "Backend URL not configured, cannot connect to WebSocket server",
+          "Backend URL not configured, cannot connect to backend services",
         );
         return;
       }
@@ -109,18 +91,58 @@ class AuthenticationService {
           await this.storeJwtToken(response.data.jwt);
         }
 
-        const { wsUrl } = response.data;
-        if (!wsUrl) {
-          throw new Error("WebSocket URL not provided by backend.");
+        // Extract connection details from response based on updated backend API
+        const { wsUrl, rabbitmq } = response.data;
+
+        // Try RabbitMQ connection first if rabbitmq details were provided
+        if (rabbitmq && rabbitmq.url) {
+          logger.info("RabbitMQ connection details received from backend");
+
+          try {
+            // Store RabbitMQ URL in environment variable for immediate use
+            process.env.RABBITMQ_URL = rabbitmq.url;
+
+            // Initialize the queue service
+            const queueInitialized = await queueService.initialize();
+
+            if (queueInitialized) {
+              logger.info("Successfully connected to RabbitMQ");
+              this.isConnected = true;
+
+              // Start sending heartbeats
+              queueService.startHeartbeats();
+              return;
+            } else {
+              logger.warn(
+                "Failed to initialize queue service, will try WebSocket fallback",
+              );
+            }
+          } catch (queueError) {
+            logger.warn(`Failed to connect to RabbitMQ: ${queueError.message}`);
+            logger.info("Falling back to WebSocket communication");
+          }
+        } else {
+          logger.warn(
+            "No RabbitMQ connection details provided by server, using WebSocket fallback",
+          );
         }
 
-        logger.info(`WebSocket URL received from backend: ${wsUrl}`);
-        websocketService.establishConnection(wsUrl);
+        // Fallback to WebSocket if RabbitMQ connection failed or URL not provided
+        if (wsUrl) {
+          logger.info(`WebSocket URL received from backend: ${wsUrl}`);
+          websocketService.establishConnection(wsUrl);
+          this.usingWebsocketFallback = true;
+          this.isConnected = true;
+        } else {
+          throw new Error(
+            "Neither RabbitMQ nor WebSocket URL provided by backend.",
+          );
+        }
       } catch (error) {
         logger.warn(`Could not connect to backend service: ${error.message}`);
         logger.warn("Agent will run in standalone mode with Traefik only");
 
-        // Continue without WebSocket connection in Traefik-only mode
+        // Continue without connection in Traefik-only mode
         // This allows the agent to work with Traefik for proxying even without backend connection
       }
     } catch (error) {
@@ -129,43 +151,215 @@ class AuthenticationService {
   }
 
   /**
-   * Store JWT token to file for persistence.
-   * @param {string} token - JWT token to store
+   * Securely store the RabbitMQ connection details
+   * @param {string} rabbitmqUrl - The RabbitMQ connection URL
+   * @returns {Promise<void>}
    */
-  async storeJwtToken(token) {
+  async storeRabbitMQConfig(rabbitmqUrl) {
     try {
-      // Update environment variable
-      process.env.AGENT_JWT = token;
-      config.api.jwt = token;
+      // Set environment variable for immediate use only - not persistent across restarts
+      process.env.RABBITMQ_URL = rabbitmqUrl;
 
-      // Store in file system for persistence
-      await fs.writeFile(
-        config.paths.jwtFile,
-        JSON.stringify({ token }),
-        "utf8",
-      );
+      // For environments that support secure credential storage
+      if (process.env.USE_SECURE_CREDENTIAL_STORAGE === "true") {
+        try {
+          // In production environments, you might integrate with a secrets manager
+          // like HashiCorp Vault, AWS Secrets Manager, or similar service
+          // This is just a placeholder for that implementation
+          await this.storeInSecretManager("rabbitmq_url", rabbitmqUrl);
+          logger.info("RabbitMQ credentials stored in secure secrets manager");
+        } catch (secretError) {
+          logger.warn(
+            `Failed to store in secrets manager: ${secretError.message}`,
+          );
+          // Fall back to file-based storage with encryption
+          await this.storeEncryptedCredentials(rabbitmqUrl);
+        }
+      } else {
+        // Fall back to file-based storage with encryption
+        await this.storeEncryptedCredentials(rabbitmqUrl);
+      }
 
-      logger.info("JWT token stored successfully");
+      // Log success with redacted URL (hide password)
+      const redactedUrl = rabbitmqUrl.replace(/:([^:@]+)@/, ":***@");
+      logger.info(`Using RabbitMQ server: ${redactedUrl}`);
     } catch (error) {
-      logger.error(`Failed to store JWT token: ${error.message}`);
+      logger.warn(`Failed to store RabbitMQ configuration: ${error.message}`);
+      // Still keep the environment variable for this session only
     }
   }
 
   /**
-   * Handle authentication errors.
-   * @param {Error} error Authentication error.
+   * Store credentials in an encrypted file
+   * @param {string} rabbitmqUrl - The RabbitMQ connection URL
+   * @returns {Promise<void>}
+   */
+  async storeEncryptedCredentials(rabbitmqUrl) {
+    try {
+      // For security, we save to a protected credentials file
+      const credentialsPath =
+        process.env.RABBITMQ_CREDENTIALS_PATH ||
+        "/opt/cloudlunacy/rabbitmq-credentials";
+
+      // Make sure credentials directory exists
+      const credentialsDir = credentialsPath.substring(
+        0,
+        credentialsPath.lastIndexOf("/"),
+      );
+      await fs.mkdir(credentialsDir, { recursive: true });
+
+      // Get or generate an encryption key based on a combination of:
+      // 1. Server-specific information (hardware ID, machine ID)
+      // 2. The JWT token (which is unique to this agent instance)
+      const encryptionKey = await this.getEncryptionKey();
+
+      // Encrypt the connection URL before storing it
+      const encryptedCredentials = this.encryptData(rabbitmqUrl, encryptionKey);
+
+      // Save encrypted connection URL with restricted permissions
+      await fs.writeFile(credentialsPath, encryptedCredentials, {
+        encoding: "utf8",
+        mode: 0o600, // Owner read/write only
+      });
+
+      logger.info(
+        `RabbitMQ connection details stored securely (encrypted) at ${credentialsPath}`,
+      );
+    } catch (error) {
+      logger.warn(
+        `Failed to store encrypted RabbitMQ credentials: ${error.message}`,
+      );
+    }
+  }
+
+  /**
+   * Get or generate an encryption key for securing credentials
+   * @returns {Promise<string>} Encryption key
+   */
+  async getEncryptionKey() {
+    // Use a combination of machine-specific information and our JWT for the key
+    // This means even if someone gets the file, they'd need both the agent's
+    // machine access and the JWT to decrypt it
+    try {
+      // In a real implementation, you'd use crypto.scrypt or a similar
+      // key derivation function with hardware-specific identifiers
+
+      // For simplicity in this example, we'll use the JWT as the basis
+      // but in production you should use proper cryptographic methods
+      const jwtToken = config.api.jwt || process.env.AGENT_JWT;
+      if (!jwtToken) {
+        throw new Error("No JWT available for encryption key generation");
+      }
+
+      // In real implementation, combine with hardware identifiers
+      // like MAC address, disk ID, etc.
+      return jwtToken;
+    } catch (error) {
+      logger.error(`Failed to generate encryption key: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Encrypt data with a key
+   * @param {string} data - Data to encrypt
+   * @param {string} key - Encryption key
+   * @returns {string} Encrypted data
+   */
+  encryptData(data, key) {
+    try {
+      // In a real implementation, you would:
+      // 1. Use crypto.createCipheriv with a proper IV
+      // 2. Use AES-256-GCM or similar authenticated encryption
+      // 3. Store the IV with the ciphertext
+
+      // This is a placeholder for actual encryption
+      // DO NOT use this in production - implement proper encryption
+      const crypto = require("crypto");
+      const cipher = crypto.createCipher("aes-256-cbc", key);
+      let encrypted = cipher.update(data, "utf8", "hex");
+      encrypted += cipher.final("hex");
+      return encrypted;
+    } catch (error) {
+      logger.error(`Encryption failed: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Decrypt data with a key
+   * @param {string} encryptedData - Encrypted data
+   * @param {string} key - Encryption key
+   * @returns {string} Decrypted data
+   */
+  decryptData(encryptedData, key) {
+    try {
+      // This is a placeholder for actual decryption
+      // DO NOT use this in production - implement proper decryption
+      const crypto = require("crypto");
+      const decipher = crypto.createDecipher("aes-256-cbc", key);
+      let decrypted = decipher.update(encryptedData, "hex", "utf8");
+      decrypted += decipher.final("utf8");
+      return decrypted;
+    } catch (error) {
+      logger.error(`Decryption failed: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Placeholder for integration with a secrets manager
+   * @param {string} key - Secret key
+   * @param {string} value - Secret value
+   * @returns {Promise<void>}
+   */
+  async storeInSecretManager(key, value) {
+    // This would be replaced with actual integration code for your chosen
+    // secrets manager service (HashiCorp Vault, AWS Secrets Manager, etc.)
+    throw new Error("Secrets manager integration not implemented");
+  }
+
+  /**
+   * Handle authentication errors
+   * @param {Error} error Error that occurred
    */
   handleAuthenticationError(error) {
+    logger.error(`Authentication error: ${error.message}`);
+
+    // If we're in standalone mode, we can continue without authentication
+    if (config.standalone) {
+      logger.warn("Agent will run in standalone mode with Traefik only");
+      return;
+    }
+
+    // Otherwise log detailed error information for debugging
     if (error.response) {
-      logger.error(
-        `Authentication failed with status ${
-          error.response.status
-        }: ${JSON.stringify(error.response.data)}`,
-      );
-    } else if (error.request) {
-      logger.error("No response received from backend:", error.request);
-    } else {
-      logger.error("Error in authentication request:", error.message);
+      logger.error(`Response status: ${error.response.status}`);
+      logger.error(`Response data: ${JSON.stringify(error.response.data)}`);
+    }
+
+    logger.error(
+      "Fatal authentication error, agent requires backend connection",
+    );
+  }
+
+  /**
+   * Store JWT token for future use
+   * @param {string} jwt JWT token
+   * @returns {Promise<void>}
+   */
+  async storeJwtToken(jwt) {
+    try {
+      // Save the JWT to environment variable for immediate use
+      process.env.AGENT_JWT = jwt;
+      config.api.jwt = jwt;
+
+      // Save to the config file for persistence
+      const tokenPath = process.env.TOKEN_PATH || "/opt/cloudlunacy/token.jwt";
+      await fs.writeFile(tokenPath, jwt, "utf8");
+      logger.info(`JWT token stored to ${tokenPath}`);
+    } catch (error) {
+      logger.warn(`Failed to store JWT: ${error.message}`);
     }
   }
 
@@ -196,7 +390,7 @@ class AuthenticationService {
 
       // Create WebSocket connection
       try {
-        this.websocketService.connect(
+        websocketService.connect(
           config.api.websocketUrl,
           config.api.jwt,
           config.serverId,
@@ -220,6 +414,43 @@ class AuthenticationService {
       }
     } catch (error) {
       logger.error(`Error connecting to WebSocket server: ${error.message}`);
+      return false;
+    }
+  }
+
+  /**
+   * Check if we're using the WebSocket fallback
+   * @returns {boolean} True if using WebSocket fallback
+   */
+  isUsingWebSocketFallback() {
+    return this.usingWebsocketFallback;
+  }
+
+  /**
+   * Check if we're connected to either RabbitMQ or WebSocket
+   * @returns {boolean} True if connected
+   */
+  checkConnection() {
+    return this.isConnected;
+  }
+
+  /**
+   * Shutdown the authentication service
+   * @returns {Promise<boolean>} Success status
+   */
+  async shutdown() {
+    try {
+      logger.info("Shutting down authentication service...");
+
+      this.initialized = false;
+      this.isConnected = false;
+
+      logger.info("Authentication service shut down successfully");
+      return true;
+    } catch (error) {
+      logger.error(
+        `Error shutting down authentication service: ${error.message}`,
+      );
       return false;
     }
   }
