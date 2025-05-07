@@ -149,8 +149,15 @@ class WebSocketService {
       this.retryCount = 0;
       this.retryDelay = config.websocket.initialRetryDelay;
 
+      // Log detailed connection information
+      logger.info(`Connected to backend at ${this.ws.url}`);
+      logger.info(`Connection ready state: ${this.ws.readyState}`);
+
       // Send registration message
       this.sendMessage("register", { serverId: config.serverId });
+      logger.info(
+        `Registration message sent for server ID: ${config.serverId}`,
+      );
 
       // Setup ping/pong for connection health monitoring
       this.pingInterval = setInterval(() => {
