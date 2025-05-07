@@ -1,517 +1,573 @@
 /**
  * Queue Service
  *
- * Handles communication with RabbitMQ message broker.
- * Provides methods for consuming commands, publishing results,
- * publishing logs, and sending heartbeats.
+ * Handles RabbitMQ connections and message processing.
+ * Provides methods for publishing and consuming messages.
  */
 
 const amqp = require("amqplib");
-const logger = require("../../utils/logger");
-const config = require("../config");
-const os = require("os");
 const fs = require("fs").promises;
 const crypto = require("crypto");
+const logger = require("../../utils/logger");
+const config = require("../config");
+
+// Configuration constants
+const RECONNECT_DELAY = 5000; // 5 seconds
+const MAX_RECONNECT_ATTEMPTS = 10;
+const CRYPTO_ALGORITHM = "aes-256-cbc";
+const RABBITMQ_CREDENTIALS_PATH =
+  process.env.RABBITMQ_CREDENTIALS_PATH ||
+  "/opt/cloudlunacy/rabbitmq-credentials";
 
 class QueueService {
   constructor() {
-    // Configure connection options
-    this.rabbitmqUrl = process.env.RABBITMQ_URL || "";
     this.connection = null;
     this.channel = null;
-    this.serverId = config.serverId;
-
-    // Updated queue names to match new backend specification
-    this.queues = {
-      COMMANDS: `commands.${this.serverId}`, // Server-specific command queue
-      RESULTS: "results",
-      LOGS: "logs", // Exchange name
-      HEARTBEATS: "heartbeats",
-    };
-
+    this.reconnectAttempts = 0;
+    this.connected = false;
+    this.connectionPromise = null;
     this.initialized = false;
     this.heartbeatInterval = null;
-    this.reconnectTimeout = null;
-    this.reconnectDelay = 5000; // Start with 5 seconds
-    this.maxReconnectDelay = 60000; // Maximum 1 minute
+
+    // Queue and exchange names
+    this.exchanges = {
+      commands: "agent.commands",
+      results: "agent.results",
+      logs: "agent.logs",
+      heartbeats: "agent.heartbeats",
+    };
+
+    this.queues = {
+      commands: `agent.commands.${config.serverId}`,
+      results: `agent.results.${config.serverId}`,
+      logs: `agent.logs.${config.serverId}`,
+    };
   }
 
   /**
-   * Initialize the connection to RabbitMQ
+   * Initialize the queue service
    * @returns {Promise<boolean>} Success status
    */
   async initialize() {
-    if (this.initialized) return true;
+    if (this.initialized) {
+      return true;
+    }
+
+    logger.info("Initializing queue service...");
 
     try {
-      // If URL not in environment variable, try to load from encrypted storage
-      if (!this.rabbitmqUrl) {
-        await this.loadRabbitMQCredentials();
-      }
-
-      // Check if RabbitMQ URL is configured after attempting to load
-      if (!this.rabbitmqUrl) {
-        logger.warn(
-          "RabbitMQ URL not configured, queue service will not be available",
-        );
-        return false;
-      }
-
-      // Log connection attempt without exposing full credentials in logs
-      const redactedUrl = this.redactConnectionString(this.rabbitmqUrl);
-      logger.info(`Connecting to RabbitMQ at ${redactedUrl}...`);
-
-      this.connection = await amqp.connect(this.rabbitmqUrl);
-      this.channel = await this.connection.createChannel();
-
-      // Ensure queues exist
-      await this.channel.assertQueue(this.queues.COMMANDS, { durable: true });
-      await this.channel.assertQueue(this.queues.RESULTS, { durable: true });
-      await this.channel.assertQueue(this.queues.HEARTBEATS, { durable: true });
-
-      // Create exchange for logs
-      await this.channel.assertExchange(this.queues.LOGS, "fanout", {
-        durable: true,
-      });
-
-      // Setup reconnection handler
-      this.connection.on("error", (err) => {
-        logger.error("RabbitMQ connection error:", err);
-        this.handleDisconnect();
-      });
-
-      this.connection.on("close", () => {
-        if (this.initialized) {
-          logger.warn(
-            "RabbitMQ connection closed unexpectedly, attempting to reconnect...",
-          );
-          this.handleDisconnect();
-        } else {
-          logger.info("RabbitMQ connection closed");
-        }
-      });
+      // Try to connect to RabbitMQ
+      await this.connect();
 
       this.initialized = true;
       logger.info("Queue service initialized successfully");
       return true;
     } catch (error) {
-      logger.error(`Failed to connect to RabbitMQ: ${error.message}`);
-      this.handleDisconnect();
+      logger.error(`Failed to initialize queue service: ${error.message}`);
       return false;
     }
   }
 
   /**
-   * Try to load RabbitMQ credentials from encrypted storage
-   * @returns {Promise<boolean>} Success status
+   * Load RabbitMQ credentials from storage
+   * @returns {Promise<string>} RabbitMQ connection URL
    */
   async loadRabbitMQCredentials() {
     try {
-      // Path where encrypted credentials are stored
-      const credentialsPath =
-        process.env.RABBITMQ_CREDENTIALS_PATH ||
-        "/opt/cloudlunacy/rabbitmq-credentials";
-
-      // Check if credentials file exists
-      try {
-        await fs.access(credentialsPath);
-      } catch (accessError) {
-        logger.warn(
-          `No stored RabbitMQ credentials found at ${credentialsPath}`,
-        );
-        return false;
+      // First check if we have the URL in the environment variable (set during this session)
+      if (process.env.RABBITMQ_URL) {
+        logger.info("Using RabbitMQ URL from environment variable");
+        return process.env.RABBITMQ_URL;
       }
 
-      // Read encrypted credentials
-      const encryptedCredentials = await fs.readFile(credentialsPath, "utf8");
+      // Otherwise, try to load from encrypted storage
+      logger.info(
+        "Attempting to load RabbitMQ credentials from encrypted storage",
+      );
 
-      // Try to get the encryption key
-      try {
-        // In a real implementation, this would be properly integrated with
-        // the auth service's key derivation function
-        const authService = require("../services/authenticationService");
-        const encryptionKey = await authService.getEncryptionKey();
+      // Read the encrypted credentials file
+      const encryptedData = await fs.readFile(
+        RABBITMQ_CREDENTIALS_PATH,
+        "utf8",
+      );
 
-        // Decrypt the credentials
-        this.rabbitmqUrl = authService.decryptData(
-          encryptedCredentials,
-          encryptionKey,
-        );
+      // Get the encryption key
+      const encryptionKey = await this.getEncryptionKey();
 
-        logger.info(
-          "Successfully loaded RabbitMQ credentials from encrypted storage",
-        );
-        return true;
-      } catch (keyError) {
-        logger.error(`Failed to get encryption key: ${keyError.message}`);
-        return false;
-      }
+      // Decrypt the data
+      const rabbitmqUrl = this.decryptData(encryptedData, encryptionKey);
+
+      logger.info(
+        "Successfully loaded RabbitMQ credentials from encrypted storage",
+      );
+      return rabbitmqUrl;
     } catch (error) {
-      logger.error(`Error loading RabbitMQ credentials: ${error.message}`);
-      return false;
+      logger.error(`Failed to load RabbitMQ credentials: ${error.message}`);
+      throw error;
     }
   }
 
   /**
-   * Redact sensitive information from connection string for logging
-   * @param {string} connectionString - The RabbitMQ connection string
-   * @returns {string} - Redacted connection string
+   * Get encryption key for credential storage
+   * Uses a combination of server ID and other unique identifiers
+   * @returns {Promise<string>} Encryption key
    */
-  redactConnectionString(connectionString) {
+  async getEncryptionKey() {
     try {
-      // Replace password with asterisks in connection string
-      return connectionString.replace(/:([^:@]+)@/, ":***@");
+      // In a real implementation, this would use a combination of:
+      // 1. Server hardware ID (machine-id, disk ID, etc)
+      // 2. The JWT token (if available)
+      // 3. Other server-specific data
+
+      // For now, we'll use a simple key based on the server ID
+      // This is a simplified implementation - in production use a more robust key generation
+      return config.serverId || "cloudlunacy-agent-key";
     } catch (error) {
-      return "Invalid connection string";
+      logger.warn(`Could not generate secure encryption key: ${error.message}`);
+      // Fallback to a basic key (not ideal for production)
+      return "cloudlunacy-agent-fallback-key";
     }
   }
 
   /**
-   * Handle disconnection and reconnection logic
+   * Decrypt data using the encryption key
+   * @param {string} encryptedData - The encrypted data (hex string)
+   * @param {string} encryptionKey - The encryption key
+   * @returns {string} Decrypted data
    */
-  handleDisconnect() {
-    this.initialized = false;
-    this.clearResources();
+  decryptData(encryptedData, encryptionKey) {
+    try {
+      // Extract the IV from the beginning of the encrypted data
+      const iv = Buffer.from(encryptedData.slice(0, 32), "hex");
+      const encryptedText = encryptedData.slice(32);
 
-    // Use exponential backoff for reconnection
-    if (this.reconnectTimeout) {
-      clearTimeout(this.reconnectTimeout);
+      // Create a key from the encryption key using SHA-256
+      const key = crypto.createHash("sha256").update(encryptionKey).digest();
+
+      // Create decipher
+      const decipher = crypto.createDecipheriv(CRYPTO_ALGORITHM, key, iv);
+
+      // Decrypt
+      let decrypted = decipher.update(encryptedText, "hex", "utf8");
+      decrypted += decipher.final("utf8");
+
+      return decrypted;
+    } catch (error) {
+      logger.error(`Decryption error: ${error.message}`);
+      throw new Error(
+        `Failed to decrypt RabbitMQ credentials: ${error.message}`,
+      );
+    }
+  }
+
+  /**
+   * Connect to RabbitMQ
+   * @returns {Promise<void>}
+   */
+  async connect() {
+    // Don't create multiple connection attempts
+    if (this.connectionPromise) {
+      return this.connectionPromise;
     }
 
-    this.reconnectTimeout = setTimeout(() => {
-      logger.info("Attempting to reconnect to RabbitMQ...");
-      this.initialize()
-        .then((success) => {
-          if (success) {
-            logger.info("Successfully reconnected to RabbitMQ");
-            this.reconnectDelay = 5000; // Reset the delay
-          } else {
-            // Increase the delay for next attempt (exponential backoff)
-            this.reconnectDelay = Math.min(
-              this.reconnectDelay * 2,
-              this.maxReconnectDelay,
+    this.connectionPromise = new Promise(async (resolve, reject) => {
+      try {
+        // Load RabbitMQ credentials
+        const rabbitmqUrl = await this.loadRabbitMQCredentials();
+
+        // Log connection attempt with redacted URL (hide password)
+        const redactedUrl = rabbitmqUrl.replace(/:([^:@]+)@/, ":***@");
+        logger.info(`Connecting to RabbitMQ at ${redactedUrl}...`);
+
+        // Check for vhost format and add leading slash if missing
+        let connectionUrl = rabbitmqUrl;
+        const urlComponents = rabbitmqUrl.match(
+          /amqp:\/\/([^:]+):([^@]+)@([^:]+):(\d+)\/(.+)$/,
+        );
+        if (
+          urlComponents &&
+          urlComponents[5] &&
+          !urlComponents[5].startsWith("/")
+        ) {
+          // In RabbitMQ, vhost should typically have a leading slash unless it's URL encoded
+          // Add leading slash to the vhost if it's missing and not URL encoded
+          if (urlComponents[5] !== "%2F") {
+            const [, username, password, host, port, vhost] = urlComponents;
+            connectionUrl = `amqp://${username}:${password}@${host}:${port}/${vhost.startsWith("/") ? vhost : "/" + vhost}`;
+            logger.debug(
+              "Modified RabbitMQ URL to include leading slash in vhost",
             );
           }
-        })
-        .catch((err) => {
-          logger.error("Failed to reconnect to RabbitMQ:", err);
-          // Increase the delay for next attempt (exponential backoff)
-          this.reconnectDelay = Math.min(
-            this.reconnectDelay * 2,
-            this.maxReconnectDelay,
+        }
+
+        // Connection options
+        const options = {
+          heartbeat: 30, // 30 seconds heartbeat
+        };
+
+        // Connect to RabbitMQ with timeout
+        const connectPromise = amqp.connect(connectionUrl, options);
+
+        // Add timeout to connection attempt
+        const timeoutPromise = new Promise((_, rejectTimeout) => {
+          setTimeout(
+            () => rejectTimeout(new Error("Connection timeout")),
+            10000,
           );
         });
-    }, this.reconnectDelay);
-  }
 
-  /**
-   * Clear connection resources
-   */
-  async clearResources() {
-    if (this.channel) {
-      try {
-        await this.channel.close();
-      } catch (error) {
-        logger.error("Error closing channel:", error);
-      }
-      this.channel = null;
-    }
+        // Race the connection attempt against the timeout
+        this.connection = await Promise.race([connectPromise, timeoutPromise]);
 
-    if (this.connection) {
-      try {
-        await this.connection.close();
-      } catch (error) {
-        logger.error("Error closing connection:", error);
-      }
-      this.connection = null;
-    }
-
-    // Clear the heartbeat interval if it's running
-    if (this.heartbeatInterval) {
-      clearInterval(this.heartbeatInterval);
-      this.heartbeatInterval = null;
-    }
-  }
-
-  /**
-   * Shut down the queue service
-   * @returns {Promise<boolean>} Success status
-   */
-  async shutdown() {
-    logger.info("Shutting down queue service...");
-    if (this.heartbeatInterval) {
-      clearInterval(this.heartbeatInterval);
-      this.heartbeatInterval = null;
-    }
-
-    if (this.reconnectTimeout) {
-      clearTimeout(this.reconnectTimeout);
-      this.reconnectTimeout = null;
-    }
-
-    this.initialized = false;
-    await this.clearResources();
-    logger.info("Queue service shut down successfully");
-    return true;
-  }
-
-  /**
-   * Publish a result to the results queue
-   * @param {Object} result Result object to publish
-   * @returns {Promise<boolean>} Success status
-   */
-  async publishResult(result) {
-    try {
-      if (!this.initialized) {
-        const initSuccess = await this.initialize();
-        if (!initSuccess) return false;
-      }
-
-      logger.debug(
-        `Publishing result for job ${result.jobId}: ${result.status}`,
-      );
-
-      const success = this.channel.sendToQueue(
-        this.queues.RESULTS,
-        Buffer.from(JSON.stringify(result)),
-        { persistent: true },
-      );
-
-      if (!success) {
-        logger.warn("Queue is full, result message was not sent");
-      }
-
-      return success;
-    } catch (error) {
-      logger.error(`Error publishing result: ${error.message}`);
-      this.handleDisconnect();
-      return false;
-    }
-  }
-
-  /**
-   * Publish a log message to the logs exchange
-   * @param {Object} logMessage Log message to publish
-   * @returns {Promise<boolean>} Success status
-   */
-  async publishLog(logMessage) {
-    try {
-      if (!this.initialized) {
-        const initSuccess = await this.initialize();
-        if (!initSuccess) return false;
-      }
-
-      logger.debug(
-        `Publishing log for job ${logMessage.jobId}: ${logMessage.content.substring(0, 50)}...`,
-      );
-
-      const success = this.channel.publish(
-        this.queues.LOGS,
-        "", // No routing key for fanout exchange
-        Buffer.from(JSON.stringify(logMessage)),
-        { persistent: true },
-      );
-
-      if (!success) {
-        logger.warn("Exchange is full, log message was not sent");
-      }
-
-      return success;
-    } catch (error) {
-      logger.error(`Error publishing log: ${error.message}`);
-      this.handleDisconnect();
-      return false;
-    }
-  }
-
-  /**
-   * Publish a heartbeat to the heartbeats queue
-   * @param {Object} heartbeat Heartbeat message to publish
-   * @returns {Promise<boolean>} Success status
-   */
-  async publishHeartbeat(heartbeat) {
-    try {
-      if (!this.initialized) {
-        const initSuccess = await this.initialize();
-        if (!initSuccess) return false;
-      }
-
-      const success = this.channel.sendToQueue(
-        this.queues.HEARTBEATS,
-        Buffer.from(JSON.stringify(heartbeat)),
-        { persistent: true },
-      );
-
-      if (!success) {
-        logger.warn("Queue is full, heartbeat message was not sent");
-      }
-
-      return success;
-    } catch (error) {
-      logger.error(`Error publishing heartbeat: ${error.message}`);
-      this.handleDisconnect();
-      return false;
-    }
-  }
-
-  /**
-   * Start sending heartbeats at regular intervals
-   * @param {number} interval Interval in milliseconds, defaults to 30 seconds
-   * @returns {Promise<boolean>} Success status
-   */
-  startHeartbeats(interval = 30000) {
-    if (this.heartbeatInterval) {
-      clearInterval(this.heartbeatInterval);
-    }
-
-    this.heartbeatInterval = setInterval(async () => {
-      try {
-        // Get system metrics
-        const metrics = this.collectSystemMetrics();
-
-        // Send heartbeat
-        await this.publishHeartbeat({
-          vpsId: this.serverId,
-          status: "online",
-          timestamp: new Date().toISOString(),
-          metrics,
+        // Set up connection event handlers
+        this.connection.on("error", (err) => {
+          logger.error(`RabbitMQ connection error: ${err.message}`);
+          this.handleConnectionFailure();
         });
-      } catch (error) {
-        logger.error(`Failed to send heartbeat: ${error.message}`);
-      }
-    }, interval);
 
-    logger.info(`Started sending heartbeats every ${interval / 1000} seconds`);
-    return true;
+        this.connection.on("close", () => {
+          logger.warn("RabbitMQ connection closed");
+          this.handleConnectionFailure();
+        });
+
+        // Create a channel
+        this.channel = await this.connection.createChannel();
+
+        // Set up exchanges and queues
+        await this.setupExchangesAndQueues();
+
+        // Reset reconnect attempts on successful connection
+        this.reconnectAttempts = 0;
+        this.connected = true;
+        this.connectionPromise = null;
+
+        logger.info("Successfully connected to RabbitMQ");
+        resolve();
+      } catch (error) {
+        logger.error(`Failed to connect to RabbitMQ: ${error.message}`);
+        this.connected = false;
+        this.connectionPromise = null;
+        this.handleConnectionFailure();
+        reject(error);
+      }
+    });
+
+    return this.connectionPromise;
   }
 
   /**
-   * Collect system metrics for heartbeat
-   * @returns {Object} System metrics
+   * Handle connection failure and attempt reconnection
    */
-  collectSystemMetrics() {
-    try {
-      // Get CPU load average (last 1, 5, and 15 minutes)
-      const loadAvg = os.loadavg();
+  handleConnectionFailure() {
+    this.connected = false;
+    this.connection = null;
+    this.channel = null;
+    this.connectionPromise = null;
 
-      // Get memory usage
-      const totalMem = os.totalmem();
-      const freeMem = os.freemem();
-      const memoryUsage = ((totalMem - freeMem) / totalMem) * 100;
+    // Clear any existing heartbeat interval
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval);
+      this.heartbeatInterval = null;
+    }
 
-      // Get uptime in seconds
-      const uptime = os.uptime();
+    // Attempt reconnection with exponential backoff
+    if (this.reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+      const delay = Math.min(
+        RECONNECT_DELAY * Math.pow(1.5, this.reconnectAttempts),
+        60000,
+      );
+      this.reconnectAttempts++;
 
-      // TODO: Add disk usage - requires additional libraries or shell commands
-      // For now, using a placeholder
-      const diskUsage = 0;
+      logger.info(
+        `Attempting to reconnect to RabbitMQ in ${delay / 1000} seconds (attempt ${this.reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`,
+      );
 
-      // CPU usage is complicated to get accurately in Node.js
-      // For now, using a simple estimation based on load average
-      const cpuCount = os.cpus().length;
-      const cpuUsage = (loadAvg[0] / cpuCount) * 100;
-
-      return {
-        cpu: parseFloat(cpuUsage.toFixed(1)),
-        memory: parseFloat(memoryUsage.toFixed(1)),
-        disk: parseFloat(diskUsage.toFixed(1)),
-        uptime: Math.floor(uptime),
-        load: loadAvg.map((load) => parseFloat(load.toFixed(2))),
-      };
-    } catch (error) {
-      logger.error(`Error collecting system metrics: ${error.message}`);
-      return {
-        cpu: 0,
-        memory: 0,
-        disk: 0,
-        uptime: 0,
-        load: [0, 0, 0],
-      };
+      setTimeout(() => {
+        this.connect().catch((error) => {
+          logger.error(`Reconnection attempt failed: ${error.message}`);
+        });
+      }, delay);
+    } else {
+      logger.error(
+        `Maximum reconnection attempts (${MAX_RECONNECT_ATTEMPTS}) reached. Giving up.`,
+      );
     }
   }
 
   /**
-   * Consume messages from the commands queue
-   * @param {Function} callback Function to call with received messages
-   * @returns {Promise<Object>} Consumer tag
+   * Set up exchanges and queues
+   * @returns {Promise<void>}
    */
-  async consumeCommands(callback) {
+  async setupExchangesAndQueues() {
     try {
-      if (!this.initialized) {
-        const initSuccess = await this.initialize();
-        if (!initSuccess) {
-          throw new Error("Failed to initialize queue service");
+      // Create exchanges
+      await this.channel.assertExchange(this.exchanges.commands, "direct", {
+        durable: true,
+      });
+      await this.channel.assertExchange(this.exchanges.results, "direct", {
+        durable: true,
+      });
+      await this.channel.assertExchange(this.exchanges.logs, "direct", {
+        durable: true,
+      });
+      await this.channel.assertExchange(this.exchanges.heartbeats, "direct", {
+        durable: true,
+      });
+
+      // Create queues with TTL (messages expire after 7 days)
+      await this.channel.assertQueue(this.queues.commands, {
+        durable: true,
+        arguments: {
+          "x-message-ttl": 7 * 24 * 60 * 60 * 1000, // 7 days in milliseconds
+          "x-queue-type": "classic",
+        },
+      });
+
+      await this.channel.assertQueue(this.queues.results, {
+        durable: true,
+        arguments: {
+          "x-message-ttl": 7 * 24 * 60 * 60 * 1000,
+          "x-queue-type": "classic",
+        },
+      });
+
+      await this.channel.assertQueue(this.queues.logs, {
+        durable: true,
+        arguments: {
+          "x-message-ttl": 3 * 24 * 60 * 60 * 1000, // 3 days for logs
+          "x-queue-type": "classic",
+        },
+      });
+
+      // Bind queues to exchanges
+      await this.channel.bindQueue(
+        this.queues.commands,
+        this.exchanges.commands,
+        config.serverId,
+      );
+      await this.channel.bindQueue(
+        this.queues.results,
+        this.exchanges.results,
+        config.serverId,
+      );
+      await this.channel.bindQueue(
+        this.queues.logs,
+        this.exchanges.logs,
+        config.serverId,
+      );
+
+      logger.info("Successfully set up RabbitMQ exchanges and queues");
+    } catch (error) {
+      logger.error(`Failed to set up exchanges and queues: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Start sending heartbeats to RabbitMQ
+   */
+  startHeartbeats() {
+    // Clear any existing heartbeat interval
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval);
+    }
+
+    // Send heartbeats every 30 seconds
+    this.heartbeatInterval = setInterval(() => {
+      if (this.connected && this.channel) {
+        try {
+          this.channel.publish(
+            this.exchanges.heartbeats,
+            config.serverId,
+            Buffer.from(
+              JSON.stringify({
+                serverId: config.serverId,
+                timestamp: new Date().toISOString(),
+                status: "active",
+              }),
+            ),
+            { persistent: true },
+          );
+        } catch (error) {
+          logger.warn(`Failed to send heartbeat: ${error.message}`);
         }
       }
+    }, 30000); // 30 seconds
 
-      logger.info(`Starting to consume messages from ${this.queues.COMMANDS}`);
+    logger.info("Started RabbitMQ heartbeat service");
+  }
 
-      return this.channel.consume(
-        this.queues.COMMANDS,
-        async (message) => {
-          if (!message) return;
+  /**
+   * Consume commands from the command queue
+   * @param {Function} callback - Function to call when a message is received
+   * @returns {Promise<Object>} Consumer details
+   */
+  async consumeCommands(callback) {
+    if (!this.connected) {
+      await this.connect();
+    }
+
+    try {
+      // Ensure we don't try to process too many messages at once
+      this.channel.prefetch(5);
+
+      // Start consuming messages
+      const { consumerTag } = await this.channel.consume(
+        this.queues.commands,
+        async (msg) => {
+          if (!msg) {
+            logger.warn("Received null message from RabbitMQ");
+            return;
+          }
 
           try {
-            const job = JSON.parse(message.content.toString());
-            logger.info(`Processing job: ${job.id} of type ${job.actionType}`);
-
-            await this.publishLog({
-              jobId: job.id,
-              content: `Starting processing of job ${job.id} (${job.actionType})`,
-              timestamp: new Date().toISOString(),
-            });
+            // Parse the message
+            const content = JSON.parse(msg.content.toString());
+            logger.info(`Received command: ${content.jobType || "unknown"}`);
 
             try {
-              await callback(job);
+              // Process the message using the provided callback
+              await callback(content);
 
-              // Acknowledge the message - we've processed it successfully
-              this.channel.ack(message);
-
-              logger.info(`Job ${job.id} processed successfully`);
+              // Acknowledge the message if processing was successful
+              this.channel.ack(msg);
             } catch (error) {
               logger.error(`Error processing command: ${error.message}`);
 
-              // Send error result
-              await this.publishResult({
-                jobId: job.id,
-                status: "FAILED",
-                error: error.message,
-              });
-
-              // Log the error
-              await this.publishLog({
-                jobId: job.id,
-                content: `Job failed: ${error.message}`,
-                timestamp: new Date().toISOString(),
-              });
-
-              // Negative acknowledgment, message goes back to queue
-              // if we've tried fewer than 3 times (using message.fields.deliveryTag as a counter)
-              if (message.fields.deliveryTag < 3) {
-                this.channel.nack(message, false, true);
-                logger.warn(
-                  `Job ${job.id} failed, returning to queue for retry (attempt ${message.fields.deliveryTag})`,
-                );
-              } else {
-                // If we've tried 3 times, just acknowledge and move on
-                logger.warn(
-                  `Job ${job.id} failed after multiple attempts, acknowledging`,
-                );
-                this.channel.ack(message);
-              }
+              // Reject the message and requeue it if it's a temporary error
+              // For permanent errors, we should use nack with requeue=false
+              // or send it to a dead letter queue
+              const isTemporaryError = !error.permanent;
+              this.channel.nack(msg, false, isTemporaryError);
             }
           } catch (parseError) {
-            logger.error(`Error parsing message: ${parseError.message}`);
-            // Bad message format, just acknowledge it
-            this.channel.ack(message);
+            logger.error(
+              `Failed to parse command message: ${parseError.message}`,
+            );
+            // Don't requeue if the message is invalid
+            this.channel.nack(msg, false, false);
           }
         },
-        { noAck: false },
+        { noAck: false }, // Manual acknowledgment
       );
+
+      logger.info(
+        `Command consumer set up successfully with tag: ${consumerTag}`,
+      );
+      return { consumerTag };
     } catch (error) {
-      logger.error(`Error consuming commands: ${error.message}`);
-      this.handleDisconnect();
+      logger.error(`Failed to consume commands: ${error.message}`);
       throw error;
+    }
+  }
+
+  /**
+   * Publish a result message
+   * @param {Object} result - Result object to publish
+   * @returns {Promise<boolean>} Success status
+   */
+  async publishResult(result) {
+    if (!this.connected) {
+      await this.connect();
+    }
+
+    try {
+      const success = this.channel.publish(
+        this.exchanges.results,
+        config.serverId,
+        Buffer.from(
+          JSON.stringify({
+            ...result,
+            serverId: config.serverId,
+            timestamp: new Date().toISOString(),
+          }),
+        ),
+        { persistent: true },
+      );
+
+      if (!success) {
+        logger.warn(
+          "Channel write buffer is full, result message was not published",
+        );
+      }
+
+      return success;
+    } catch (error) {
+      logger.error(`Failed to publish result: ${error.message}`);
+      return false;
+    }
+  }
+
+  /**
+   * Publish a log message
+   * @param {Object} logMessage - Log message object to publish
+   * @returns {Promise<boolean>} Success status
+   */
+  async publishLog(logMessage) {
+    if (!this.connected) {
+      await this.connect();
+    }
+
+    try {
+      const success = this.channel.publish(
+        this.exchanges.logs,
+        config.serverId,
+        Buffer.from(
+          JSON.stringify({
+            ...logMessage,
+            serverId: config.serverId,
+            timestamp: logMessage.timestamp || new Date().toISOString(),
+          }),
+        ),
+        { persistent: true },
+      );
+
+      if (!success) {
+        logger.warn(
+          "Channel write buffer is full, log message was not published",
+        );
+      }
+
+      return success;
+    } catch (error) {
+      logger.error(`Failed to publish log: ${error.message}`);
+      return false;
+    }
+  }
+
+  /**
+   * Shutdown the queue service
+   * @returns {Promise<boolean>} Success status
+   */
+  async shutdown() {
+    try {
+      logger.info("Shutting down queue service...");
+
+      // Clear heartbeat interval
+      if (this.heartbeatInterval) {
+        clearInterval(this.heartbeatInterval);
+        this.heartbeatInterval = null;
+      }
+
+      // Close channel and connection
+      if (this.channel) {
+        await this.channel.close();
+        this.channel = null;
+      }
+
+      if (this.connection) {
+        await this.connection.close();
+        this.connection = null;
+      }
+
+      this.connected = false;
+      this.initialized = false;
+
+      logger.info("Queue service shut down successfully");
+      return true;
+    } catch (error) {
+      logger.error(`Error shutting down queue service: ${error.message}`);
+      return false;
     }
   }
 }
