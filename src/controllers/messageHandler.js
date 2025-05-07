@@ -17,7 +17,19 @@ class MessageHandler {
    * @param {WebSocket} ws - The WebSocket connection object.
    */
   handleMessage(message, ws) {
-    logger.info(`Received message of type: ${message.type}`);
+    // Log detailed message information for debugging
+    try {
+      const messagePayloadStr = JSON.stringify(message.payload || {});
+      const truncatedPayload = messagePayloadStr.length > 500 
+        ? messagePayloadStr.substring(0, 500) + "..." 
+        : messagePayloadStr;
+      
+      logger.info(`Received message of type: ${message.type}`);
+      logger.info(`Message ID: ${message.requestId || 'none'}`);
+      logger.info(`Message payload: ${truncatedPayload}`);
+    } catch (error) {
+      logger.error(`Error logging message details: ${error.message}`);
+    }
 
     try {
       switch (message.type) {
@@ -33,23 +45,37 @@ class MessageHandler {
             databaseController.handleDatabaseDeployment(message.payload, ws);
           } else {
             // Regular application deployment
+            logger.info(`Deploying application: ${message.payload?.appName || 'unnamed'} (${message.payload?.appType || 'unknown type'})`);
             deployController.handleDeployApp(message, ws);
           }
           break;
 
         case "create_database":
+          logger.info(`Creating database: ${message.payload?.dbName || 'unnamed'} (${message.payload?.dbType || 'unknown type'})`);
           databaseController.createDatabase(message.payload, ws);
           break;
 
         case "manage_database":
+          logger.info(`Managing database: ${message.payload?.dbName || 'unnamed'}, Operation: ${message.payload?.operation || 'unknown'}`);
           databaseController.handleDatabaseManagement(message.payload, ws);
           break;
 
+        case "install_database":
+          logger.info(`Installing database: ${message.payload?.dbType || 'unknown type'}`);
+          // Route to the appropriate handler
+          databaseController.handleDatabaseManagement({
+            ...message.payload,
+            operation: 'install'
+          }, ws);
+          break;
+
         case "mongodb_status_check":
+          logger.info(`Checking MongoDB status: ${message.payload?.dbName || 'all databases'}`);
           databaseController.checkMongoDBStatus(message.payload, ws);
           break;
 
         case "check_repository":
+          logger.info(`Checking repository access: ${message.payload?.repositoryUrl || 'unknown repository'}`);
           repositoryController.checkRepositoryAccess(message.payload, ws);
           break;
 
