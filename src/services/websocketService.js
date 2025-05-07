@@ -155,7 +155,9 @@ class WebSocketService {
 
       // Send registration message
       this.sendMessage("register", { serverId: config.serverId });
-      logger.info(`Registration message sent for server ID: ${config.serverId}`);
+      logger.info(
+        `Registration message sent for server ID: ${config.serverId}`,
+      );
 
       // Setup ping/pong for connection health monitoring
       this.pingInterval = setInterval(() => {

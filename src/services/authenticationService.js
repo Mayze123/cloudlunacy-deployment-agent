@@ -48,16 +48,16 @@ class AuthenticationService {
   async authenticateAndConnect() {
     try {
       // In development mode, skip the actual authentication
-      if (config.isDevelopment) {
-        logger.info("Development mode: Skipping backend authentication");
-        // Use a mock WebSocket URL for development that works with Docker
-        const wsUrl = "ws://host.docker.internal:8080/agent";
-        logger.info(`Using development WebSocket URL: ${wsUrl}`);
-        websocketService.establishConnection(wsUrl);
-        this.usingWebsocketFallback = true;
-        this.isConnected = true;
-        return;
-      }
+      // if (config.isDevelopment) {
+      //   logger.info("Development mode: Skipping backend authentication");
+      //   // Use a mock WebSocket URL for development that works with Docker
+      //   const wsUrl = "ws://host.docker.internal:8080/agent";
+      //   logger.info(`Using development WebSocket URL: ${wsUrl}`);
+      //   websocketService.establishConnection(wsUrl);
+      //   this.usingWebsocketFallback = true;
+      //   this.isConnected = true;
+      //   return;
+      // }
 
       if (!config.api.backendUrl) {
         logger.error(
@@ -86,6 +86,8 @@ class AuthenticationService {
           },
         );
 
+        logger.info(`response.data ${response}`);
+
         // Check if we received a JWT token in the response and store it
         if (response.data.jwt) {
           await this.storeJwtToken(response.data.jwt);
@@ -93,7 +95,7 @@ class AuthenticationService {
 
         // Extract connection details from response based on updated backend API
         const { wsUrl, rabbitmq } = response.data;
-        logger.info(`response.data ${response.data}`);
+
         // Log the full authentication response for debugging (redact any sensitive info)
         const responseCopy = { ...response.data };
         if (responseCopy.rabbitmq && responseCopy.rabbitmq.url) {
