@@ -68,7 +68,10 @@ async function initializeServices() {
     }
 
     // Step 6: Initialize MongoDB service if it's enabled
-    if (configService.isMongoDBEnabled()) {
+    if (
+      typeof configService.isMongoDBEnabled === "function" &&
+      configService.isMongoDBEnabled()
+    ) {
       // Skip connection attempts at startup if specified in config
       const skipConnectionAttempts = process.env.MONGO_SKIP_CONNECT === "true";
 
@@ -91,6 +94,27 @@ async function initializeServices() {
           "MongoDB service initialization failed, continuing without MongoDB",
         );
       }
+    } else if (
+      typeof configService.get === "function" &&
+      configService.get("database.mongodb.enabled")
+    ) {
+      // Alternative way to check if MongoDB is enabled
+      logger.info("MongoDB is enabled, initializing service...");
+
+      const mongoInitialized = await mongodbService.initialize({
+        skipConnectionAttempts: process.env.MONGO_SKIP_CONNECT === "true",
+        registerWithFrontServer:
+          process.env.MONGO_REGISTER_WITH_FRONT === "true",
+        forceStartIfInstalled: true,
+      });
+
+      if (!mongoInitialized) {
+        logger.warn(
+          "MongoDB service initialization failed, continuing without MongoDB",
+        );
+      }
+    } else {
+      logger.info("MongoDB is not enabled, skipping initialization");
     }
 
     // Step 7: Initialize deployment service
@@ -223,7 +247,15 @@ async function shutdownServices() {
     await deploymentService.shutdown();
 
     // Shutdown MongoDB service if it's enabled
-    if (configService.isMongoDBEnabled()) {
+    if (
+      typeof configService.isMongoDBEnabled === "function" &&
+      configService.isMongoDBEnabled()
+    ) {
+      await mongodbService.shutdown();
+    } else if (
+      typeof configService.get === "function" &&
+      configService.get("database.mongodb.enabled")
+    ) {
       await mongodbService.shutdown();
     }
 

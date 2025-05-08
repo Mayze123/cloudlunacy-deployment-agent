@@ -321,9 +321,29 @@ function createQueueMsgAdapter(jobId) {
   };
 }
 
+/**
+ * Initialize the command handler
+ * @returns {Promise<boolean>} Success status
+ */
+async function initialize() {
+  try {
+    logger.info("Initializing command handler...");
+
+    // Nothing complex to initialize at the moment
+    // In the future, this could set up event listeners, pre-load modules, etc.
+
+    logger.info("Command handler initialized successfully");
+    return true;
+  } catch (error) {
+    logger.error(`Failed to initialize command handler: ${error.message}`);
+    return false;
+  }
+}
+
 module.exports = {
   processJob,
   handleDeploymentJob,
   handleDatabaseJob,
   handleRepositoryJob,
+  initialize,
 };

@@ -85,22 +85,44 @@ class QueueService {
         "Attempting to load RabbitMQ credentials from encrypted storage",
       );
 
-      // Read the encrypted credentials file
-      const encryptedData = await fs.readFile(
-        RABBITMQ_CREDENTIALS_PATH,
-        "utf8",
-      );
+      try {
+        // Read the encrypted credentials file
+        const encryptedData = await fs.readFile(
+          RABBITMQ_CREDENTIALS_PATH,
+          "utf8",
+        );
 
-      // Get the encryption key
-      const encryptionKey = await this.getEncryptionKey();
+        // Get the encryption key
+        const encryptionKey = await this.getEncryptionKey();
 
-      // Decrypt the data
-      const rabbitmqUrl = this.decryptData(encryptedData, encryptionKey);
+        // Decrypt the data
+        const rabbitmqUrl = this.decryptData(encryptedData, encryptionKey);
 
-      logger.info(
-        "Successfully loaded RabbitMQ credentials from encrypted storage",
-      );
-      return rabbitmqUrl;
+        logger.info(
+          "Successfully loaded RabbitMQ credentials from encrypted storage",
+        );
+        return rabbitmqUrl;
+      } catch (decryptError) {
+        // If we can't decrypt, the file might be in plaintext format from an older version
+        // or simply encrypted with a different key
+        logger.warn(
+          `Decryption failed: ${decryptError.message}. Checking for plaintext fallback...`,
+        );
+
+        // As a fallback, let's see if file might be in plaintext
+        try {
+          const data = await fs.readFile(RABBITMQ_CREDENTIALS_PATH, "utf8");
+          if (data.startsWith("amqp://")) {
+            logger.info("Found plaintext RabbitMQ URL in credentials file");
+            return data.trim();
+          } else {
+            // The file exists but is neither decryptable nor plaintext
+            throw new Error("Invalid credential format");
+          }
+        } catch (error) {
+          throw decryptError; // Throw the original decryption error
+        }
+      }
     } catch (error) {
       logger.error(`Failed to load RabbitMQ credentials: ${error.message}`);
       throw error;
