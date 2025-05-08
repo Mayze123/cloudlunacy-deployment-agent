@@ -103,6 +103,10 @@ class AuthenticationService {
 
         // Extract connection details from response based on updated backend API
         const { wsUrl, rabbitmq } = response.data;
+        logger.info(
+          "🚀 ~ AuthenticationService ~ authenticateAndConnect ~ rabbitmq:",
+          rabbitmq,
+        );
 
         // Log the full authentication response for debugging (redact any sensitive info)
         const responseCopy = { ...response.data };
