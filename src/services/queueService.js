@@ -196,6 +196,10 @@ class QueueService {
       try {
         // Load RabbitMQ credentials
         const rabbitmqUrl = await this.loadRabbitMQCredentials();
+        logger.info(
+          "🚀 ~ QueueService ~ this.connectionPromise=newPromise ~ rabbitmqUrl:",
+          rabbitmqUrl,
+        );
 
         // Log connection attempt with redacted URL (hide password)
         const redactedUrl = rabbitmqUrl.replace(/:([^:@]+)@/, ":***@");
