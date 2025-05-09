@@ -45,7 +45,15 @@ async function initializeServices() {
       );
     }
 
-    // Step 4: Initialize queue service
+    // Step 4: Initialize authentication service and WebSocket fallback
+    const authInitialized = await authService.initialize();
+    if (!authInitialized) {
+      logger.warn(
+        "Authentication service initialization failed, continuing in limited mode",
+      );
+    }
+
+    // Step 5: Initialize queue service
     const queueInitialized = await queueService.initialize();
     if (!queueInitialized) {
       logger.warn(
@@ -57,14 +65,6 @@ async function initializeServices() {
 
       // Setup command processor
       await setupCommandProcessor();
-    }
-
-    // Step 5: Initialize authentication service and WebSocket as fallback
-    const authInitialized = await authService.initialize();
-    if (!authInitialized) {
-      logger.warn(
-        "Authentication service initialization failed, continuing in limited mode",
-      );
     }
 
     // Step 6: Initialize MongoDB service if it's enabled
