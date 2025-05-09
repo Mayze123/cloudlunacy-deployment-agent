@@ -205,14 +205,11 @@ class QueueService {
       try {
         // Load RabbitMQ credentials
         const rabbitmqUrl = await this.loadRabbitMQCredentials();
-        logger.info(
-          "🚀 ~ QueueService ~ this.connectionPromise=newPromise ~ rabbitmqUrl:",
-          rabbitmqUrl,
-        );
+        logger.info(`rabbitmqUrl: ${rabbitmqUrl}`);
 
         // Log connection attempt with redacted URL (hide password)
         const redactedUrl = rabbitmqUrl.replace(/:([^:@]+)@/, ":***@");
-        logger.info(`Connecting to RabbitMQ at ${redactedUrl}...`);
+        logger.info(`🚀 Connecting to RabbitMQ at ${redactedUrl}...`);
 
         // Parse and modify the URL components
         try {
@@ -236,20 +233,14 @@ class QueueService {
 
           // URL encode the username, password, and vhost to handle special characters
           const encodedUsername = encodeURIComponent(username);
-          logger.info(
-            "🚀 ~ QueueService ~ this.connectionPromise=newPromise ~ const:",
-            encodedUsername,
-          );
+
+          logger.info(`🚀 encodedUsername: ${encodedUsername}`);
           const encodedPassword = encodeURIComponent(password);
-          logger.info(
-            "🚀 ~ QueueService ~ this.connectionPromise=newPromise ~ encodedPassword:",
-            encodedPassword,
-          );
+
+          logger.info(`🚀 encodedPassword: ${encodedPassword}`);
           const encodedVhost = encodeURIComponent(modifiedVhost);
-          logger.info(
-            "🚀 ~ QueueService ~ this.connectionPromise=newPromise ~ encodedVhost:",
-            encodedVhost,
-          );
+
+          logger.info(`🚀 encodedVhost: ${encodedVhost}`);
 
           // Construct the modified URL
           const modifiedUrl = `amqp://${encodedUsername}:${encodedPassword}@${host}:${port}/${encodedVhost}`;
