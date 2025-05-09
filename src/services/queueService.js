@@ -196,160 +196,41 @@ class QueueService {
    * @returns {Promise<void>}
    */
   async connect() {
-    // Don't create multiple connection attempts
+    // Avoid duplicate connection attempts
     if (this.connectionPromise) {
       return this.connectionPromise;
     }
 
-    this.connectionPromise = new Promise(async (resolve, reject) => {
+    // Wrap in an immediately-invoked async function so we can assign & await it
+    this.connectionPromise = (async () => {
       try {
-        // Load RabbitMQ credentials
+        // 1) Load the URL (env var or from encrypted storage)
         const rabbitmqUrl = await this.loadRabbitMQCredentials();
-        logger.info(`rabbitmqUrl: ${rabbitmqUrl}`);
+        logger.info(`Connecting to RabbitMQ at ${rabbitmqUrl}`);
 
-        // Log connection attempt with redacted URL (hide password)
-        const redactedUrl = rabbitmqUrl.replace(/:([^:@]+)@/, ":***@");
-        logger.info(`🚀 Connecting to RabbitMQ at ${redactedUrl}...`);
+        // 2) Let amqplib parse URL, handle vhost, username, password correctly
+        this.connection = await amqp.connect(rabbitmqUrl);
 
-        // Parse and modify the URL components
-        try {
-          // Parse the URL to extract its components
-          const urlRegex = /^amqp:\/\/([^:]+):([^@]+)@([^:]+):(\d+)\/(.+)$/;
-          const match = rabbitmqUrl.match(urlRegex);
+        // 3) Open a channel
+        this.channel = await this.connection.createChannel();
 
-          if (!match) {
-            logger.warn("Invalid RabbitMQ URL format");
-            throw new Error("Invalid RabbitMQ URL format");
-          }
+        // 4) Declare your exchanges & queues
+        await this.setupExchangesAndQueues();
 
-          const [, username, password, host, port, vhost] = match;
+        // 5) Reset reconnect logic
+        this.reconnectAttempts = 0;
+        this.connected = true;
+        this.connectionPromise = null;
 
-          // Ensure the vhost has a leading slash if it's not URL encoded
-          let modifiedVhost = vhost;
-          if (!vhost.startsWith("/") && vhost !== "%2F") {
-            modifiedVhost = "/" + vhost;
-            logger.info("Adding leading slash to vhost");
-          }
-
-          // URL encode the username, password, and vhost to handle special characters
-          const encodedUsername = encodeURIComponent(username);
-
-          logger.info(`🚀 encodedUsername: ${encodedUsername}`);
-          const encodedPassword = encodeURIComponent(password);
-
-          logger.info(`🚀 encodedPassword: ${encodedPassword}`);
-          const encodedVhost = encodeURIComponent(modifiedVhost);
-
-          logger.info(`🚀 encodedVhost: ${encodedVhost}`);
-
-          // Construct the modified URL
-          const modifiedUrl = `amqp://${encodedUsername}:${encodedPassword}@${host}:${port}/${encodedVhost}`;
-          logger.info("Using URL-encoded components for RabbitMQ connection");
-
-          // Connection options with authentication mechanism explicitly set to PLAIN
-          const socketOptions = {
-            servername: host, // Set SNI if using TLS
-          };
-
-          const connectionOptions = {
-            heartbeat: 30, // 30 seconds heartbeat
-            locale: "en_US",
-            timeout: 10000, // 10 second connection timeout
-            frameMax: 0, // Default frame size
-            channelMax: 0, // Default max channels
-            vhost: modifiedVhost, // Explicit vhost setting
-            authMechanism: ["PLAIN"], // Explicitly use PLAIN auth
-            socket: socketOptions,
-          };
-
-          // Connect to RabbitMQ with timeout
-          const connectPromise = amqp.connect(modifiedUrl, connectionOptions);
-
-          // Add timeout to connection attempt
-          const timeoutPromise = new Promise((_, rejectTimeout) => {
-            setTimeout(
-              () => rejectTimeout(new Error("Connection timeout")),
-              10000,
-            );
-          });
-
-          // Race the connection attempt against the timeout
-          this.connection = await Promise.race([
-            connectPromise,
-            timeoutPromise,
-          ]);
-
-          // Set up connection event handlers
-          this.connection.on("error", (err) => {
-            logger.error(`RabbitMQ connection error: ${err.message}`);
-            this.handleConnectionFailure();
-          });
-
-          this.connection.on("close", () => {
-            logger.warn("RabbitMQ connection closed");
-            this.handleConnectionFailure();
-          });
-
-          // Create a channel
-          this.channel = await this.connection.createChannel();
-
-          // Set up exchanges and queues
-          await this.setupExchangesAndQueues();
-
-          // Reset reconnect attempts on successful connection
-          this.reconnectAttempts = 0;
-          this.connected = true;
-          this.connectionPromise = null;
-
-          logger.info("Successfully connected to RabbitMQ");
-          resolve();
-        } catch (error) {
-          logger.error(`Failed to connect to RabbitMQ: ${error.message}`);
-
-          // As a fallback, try a direct connection without URL modifications
-          try {
-            logger.info("Trying fallback connection method...");
-
-            // Attempt simplified connection with minimal options
-            this.connection = await amqp.connect(rabbitmqUrl, {
-              heartbeat: 30,
-            });
-
-            // Create a channel
-            this.channel = await this.connection.createChannel();
-
-            // Set up exchanges and queues
-            await this.setupExchangesAndQueues();
-
-            // Reset reconnect attempts on successful connection
-            this.reconnectAttempts = 0;
-            this.connected = true;
-            this.connectionPromise = null;
-
-            logger.info(
-              "Successfully connected to RabbitMQ with fallback method",
-            );
-            resolve();
-            return;
-          } catch (fallbackError) {
-            logger.error(
-              `Fallback connection also failed: ${fallbackError.message}`,
-            );
-          }
-
-          this.connected = false;
-          this.connectionPromise = null;
-          this.handleConnectionFailure();
-          reject(error);
-        }
-      } catch (outerError) {
-        logger.error(`Error in connect method: ${outerError.message}`);
+        logger.info("Successfully connected to RabbitMQ");
+      } catch (error) {
+        logger.error(`Failed to connect to RabbitMQ: ${error.message}`);
         this.connected = false;
         this.connectionPromise = null;
         this.handleConnectionFailure();
-        reject(outerError);
+        throw error;
       }
-    });
+    })();
 
     return this.connectionPromise;
   }
