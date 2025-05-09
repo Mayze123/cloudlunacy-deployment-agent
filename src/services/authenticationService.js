@@ -55,18 +55,6 @@ class AuthenticationService {
    */
   async authenticateAndConnect() {
     try {
-      // In development mode, skip the actual authentication
-      if (config.isDevelopment) {
-        logger.info("Development mode: Skipping backend authentication");
-        // Use a mock WebSocket URL for development that works with Docker
-        const wsUrl = "ws://host.docker.internal:8080/agent";
-        logger.info(`Using development WebSocket URL: ${wsUrl}`);
-        websocketService.establishConnection(wsUrl);
-        this.usingWebsocketFallback = true;
-        this.isConnected = true;
-        return;
-      }
-
       if (!config.api.backendUrl) {
         logger.error(
           "Backend URL not configured, cannot connect to backend services",
@@ -104,19 +92,8 @@ class AuthenticationService {
         // Extract connection details from response based on updated backend API
         const { wsUrl, rabbitmq } = response.data;
         logger.info(
-          "🚀 ~ AuthenticationService ~ authenticateAndConnect ~ rabbitmq:",
-          rabbitmq,
+          `🚀 ~ AuthenticationService ~ authenticateAndConnect ~ rabbitmq: ${rabbitmq}`,
         );
-
-        // Log the full authentication response for debugging (redact any sensitive info)
-        const responseCopy = { ...response.data };
-        if (responseCopy.rabbitmq && responseCopy.rabbitmq.url) {
-          responseCopy.rabbitmq.url = responseCopy.rabbitmq.url.replace(
-            /:([^:@]+)@/,
-            ":***@",
-          );
-        }
-        logger.info(`Authentication response: ${JSON.stringify(responseCopy)}`);
 
         // Try RabbitMQ connection first if rabbitmq details were provided
         if (rabbitmq && rabbitmq.url) {
