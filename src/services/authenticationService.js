@@ -293,14 +293,27 @@ class AuthenticationService {
    */
   async getEncryptionKey() {
     try {
-      // In a production environment, this would be more sophisticated
-      // For now, use a combination of server ID and API token
-      // This is just a simple implementation for demonstration
-      const key = config.serverId || "cloudlunacy-agent-key";
-      return key;
-    } catch (error) {
-      logger.warn(`Error generating encryption key: ${error.message}`);
+      // Use serverId as the primary key source for consistency
+      // This ensures stable encryption/decryption across agent restarts
+      if (config.serverId) {
+        logger.info("Using server ID for encryption key generation");
+        return config.serverId;
+      }
+
+      // Fallback to JWT only if serverId is not available
+      const jwtToken = config.api.jwt || process.env.AGENT_JWT;
+      if (jwtToken) {
+        logger.info("Using JWT for encryption key generation (fallback)");
+        return jwtToken;
+      }
+
+      logger.warn(
+        "No server ID or JWT available for encryption key generation",
+      );
       return "cloudlunacy-agent-fallback-key";
+    } catch (error) {
+      logger.error(`Failed to generate encryption key: ${error.message}`);
+      throw error;
     }
   }
 

@@ -136,14 +136,23 @@ class QueueService {
    */
   async getEncryptionKey() {
     try {
-      // In a real implementation, this would use a combination of:
-      // 1. Server hardware ID (machine-id, disk ID, etc)
-      // 2. The JWT token (if available)
-      // 3. Other server-specific data
+      // Use serverId as the primary key source for consistency with AuthenticationService
+      if (config.serverId) {
+        logger.info("Using server ID for encryption key generation");
+        return config.serverId;
+      }
 
-      // For now, we'll use a simple key based on the server ID
-      // This is a simplified implementation - in production use a more robust key generation
-      return config.serverId || "cloudlunacy-agent-key";
+      // Fallback to JWT only if serverId is not available
+      const jwtToken = config.api.jwt || process.env.AGENT_JWT;
+      if (jwtToken) {
+        logger.info("Using JWT for encryption key generation (fallback)");
+        return jwtToken;
+      }
+
+      logger.warn(
+        "No server ID or JWT available for encryption key generation",
+      );
+      return "cloudlunacy-agent-fallback-key";
     } catch (error) {
       logger.warn(`Could not generate secure encryption key: ${error.message}`);
       // Fallback to a basic key (not ideal for production)
