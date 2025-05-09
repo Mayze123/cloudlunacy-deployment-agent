@@ -306,7 +306,7 @@ class QueueService {
       });
 
       // Assert logs exchange for fanout publishing
-      await this.channel.assertExchange(this.queues.logs, "fanout", {
+      await this.channel.assertExchange(this.queues.logs, "direct", {
         durable: true,
       });
 
