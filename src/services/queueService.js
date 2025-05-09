@@ -29,18 +29,12 @@ class QueueService {
     this.initialized = false;
     this.heartbeatInterval = null;
 
-    // Queue and exchange names
-    this.exchanges = {
-      commands: "agent.commands",
-      results: "agent.results",
-      logs: "agent.logs",
-      heartbeats: "agent.heartbeats",
-    };
-
+    // Queue and exchange names - updated to match server-side expectations
     this.queues = {
       commands: `agent.commands.${config.serverId}`,
-      results: `agent.results.${config.serverId}`,
-      logs: `agent.logs.${config.serverId}`,
+      results: "agent.results", // Updated to send directly to the shared results queue
+      logs: "agent.logs",
+      heartbeats: "agent.heartbeats",
     };
   }
 
@@ -76,7 +70,6 @@ class QueueService {
     try {
       // First check if we have the URL in the environment variable (set during this session)
       if (process.env.RABBITMQ_URL) {
-        logger.info(`🚀 process.env.RABBITMQ_URL: ${process.env.RABBITMQ_URL}`);
         logger.info("Using RabbitMQ URL from environment variable");
         return process.env.RABBITMQ_URL;
       }
@@ -223,6 +216,19 @@ class QueueService {
         this.connected = true;
         this.connectionPromise = null;
 
+        // 6) Setup connection event handlers
+        this.connection.on("error", (err) => {
+          logger.error(`RabbitMQ connection error: ${err.message}`);
+          this.handleConnectionFailure();
+        });
+
+        this.connection.on("close", () => {
+          if (this.connected) {
+            logger.warn("RabbitMQ connection closed unexpectedly");
+            this.handleConnectionFailure();
+          }
+        });
+
         logger.info("Successfully connected to RabbitMQ");
       } catch (error) {
         logger.error(`Failed to connect to RabbitMQ: ${error.message}`);
@@ -281,21 +287,7 @@ class QueueService {
    */
   async setupExchangesAndQueues() {
     try {
-      // Create exchanges
-      await this.channel.assertExchange(this.exchanges.commands, "direct", {
-        durable: true,
-      });
-      await this.channel.assertExchange(this.exchanges.results, "direct", {
-        durable: true,
-      });
-      await this.channel.assertExchange(this.exchanges.logs, "direct", {
-        durable: true,
-      });
-      await this.channel.assertExchange(this.exchanges.heartbeats, "direct", {
-        durable: true,
-      });
-
-      // Create queues with TTL (messages expire after 7 days)
+      // Assert queues with TTL (messages expire after 7 days)
       await this.channel.assertQueue(this.queues.commands, {
         durable: true,
         arguments: {
@@ -304,6 +296,7 @@ class QueueService {
         },
       });
 
+      // Assert the shared results queue
       await this.channel.assertQueue(this.queues.results, {
         durable: true,
         arguments: {
@@ -312,32 +305,21 @@ class QueueService {
         },
       });
 
-      await this.channel.assertQueue(this.queues.logs, {
+      // Assert logs exchange for fanout publishing
+      await this.channel.assertExchange(this.queues.logs, "fanout", {
+        durable: true,
+      });
+
+      // Assert heartbeats queue
+      await this.channel.assertQueue(this.queues.heartbeats, {
         durable: true,
         arguments: {
-          "x-message-ttl": 3 * 24 * 60 * 60 * 1000, // 3 days for logs
+          "x-message-ttl": 60000, // 1 minute for heartbeats
           "x-queue-type": "classic",
         },
       });
 
-      // Bind queues to exchanges
-      await this.channel.bindQueue(
-        this.queues.commands,
-        this.exchanges.commands,
-        config.serverId,
-      );
-      await this.channel.bindQueue(
-        this.queues.results,
-        this.exchanges.results,
-        config.serverId,
-      );
-      await this.channel.bindQueue(
-        this.queues.logs,
-        this.exchanges.logs,
-        config.serverId,
-      );
-
-      logger.info("Successfully set up RabbitMQ exchanges and queues");
+      logger.info("Successfully set up RabbitMQ queues and exchanges");
     } catch (error) {
       logger.error(`Failed to set up exchanges and queues: ${error.message}`);
       throw error;
@@ -357,9 +339,9 @@ class QueueService {
     this.heartbeatInterval = setInterval(() => {
       if (this.connected && this.channel) {
         try {
-          this.channel.publish(
-            this.exchanges.heartbeats,
-            config.serverId,
+          // Send directly to the heartbeats queue
+          this.channel.sendToQueue(
+            this.queues.heartbeats,
             Buffer.from(
               JSON.stringify({
                 serverId: config.serverId,
@@ -404,7 +386,7 @@ class QueueService {
           try {
             // Parse the message
             const content = JSON.parse(msg.content.toString());
-            logger.info(`Received command: ${content.jobType || "unknown"}`);
+            logger.info(`Received command: ${content.actionType || "unknown"}`);
 
             try {
               // Process the message using the provided callback
@@ -417,7 +399,6 @@ class QueueService {
 
               // Reject the message and requeue it if it's a temporary error
               // For permanent errors, we should use nack with requeue=false
-              // or send it to a dead letter queue
               const isTemporaryError = !error.permanent;
               this.channel.nack(msg, false, isTemporaryError);
             }
@@ -453,9 +434,9 @@ class QueueService {
     }
 
     try {
-      const success = this.channel.publish(
-        this.exchanges.results,
-        config.serverId,
+      // Send directly to the results queue instead of publishing to an exchange
+      const success = this.channel.sendToQueue(
+        this.queues.results,
         Buffer.from(
           JSON.stringify({
             ...result,
@@ -472,6 +453,7 @@ class QueueService {
         );
       }
 
+      logger.info(`Result sent for job ${result.jobId}`);
       return success;
     } catch (error) {
       logger.error(`Failed to publish result: ${error.message}`);
@@ -490,9 +472,10 @@ class QueueService {
     }
 
     try {
+      // Publish to the logs exchange
       const success = this.channel.publish(
-        this.exchanges.logs,
-        config.serverId,
+        this.queues.logs,
+        "",
         Buffer.from(
           JSON.stringify({
             ...logMessage,
