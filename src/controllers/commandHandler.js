@@ -226,16 +226,15 @@ async function handleDatabaseJob(job, adapter) {
     );
 
     // Handle database operation using handleDatabaseManagement
-    const result = await databaseController.handleDatabaseManagement(
-      dbParams,
-      adapter,
-    );
+    await databaseController.handleDatabaseManagement(dbParams, adapter);
 
+    // Return success response since the handleDatabaseManagement doesn't return a value
+    // but communicates via the adapter
     return {
-      success: result.success || true,
+      success: true,
       jobId: job.id || job.jobId,
-      message: result.message || "Database operation processed",
-      details: result,
+      message: `Database ${dbParams.operation} operation processed for ${dbParams.dbType} database: ${dbParams.dbName}`,
+      timestamp: new Date().toISOString(),
     };
   } catch (error) {
     logger.error(`Database job failed: ${error.message}`);
