@@ -18,20 +18,47 @@ const messageHandler = require("./messageHandler");
  */
 async function processJob(job) {
   try {
-    logger.info(
-      `Processing job: ${JSON.stringify({
-        id: job.id || job.jobId,
-        type: job.jobType || job.type || job.command,
-        serverId: job.serverId,
-      })}`,
-    );
+    // Log fuller job details for debugging in case of malformed messages
+    logger.info(`Received command: ${job.actionType || job.jobType || job.type || job.command || "unknown"}`);
+    logger.info(`Processing job: ${JSON.stringify(job)}`);
 
     // Extract key job information
     const jobId = job.id || job.jobId;
-    const jobType = job.jobType || job.type || job.command;
+    
+    // Try different fields that could contain the command type
+    // Including actionType as used in core/commandHandler.js
+    let jobType = job.jobType || job.type || job.command || job.actionType;
+    
+    // If still no job type, try to infer it from other properties
+    if (!jobType) {
+      if (job.operation) {
+        // If it has an operation field, infer the type
+        if (job.operation.startsWith("db_") || job.operation.includes("database")) {
+          jobType = "database_" + job.operation.replace("db_", "");
+        } else if (job.operation.startsWith("repo_") || job.operation.includes("git")) {
+          jobType = "repo_" + job.operation.replace("repo_", "");
+        } else if (job.operation.includes("deploy")) {
+          jobType = "deployment";
+        }
+      } else if (job.databaseType || job.dbType) {
+        // If it has database-related fields, assume it's a database job
+        jobType = "database_install";
+      } else if (job.repositoryUrl || job.repoUrl) {
+        // If it has repo-related fields, assume it's a repo job
+        jobType = job.branch ? "repo_clone" : "repo_pull";
+      } else if (job.parameters && job.parameters.dbType) {
+        // Support for parameters structure as in core/commandHandler.js
+        jobType = "database_install";
+        job.dbType = job.parameters.dbType;
+      } else if (job.parameters && job.parameters.repositoryUrl) {
+        // Support for parameters structure as in core/commandHandler.js
+        jobType = "deployment";
+        job.repositoryUrl = job.parameters.repositoryUrl;
+      }
+    }
 
     if (!jobType) {
-      throw new Error("Job type/command not specified");
+      throw new Error("Job type/command not specified. Please ensure the message includes a 'jobType', 'type', 'command', or 'actionType' field.");
     }
 
     // Create a WebSocket-like adapter to reuse existing message handler code
@@ -42,12 +69,17 @@ async function processJob(job) {
       // Deployment commands
       case "deploy":
       case "deployment":
+      case "deploy_app":
         return await handleDeploymentJob(job, queueMsgAdapter);
 
       // Database commands
       case "database_create":
       case "database_install":
       case "database_setup":
+      case "install_database":
+      case "create_database":
+      case "backup_database":
+      case "restore_database":
         return await handleDatabaseJob(job, queueMsgAdapter);
 
       // Repository/Git commands
@@ -69,6 +101,7 @@ async function processJob(job) {
     return {
       success: false,
       error: error.message,
+      jobId: job.id || job.jobId,
       timestamp: new Date().toISOString(),
     };
   }
