@@ -19,23 +19,31 @@ const messageHandler = require("./messageHandler");
 async function processJob(job) {
   try {
     // Log fuller job details for debugging in case of malformed messages
-    logger.info(`Received command: ${job.actionType || job.jobType || job.type || job.command || "unknown"}`);
+    logger.info(
+      `Received command: ${job.actionType || job.jobType || job.type || job.command || "unknown"}`,
+    );
     logger.info(`Processing job: ${JSON.stringify(job)}`);
 
     // Extract key job information
     const jobId = job.id || job.jobId;
-    
+
     // Try different fields that could contain the command type
     // Including actionType as used in core/commandHandler.js
     let jobType = job.jobType || job.type || job.command || job.actionType;
-    
+
     // If still no job type, try to infer it from other properties
     if (!jobType) {
       if (job.operation) {
         // If it has an operation field, infer the type
-        if (job.operation.startsWith("db_") || job.operation.includes("database")) {
+        if (
+          job.operation.startsWith("db_") ||
+          job.operation.includes("database")
+        ) {
           jobType = "database_" + job.operation.replace("db_", "");
-        } else if (job.operation.startsWith("repo_") || job.operation.includes("git")) {
+        } else if (
+          job.operation.startsWith("repo_") ||
+          job.operation.includes("git")
+        ) {
           jobType = "repo_" + job.operation.replace("repo_", "");
         } else if (job.operation.includes("deploy")) {
           jobType = "deployment";
@@ -58,7 +66,9 @@ async function processJob(job) {
     }
 
     if (!jobType) {
-      throw new Error("Job type/command not specified. Please ensure the message includes a 'jobType', 'type', 'command', or 'actionType' field.");
+      throw new Error(
+        "Job type/command not specified. Please ensure the message includes a 'jobType', 'type', 'command', or 'actionType' field.",
+      );
     }
 
     // Create a WebSocket-like adapter to reuse existing message handler code
@@ -156,7 +166,7 @@ async function handleDeploymentJob(job, adapter) {
 
 /**
  * Handle database related jobs
- * @param {Object} job - The job object
+ * @param {Object} job - The job object from RabbitMQ
  * @param {Object} adapter - Queue message adapter (WebSocket-like)
  * @returns {Promise<Object>} Result of the database job
  */
@@ -164,40 +174,65 @@ async function handleDatabaseJob(job, adapter) {
   try {
     logger.info(`Processing database job: ${job.id || job.jobId}`);
 
-    // Map job parameters to database controller format
-    const dbParams = {
-      operationType: job.operation || job.operationType || "install",
-      databaseType: job.databaseType || "mongodb",
-      version: job.version || "latest",
-      name: job.databaseName || job.name,
-      credentials: job.credentials || {},
-      options: job.options || {},
-    };
+    // Standardize the job structure based on known patterns
+    let dbParams;
 
-    // Call database controller based on operation type
-    let result;
-    switch (dbParams.operationType.toLowerCase()) {
-      case "install":
-      case "setup":
-        result = await databaseController.setupDatabase(dbParams, adapter);
-        break;
-
-      case "backup":
-        result = await databaseController.backupDatabase(dbParams, adapter);
-        break;
-
-      case "restore":
-        result = await databaseController.restoreDatabase(dbParams, adapter);
-        break;
-
-      default:
-        throw new Error(
-          `Unsupported database operation: ${dbParams.operationType}`,
-        );
+    // Check which format we're dealing with
+    if (job.parameters) {
+      // Core command handler format (parameters object)
+      logger.info("Processing job in core format (parameters object)");
+      dbParams = {
+        operation:
+          job.actionType === "install_database"
+            ? "install"
+            : job.parameters.operation || "install",
+        dbType: job.parameters.dbType,
+        dbName: job.parameters.dbName,
+        username: job.parameters.username,
+        password: job.parameters.password,
+        options: job.parameters.options || {},
+        installationId: job.id,
+      };
+    } else if (job.databaseType || job.dbType) {
+      // Controller format (flat object)
+      logger.info("Processing job in controller format (flat object)");
+      dbParams = {
+        operation: job.operation || job.operationType || "install",
+        dbType: job.databaseType || job.dbType,
+        dbName: job.databaseName || job.name,
+        username: job.credentials?.username || job.username,
+        password: job.credentials?.password || job.password,
+        options: job.options || {},
+        installationId: job.id || job.jobId,
+      };
+    } else {
+      throw new Error(
+        "Invalid database job format: Missing required parameters",
+      );
     }
 
+    // Validate required parameters
+    const requiredParams = ["dbType", "dbName", "installationId"];
+    const missingParams = requiredParams.filter((param) => !dbParams[param]);
+
+    if (missingParams.length > 0) {
+      throw new Error(
+        `Missing required database parameters: ${missingParams.join(", ")}`,
+      );
+    }
+
+    logger.info(
+      `Database operation: ${dbParams.operation} on ${dbParams.dbType} database: ${dbParams.dbName}`,
+    );
+
+    // Handle database operation using handleDatabaseManagement
+    const result = await databaseController.handleDatabaseManagement(
+      dbParams,
+      adapter,
+    );
+
     return {
-      success: result.success,
+      success: result.success || true,
       jobId: job.id || job.jobId,
       message: result.message || "Database operation processed",
       details: result,
