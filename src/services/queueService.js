@@ -236,8 +236,20 @@ class QueueService {
 
           // URL encode the username, password, and vhost to handle special characters
           const encodedUsername = encodeURIComponent(username);
+          logger.info(
+            "🚀 ~ QueueService ~ this.connectionPromise=newPromise ~ const:",
+            encodedUsername,
+          );
           const encodedPassword = encodeURIComponent(password);
+          logger.info(
+            "🚀 ~ QueueService ~ this.connectionPromise=newPromise ~ encodedPassword:",
+            encodedPassword,
+          );
           const encodedVhost = encodeURIComponent(modifiedVhost);
+          logger.info(
+            "🚀 ~ QueueService ~ this.connectionPromise=newPromise ~ encodedVhost:",
+            encodedVhost,
+          );
 
           // Construct the modified URL
           const modifiedUrl = `amqp://${encodedUsername}:${encodedPassword}@${host}:${port}/${encodedVhost}`;
