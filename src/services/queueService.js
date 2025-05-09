@@ -76,6 +76,7 @@ class QueueService {
     try {
       // First check if we have the URL in the environment variable (set during this session)
       if (process.env.RABBITMQ_URL) {
+        logger.info(`🚀 process.env.RABBITMQ_URL: ${process.env.RABBITMQ_URL}`);
         logger.info("Using RabbitMQ URL from environment variable");
         return process.env.RABBITMQ_URL;
       }

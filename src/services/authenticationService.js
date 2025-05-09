@@ -217,6 +217,7 @@ class AuthenticationService {
    */
   async storeRabbitMQConfig(rabbitmqUrl) {
     try {
+      logger.info(`🚀 rabbitmqUrl: ${rabbitmqUrl}`);
       // Set environment variable for immediate use only - not persistent across restarts
       process.env.RABBITMQ_URL = rabbitmqUrl;
 
@@ -240,9 +241,7 @@ class AuthenticationService {
         await this.storeEncryptedCredentials(rabbitmqUrl);
       }
 
-      // Log success with redacted URL (hide password)
-      const redactedUrl = rabbitmqUrl.replace(/:([^:@]+)@/, ":***@");
-      logger.info(`Using RabbitMQ server: ${redactedUrl}`);
+      logger.info("RabbitMQ URL stored securely for this session");
     } catch (error) {
       logger.warn(`Failed to store RabbitMQ configuration: ${error.message}`);
       // Still keep the environment variable for this session only
@@ -351,87 +350,6 @@ class AuthenticationService {
     // This is a placeholder for integration with a secrets manager
     // In a real environment, this would connect to HashiCorp Vault, AWS Secrets Manager, etc.
     throw new Error("Secrets manager integration not implemented");
-  }
-
-  /**
-   * Store JWT token to file for persistence.
-   * @param {string} token - JWT token to store
-   */
-  async storeRabbitMQConfig(rabbitmqUrl) {
-    try {
-      // Set environment variable for immediate use only - not persistent across restarts
-      process.env.RABBITMQ_URL = rabbitmqUrl;
-
-      // For environments that support secure credential storage
-      if (process.env.USE_SECURE_CREDENTIAL_STORAGE === "true") {
-        try {
-          // In production environments, you might integrate with a secrets manager
-          // like HashiCorp Vault, AWS Secrets Manager, or similar service
-          // This is just a placeholder for that implementation
-          await this.storeInSecretManager("rabbitmq_url", rabbitmqUrl);
-          logger.info("RabbitMQ credentials stored in secure secrets manager");
-        } catch (secretError) {
-          logger.warn(
-            `Failed to store in secrets manager: ${secretError.message}`,
-          );
-          // Fall back to file-based storage with encryption
-          await this.storeEncryptedCredentials(rabbitmqUrl);
-        }
-      } else {
-        // Fall back to file-based storage with encryption
-        await this.storeEncryptedCredentials(rabbitmqUrl);
-      }
-
-      // Log success with redacted URL (hide password)
-      const redactedUrl = rabbitmqUrl.replace(/:([^:@]+)@/, ":***@");
-      logger.info(`Using RabbitMQ server: ${redactedUrl}`);
-    } catch (error) {
-      logger.warn(`Failed to store RabbitMQ configuration: ${error.message}`);
-      // Still keep the environment variable for this session only
-    }
-  }
-
-  /**
-   * Store credentials in an encrypted file
-   * @param {string} rabbitmqUrl - The RabbitMQ connection URL
-   * @returns {Promise<void>}
-   */
-  async storeEncryptedCredentials(rabbitmqUrl) {
-    try {
-      // For security, we save to a protected credentials file
-      const credentialsPath =
-        process.env.RABBITMQ_CREDENTIALS_PATH ||
-        "/opt/cloudlunacy/rabbitmq-credentials";
-
-      // Make sure credentials directory exists
-      const credentialsDir = credentialsPath.substring(
-        0,
-        credentialsPath.lastIndexOf("/"),
-      );
-      await fs.mkdir(credentialsDir, { recursive: true });
-
-      // Get or generate an encryption key based on a combination of:
-      // 1. Server-specific information (hardware ID, machine ID)
-      // 2. The JWT token (which is unique to this agent instance)
-      const encryptionKey = await this.getEncryptionKey();
-
-      // Encrypt the connection URL before storing it
-      const encryptedCredentials = this.encryptData(rabbitmqUrl, encryptionKey);
-
-      // Save encrypted connection URL with restricted permissions
-      await fs.writeFile(credentialsPath, encryptedCredentials, {
-        encoding: "utf8",
-        mode: 0o600, // Owner read/write only
-      });
-
-      logger.info(
-        `RabbitMQ connection details stored securely (encrypted) at ${credentialsPath}`,
-      );
-    } catch (error) {
-      logger.warn(
-        `Failed to store encrypted RabbitMQ credentials: ${error.message}`,
-      );
-    }
   }
 
   /**
