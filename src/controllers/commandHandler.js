@@ -36,9 +36,11 @@ class CommandHandler {
   /**
    * Process a job from the queue
    * @param {Object} job Job object from the queue
+   * @param {Object} msg Raw AMQP message object (optional)
+   * @param {Object} channel AMQP channel instance (optional)
    * @returns {Promise<Object>} Processing result
    */
-  async processJob(job) {
+  async processJob(job, msg = null, channel = null) {
     try {
       // Log job details for debugging
       logger.info(
@@ -46,11 +48,26 @@ class CommandHandler {
       );
       logger.debug(`Job details: ${JSON.stringify(job)}`);
 
+      // Log RPC metadata if available
+      if (msg && msg.properties) {
+        if (msg.properties.replyTo) {
+          logger.info(`Reply-to queue: ${msg.properties.replyTo}`);
+        }
+        if (msg.properties.correlationId) {
+          logger.info(`Correlation ID: ${msg.properties.correlationId}`);
+        }
+      }
+
       // Extract key job information
       const jobId = job.id || job.jobId;
 
       // Determine job type through various methods
-      const jobType = this.determineJobType(job);
+      let jobType = this.determineJobType(job);
+
+      // Check for "list_services" special case
+      if (job.actionType === "list_services") {
+        jobType = "list_services";
+      }
 
       if (!jobType) {
         throw new Error(
@@ -64,7 +81,39 @@ class CommandHandler {
       await this.logJobStart(jobId, jobType);
 
       // Process the job based on its determined type
-      return await this.routeJobToHandler(job, jobType, adapter);
+      const result = await this.routeJobToHandler(
+        job,
+        jobType,
+        adapter,
+        msg,
+        channel,
+      );
+
+      // If this was an RPC request (has replyTo and correlationId) and it's not already
+      // handled by the specific handler, send response here
+      if (
+        msg &&
+        channel &&
+        msg.properties &&
+        msg.properties.replyTo &&
+        msg.properties.correlationId &&
+        jobType !== "list_services"
+      ) {
+        try {
+          channel.sendToQueue(
+            msg.properties.replyTo,
+            Buffer.from(JSON.stringify(result)),
+            { correlationId: msg.properties.correlationId },
+          );
+          logger.info(
+            `Sent RPC response to ${msg.properties.replyTo} with correlationId ${msg.properties.correlationId}`,
+          );
+        } catch (rpcError) {
+          logger.error(`Failed to send RPC response: ${rpcError.message}`);
+        }
+      }
+
+      return result;
     } catch (error) {
       logger.error(`Error processing job: ${error.message}`);
 
@@ -72,6 +121,33 @@ class CommandHandler {
       if (job.id || job.jobId) {
         const jobId = job.id || job.jobId;
         await this.publishJobFailure(jobId, error);
+      }
+
+      // Send RPC error response if applicable
+      if (
+        msg &&
+        channel &&
+        msg.properties &&
+        msg.properties.replyTo &&
+        msg.properties.correlationId
+      ) {
+        try {
+          channel.sendToQueue(
+            msg.properties.replyTo,
+            Buffer.from(
+              JSON.stringify({
+                success: false,
+                error: error.message,
+                timestamp: new Date().toISOString(),
+              }),
+            ),
+            { correlationId: msg.properties.correlationId },
+          );
+        } catch (rpcError) {
+          logger.error(
+            `Failed to send RPC error response: ${rpcError.message}`,
+          );
+        }
       }
 
       return {
@@ -185,15 +261,21 @@ class CommandHandler {
    * @param {Object} job The job object
    * @param {string} jobType The job type
    * @param {Object} adapter Queue adapter for responses
+   * @param {Object} msg Raw AMQP message (optional)
+   * @param {Object} channel AMQP channel (optional)
    * @returns {Promise<Object>} Processing result
    */
-  async routeJobToHandler(job, jobType, adapter) {
+  async routeJobToHandler(job, jobType, adapter, msg = null, channel = null) {
     switch (jobType) {
       // Deployment commands
       case "deploy":
       case "deployment":
       case "deploy_app":
         return await this.handleDeploymentJob(job, adapter);
+
+      // List services command (RPC)
+      case "list_services":
+        return await this.handleListServicesJob(job, adapter, msg, channel);
 
       // Database commands
       case "database_create":
@@ -684,6 +766,132 @@ class CommandHandler {
           error: error.message,
         }),
       );
+
+      throw error;
+    }
+  }
+
+  /**
+   * Handle list_services RPC request
+   * @param {Object} job The job object
+   * @param {Object} adapter Queue adapter for responses
+   * @param {Object} msg Raw AMQP message
+   * @param {Object} channel AMQP channel
+   * @returns {Promise<Object>} Result of listing services
+   */
+  async handleListServicesJob(job, adapter, msg, channel) {
+    try {
+      logger.info(`Processing list_services request`);
+
+      if (
+        !msg ||
+        !channel ||
+        !msg.properties ||
+        !msg.properties.replyTo ||
+        !msg.properties.correlationId
+      ) {
+        throw new Error("Missing RPC metadata (replyTo or correlationId)");
+      }
+
+      // Use child_process to run docker ps command
+      const { exec } = require("child_process");
+
+      // Execute docker ps with custom format to get container name, image, and status
+      const dockerCommand =
+        'docker ps --format "{{.Names}}|{{.Image}}|{{.Status}}"';
+
+      exec(dockerCommand, async (error, stdout, stderr) => {
+        if (error) {
+          logger.error(`Error executing docker ps: ${error.message}`);
+
+          // Send error response back on the replyTo queue
+          channel.sendToQueue(
+            msg.properties.replyTo,
+            Buffer.from(
+              JSON.stringify({
+                success: false,
+                error: `Failed to list containers: ${error.message}`,
+                timestamp: new Date().toISOString(),
+              }),
+            ),
+            { correlationId: msg.properties.correlationId },
+          );
+
+          return;
+        }
+
+        if (stderr) {
+          logger.warn(`Docker command stderr: ${stderr}`);
+        }
+
+        // Parse the output to create an array of container objects
+        const containers = stdout
+          .trim()
+          .split("\n")
+          .filter((line) => line.trim() !== "")
+          .map((line) => {
+            const [name, image, status] = line.split("|");
+            return { name, image, status };
+          });
+
+        logger.info(`Found ${containers.length} running containers`);
+
+        // Send the container list as response
+        const response = {
+          success: true,
+          containers,
+          count: containers.length,
+          timestamp: new Date().toISOString(),
+        };
+
+        // Send response back to the replyTo queue with the correlationId
+        channel.sendToQueue(
+          msg.properties.replyTo,
+          Buffer.from(JSON.stringify(response)),
+          { correlationId: msg.properties.correlationId },
+        );
+
+        logger.info(
+          `Sent container list to ${msg.properties.replyTo} with correlationId ${msg.properties.correlationId}`,
+        );
+      });
+
+      // Return a success response to the agent's job processing system
+      // Note: The actual RPC response is sent in the exec callback
+      return {
+        success: true,
+        message: "list_services request is being processed",
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error) {
+      logger.error(`list_services job failed: ${error.message}`);
+
+      // Try to send RPC error response
+      if (
+        msg &&
+        channel &&
+        msg.properties &&
+        msg.properties.replyTo &&
+        msg.properties.correlationId
+      ) {
+        try {
+          channel.sendToQueue(
+            msg.properties.replyTo,
+            Buffer.from(
+              JSON.stringify({
+                success: false,
+                error: error.message,
+                timestamp: new Date().toISOString(),
+              }),
+            ),
+            { correlationId: msg.properties.correlationId },
+          );
+        } catch (rpcError) {
+          logger.error(
+            `Failed to send RPC error response: ${rpcError.message}`,
+          );
+        }
+      }
 
       throw error;
     }

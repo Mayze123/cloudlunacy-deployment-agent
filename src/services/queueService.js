@@ -200,13 +200,25 @@ class QueueService {
       try {
         // 1) Load the URL (env var or from encrypted storage)
         const rabbitmqUrl = await this.loadRabbitMQCredentials();
-        logger.info(`Connecting to RabbitMQ at ${rabbitmqUrl}`);
 
-        // 2) Let amqplib parse URL, handle vhost, username, password correctly
-        this.connection = await amqp.connect(rabbitmqUrl);
+        // Add connection options with heartbeats and connection timeout
+        const connectionOptions = {
+          heartbeat: 30, // Heartbeat every 30 seconds
+          connectionTimeout: 10000, // 10 seconds connection timeout
+        };
+
+        logger.info(
+          `Connecting to RabbitMQ at ${rabbitmqUrl} with heartbeat: ${connectionOptions.heartbeat}s`,
+        );
+
+        // 2) Let amqplib parse URL, handle vhost, username, password correctly with added options
+        this.connection = await amqp.connect(rabbitmqUrl, connectionOptions);
 
         // 3) Open a channel
         this.channel = await this.connection.createChannel();
+
+        // Set channel-level prefetch to avoid overloading the agent
+        await this.channel.prefetch(5);
 
         // 4) Declare your exchanges & queues
         await this.setupExchangesAndQueues();
@@ -229,7 +241,27 @@ class QueueService {
           }
         });
 
+        // 7) Setup channel-level error handling
+        this.channel.on("error", (err) => {
+          logger.error(`RabbitMQ channel error: ${err.message}`);
+          // Only handle channel recreation if connection is still alive
+          if (this.connected && this.connection) {
+            this.recreateChannel();
+          }
+        });
+
+        this.channel.on("close", () => {
+          logger.warn("RabbitMQ channel closed");
+          // Only handle channel recreation if connection is still alive
+          if (this.connected && this.connection) {
+            this.recreateChannel();
+          }
+        });
+
         logger.info("Successfully connected to RabbitMQ");
+
+        // Start heartbeats immediately after successful connection
+        this.startHeartbeats();
       } catch (error) {
         logger.error(`Failed to connect to RabbitMQ: ${error.message}`);
         this.connected = false;
@@ -278,6 +310,63 @@ class QueueService {
       logger.error(
         `Maximum reconnection attempts (${MAX_RECONNECT_ATTEMPTS}) reached. Giving up.`,
       );
+    }
+  }
+
+  /**
+   * Recreate the channel if it gets closed but the connection is still active
+   * @returns {Promise<void>}
+   */
+  async recreateChannel() {
+    try {
+      logger.info("Attempting to recreate RabbitMQ channel");
+
+      if (!this.connection || !this.connected) {
+        logger.warn("Cannot recreate channel: No active connection");
+        return;
+      }
+
+      // Create a new channel
+      this.channel = await this.connection.createChannel();
+
+      // Set up prefetch again to control concurrency
+      await this.channel.prefetch(5);
+
+      // Set up the exchanges and queues again
+      await this.setupExchangesAndQueues();
+
+      // Set up error handlers for the new channel
+      this.channel.on("error", (err) => {
+        logger.error(`RabbitMQ channel error: ${err.message}`);
+        if (this.connected && this.connection) {
+          this.recreateChannel();
+        }
+      });
+
+      this.channel.on("close", () => {
+        logger.warn("RabbitMQ channel closed");
+        if (this.connected && this.connection) {
+          this.recreateChannel();
+        }
+      });
+
+      logger.info("Successfully recreated RabbitMQ channel");
+
+      // If we had active consumers, we need to restart them
+      // This would be implemented if needed in a more complex setup
+    } catch (error) {
+      logger.error(`Failed to recreate channel: ${error.message}`);
+
+      // If channel recreation fails, it might be a sign of connection issues
+      // Wait and try again with backoff
+      setTimeout(() => {
+        if (this.connected && this.connection) {
+          this.recreateChannel();
+        } else {
+          // If the connection is gone, trigger full reconnection
+          this.handleConnectionFailure();
+        }
+      }, 5000); // 5 second delay before retry
     }
   }
 
@@ -390,7 +479,8 @@ class QueueService {
 
             try {
               // Process the message using the provided callback
-              await callback(content);
+              // Now passing the raw message and channel as well
+              await callback(content, msg, this.channel);
 
               // Acknowledge the message if processing was successful
               this.channel.ack(msg);
