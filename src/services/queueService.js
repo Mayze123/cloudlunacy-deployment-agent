@@ -434,6 +434,9 @@ class QueueService {
     }
 
     try {
+      // Enhanced logging for debugging
+      logger.debug(`Publishing result: ${JSON.stringify(result)}`);
+
       // Send directly to the results queue instead of publishing to an exchange
       const success = this.channel.sendToQueue(
         this.queues.results,
@@ -441,6 +444,8 @@ class QueueService {
           JSON.stringify({
             ...result,
             serverId: config.serverId,
+            // Add vpsId field for backend compatibility
+            vpsId: config.serverId,
             timestamp: new Date().toISOString(),
           }),
         ),
