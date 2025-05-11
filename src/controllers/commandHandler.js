@@ -197,6 +197,13 @@ class CommandHandler {
           jobType = "database_install";
         } else if (job.parameters.repositoryUrl) {
           jobType = "deployment";
+        } else if (
+          job.parameters.dbName &&
+          job.parameters.username &&
+          job.parameters.password
+        ) {
+          // Likely a database credential update
+          jobType = "update_mongodb_credentials";
         }
       }
     }
@@ -290,6 +297,9 @@ class CommandHandler {
 
       case "restore_database":
         return await this.handleDatabaseJob(job, adapter, "restore");
+
+      case "update_mongodb_credentials":
+        return await this.handleMongoCredentialsUpdateJob(job, adapter);
 
       // Repository/Git commands
       case "repo_clone":
@@ -892,6 +902,149 @@ class CommandHandler {
           );
         }
       }
+
+      throw error;
+    }
+  }
+
+  /**
+   * Handle MongoDB credentials update job
+   * @param {Object} job The job object
+   * @param {Object} adapter Queue adapter for responses
+   * @returns {Promise<Object>} Result of the credentials update
+   */
+  async handleMongoCredentialsUpdateJob(job, adapter) {
+    try {
+      logger.info(
+        `Processing MongoDB credentials update job: ${job.id || job.jobId}`,
+      );
+
+      // Extract parameters
+      const params = job.parameters || {};
+      const jobId = job.id || job.jobId;
+
+      // Log the start of the operation
+      await queueService.publishLog({
+        jobId: jobId,
+        content: `Starting MongoDB credentials update for database: ${params.dbName}`,
+        timestamp: new Date().toISOString(),
+      });
+
+      // Validate required parameters
+      const requiredParams = [
+        "databaseId",
+        "dbName",
+        "username",
+        "password",
+        "adminUser",
+        "adminPassword",
+      ];
+      const missingParams = requiredParams.filter((param) => !params[param]);
+
+      if (missingParams.length > 0) {
+        throw new Error(
+          `Missing required parameters: ${missingParams.join(", ")}`,
+        );
+      }
+
+      // MongoDB connection configuration
+      const { MongoClient } = require("mongodb");
+      const port = params.port || 27017;
+      const host = params.host || "localhost";
+      const adminUri = `mongodb://${params.adminUser}:${encodeURIComponent(params.adminPassword)}@${host}:${port}/admin?directConnection=true`;
+
+      logger.info(
+        `Connecting to MongoDB as admin to update credentials for user ${params.username}`,
+      );
+
+      // Connect to MongoDB as admin
+      const client = new MongoClient(adminUri, {
+        useNewUrlParser: true,
+        useUnifiedTopology: true,
+        serverSelectionTimeoutMS: 5000,
+      });
+
+      await client.connect();
+
+      // Execute user credential update commands
+      try {
+        const adminDb = client.db("admin");
+
+        // Check if the user exists
+        const users = await adminDb.command({
+          usersInfo: { user: params.username, db: params.dbName },
+        });
+        const userExists = users.users && users.users.length > 0;
+
+        if (userExists) {
+          // Update existing user
+          await adminDb.command({
+            updateUser: params.username,
+            pwd: params.password,
+            roles: [
+              { role: "readWrite", db: params.dbName },
+              { role: "dbAdmin", db: params.dbName },
+            ],
+          });
+
+          logger.info(
+            `Successfully updated MongoDB user ${params.username} in database ${params.dbName}`,
+          );
+        } else {
+          // Create new user
+          await adminDb.command({
+            createUser: params.username,
+            pwd: params.password,
+            roles: [
+              { role: "readWrite", db: params.dbName },
+              { role: "dbAdmin", db: params.dbName },
+            ],
+          });
+
+          logger.info(
+            `Created new MongoDB user ${params.username} in database ${params.dbName}`,
+          );
+        }
+
+        // Send success message via adapter
+        adapter.send(
+          JSON.stringify({
+            type: "database_operation_completed",
+            operation: "update_mongodb_credentials",
+            status: "success",
+            success: true,
+            message: `MongoDB user credentials updated successfully for ${params.username}`,
+            dbName: params.dbName,
+            databaseId: params.databaseId,
+            timestamp: new Date().toISOString(),
+          }),
+        );
+
+        return {
+          success: true,
+          jobId: jobId,
+          message: `MongoDB credentials updated successfully for user ${params.username} in database ${params.dbName}`,
+          timestamp: new Date().toISOString(),
+        };
+      } finally {
+        // Close the MongoDB connection
+        await client.close();
+        logger.info("MongoDB connection closed");
+      }
+    } catch (error) {
+      logger.error(`MongoDB credentials update job failed: ${error.message}`);
+
+      // Send failure message via adapter
+      adapter.send(
+        JSON.stringify({
+          type: "database_operation_failed",
+          operation: "update_mongodb_credentials",
+          status: "failed",
+          success: false,
+          error: error.message,
+          timestamp: new Date().toISOString(),
+        }),
+      );
 
       throw error;
     }
