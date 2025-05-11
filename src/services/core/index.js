@@ -152,9 +152,9 @@ async function initializeServices() {
  */
 async function setupCommandProcessor() {
   try {
-    await queueService.consumeCommands(async (job) => {
-      // Use the command handler to process the job
-      return await commandHandler.processJob(job);
+    await queueService.consumeCommands(async (job, msg, channel) => {
+      // Use the command handler to process the job, passing message properties and channel
+      return await commandHandler.processJob(job, msg, channel);
     });
 
     logger.info("Command processor successfully configured");

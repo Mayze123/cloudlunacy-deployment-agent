@@ -116,11 +116,13 @@ class AuthenticationService {
               // Start consuming messages from the command queue
               logger.info("Setting up command queue consumer");
               this.commandConsumer = await queueService.consumeCommands(
-                async (job) => {
+                async (job, msg, channel) => {
                   try {
-                    // Pass the job to the command handler for processing
+                    // Pass the job, message and channel to the command handler for processing
                     await require("../controllers/commandHandler").processJob(
                       job,
+                      msg,
+                      channel,
                     );
                   } catch (error) {
                     logger.error(
