@@ -782,7 +782,7 @@ class CommandHandler {
   async handleListServicesJob(job, adapter, msg, channel) {
     try {
       logger.info(`Processing list_services request`);
-      logger.info(`Incoming msg.properties:, ${msg.properties}`);
+      logger.info(`Incoming msg.properties:, ${msg}`);
       if (
         !msg ||
         !channel ||
