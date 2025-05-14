@@ -288,7 +288,7 @@ class CommandHandler {
       case "database_create":
       case "database_install":
       case "database_setup":
-      case "install_database":
+      case "install_database_system":
       case "create_database":
         return await this.handleDatabaseJob(job, adapter, "install");
 

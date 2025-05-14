@@ -67,7 +67,7 @@ class MessageHandler {
           databaseController.handleDatabaseManagement(message.payload, ws);
           break;
 
-        case "install_database":
+        case "install_database_system":
           logger.info(
             `Installing database: ${message.payload?.dbType || "unknown type"}`,
           );
