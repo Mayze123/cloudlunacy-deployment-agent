@@ -595,6 +595,54 @@ class QueueService {
   }
 
   /**
+   * Publish a container log chunk
+   * @param {Object} logChunk - Container log chunk to publish
+   * @param {string} correlationId - Correlation ID to use as routing key
+   * @returns {Promise<boolean>} Success status
+   */
+  async publishContainerLogChunk(logChunk, correlationId) {
+    if (!this.connected) {
+      await this.connect();
+    }
+
+    if (!correlationId) {
+      logger.error("Cannot publish container log chunk without correlationId");
+      return false;
+    }
+
+    try {
+      // Publish to the logs exchange with correlationId as the routing key
+      const success = this.channel.publish(
+        this.queues.logs,
+        correlationId, // Using correlationId as routing key for routing to the correct consumer
+        Buffer.from(
+          JSON.stringify({
+            ...logChunk,
+            serverId: config.serverId,
+            timestamp: logChunk.timestamp || new Date().toISOString(),
+          }),
+        ),
+        {
+          persistent: false, // Log chunks are ephemeral
+          expiration: "60000", // 60 seconds TTL for log chunks
+          contentType: "application/json",
+        },
+      );
+
+      if (!success) {
+        logger.warn(
+          "Channel write buffer is full, container log chunk was not published",
+        );
+      }
+
+      return success;
+    } catch (error) {
+      logger.error(`Failed to publish container log chunk: ${error.message}`);
+      return false;
+    }
+  }
+
+  /**
    * Shutdown the queue service
    * @returns {Promise<boolean>} Success status
    */

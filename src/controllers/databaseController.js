@@ -171,17 +171,59 @@ class DatabaseController {
 
       // Send success response
       if (operation === "install") {
-        // For installation operations, send a specific database_installed message
+        // For installation operations, get container details including system ID
+        let containerDetails = {};
+
+        // Get container details based on database type
+        if (dbType === "mongodb") {
+          try {
+            const mongodbService = require("../services/mongodbService");
+            containerDetails = await mongodbService.getContainerDetails();
+            logger.info(
+              `Retrieved MongoDB container details: ID=${containerDetails.containerId}, SystemID=${containerDetails.systemId}`,
+            );
+          } catch (containerError) {
+            logger.warn(
+              `Failed to get container details: ${containerError.message}`,
+            );
+          }
+        }
+
+        // Send a specific database_installed message with container system IDs
         this.sendResponse(ws, {
           type: "database_installed",
           success: true,
           installationId: payload.installationId,
           dbType,
+          containerDetails: containerDetails.success
+            ? {
+                containerId: containerDetails.containerId,
+                containerName: containerDetails.containerName,
+                systemId: containerDetails.systemId,
+                status: containerDetails.status,
+                image: containerDetails.image,
+                createdAt: containerDetails.createdAt,
+                platform: containerDetails.platform,
+                ipAddress: containerDetails.ipAddress,
+              }
+            : null,
           connectionDetails: {
             dbName,
             ...result,
           },
         });
+
+        // Also send a container status update with detailed information
+        if (containerDetails.success) {
+          this.sendResponse(ws, {
+            type: "container_status_update",
+            success: true,
+            installationId: payload.installationId,
+            dbType,
+            dbName,
+            containerDetails,
+          });
+        }
       } else {
         // For other operations, send the standard operation completed message
         this.sendResponse(ws, {
@@ -389,6 +431,35 @@ class DatabaseController {
         dbName: dbPayload.dbName,
       });
 
+      // Get container details after successful deployment
+      if (result.success) {
+        try {
+          const containerDetails = await mongodbService.getContainerDetails();
+
+          if (containerDetails.success) {
+            logger.info(
+              `Retrieved MongoDB container details for deployment: ID=${containerDetails.containerId}, SystemID=${containerDetails.systemId}`,
+            );
+
+            // Add container details to result
+            result.containerDetails = {
+              containerId: containerDetails.containerId,
+              containerName: containerDetails.containerName,
+              systemId: containerDetails.systemId,
+              status: containerDetails.status,
+              image: containerDetails.image,
+              createdAt: containerDetails.createdAt,
+              platform: containerDetails.platform,
+              ipAddress: containerDetails.ipAddress,
+            };
+          }
+        } catch (containerError) {
+          logger.warn(
+            `Failed to get container details for deployment: ${containerError.message}`,
+          );
+        }
+      }
+
       return result;
     } catch (error) {
       logger.error(`MongoDB deployment failed: ${error.message}`);
@@ -415,13 +486,25 @@ class DatabaseController {
         {},
       );
 
-      // Get MongoDB container details if installed
+      // Get MongoDB container details with system IDs if installed
       let containerDetails = { success: false, running: false };
       if (installationStatus.success && installationStatus.installed) {
-        containerDetails = await databaseManager.checkMongoDBContainer();
+        try {
+          // Use the enhanced container details method instead of basic check
+          containerDetails = await mongodbService.getContainerDetails();
+          logger.info(
+            `Retrieved MongoDB container details for status check: ID=${containerDetails.containerId}, SystemID=${containerDetails.systemId}`,
+          );
+        } catch (containerError) {
+          logger.warn(
+            `Failed to get container details for status check: ${containerError.message}`,
+          );
+          // Fall back to basic container check if detailed check fails
+          containerDetails = await databaseManager.checkMongoDBContainer();
+        }
       }
 
-      // Send status update response
+      // Send detailed status update response with system IDs
       this.sendResponse(ws, {
         type: "mongodb_status_update",
         success: true,

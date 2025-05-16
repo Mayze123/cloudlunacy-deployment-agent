@@ -631,6 +631,124 @@ services:
       return { success: false, message: error.message };
     }
   }
+
+  /**
+   * Get MongoDB container details including container ID and system information
+   * @returns {Promise<Object>} Container details including ID and system info
+   */
+  async getContainerDetails() {
+    try {
+      logger.info("Getting MongoDB container details");
+      const { exec } = require("child_process");
+
+      return new Promise((resolve, reject) => {
+        // Using a more detailed format string to get container ID, name, status, and created time
+        exec(
+          'docker ps -a -f name=cloudlunacy-mongodb --format "{{.ID}}|{{.Names}}|{{.Status}}|{{.CreatedAt}}|{{.Image}}"',
+          (error, stdout, stderr) => {
+            if (error) {
+              logger.error(`Error getting container details: ${error.message}`);
+              return reject(error);
+            }
+
+            if (stderr) {
+              logger.warn(`Docker command stderr: ${stderr}`);
+            }
+
+            const containerLines = stdout.trim().split("\n");
+            if (containerLines.length === 0 || containerLines[0] === "") {
+              logger.info("No MongoDB container found");
+              return resolve({
+                success: false,
+                message: "MongoDB container not found",
+              });
+            }
+
+            // Parse container details
+            const containerInfo = containerLines[0].split("|");
+            if (containerInfo.length < 5) {
+              logger.warn("Invalid container detail format returned");
+              return resolve({
+                success: false,
+                message: "Invalid container detail format",
+              });
+            }
+
+            const [containerId, containerName, status, createdAt, image] =
+              containerInfo;
+
+            // Get additional system information about the container
+            exec(
+              `docker inspect ${containerId}`,
+              (inspectError, inspectStdout, inspectStderr) => {
+                if (inspectError) {
+                  logger.warn(
+                    `Error inspecting container: ${inspectError.message}`,
+                  );
+                  // Still return basic information even if inspect fails
+                  return resolve({
+                    success: true,
+                    containerId,
+                    containerName,
+                    status,
+                    createdAt,
+                    image,
+                  });
+                }
+
+                try {
+                  const inspectData = JSON.parse(inspectStdout);
+                  if (inspectData.length === 0) {
+                    throw new Error("Empty inspect data");
+                  }
+
+                  // Extract useful system information
+                  const containerDetails = inspectData[0];
+                  const systemId = containerDetails.Id;
+                  const platform = containerDetails.Platform || "linux";
+                  const hostConfig = containerDetails.HostConfig || {};
+                  const networkMode = hostConfig.NetworkMode || "default";
+                  const ports = containerDetails.NetworkSettings?.Ports || {};
+                  const ipAddress =
+                    containerDetails.NetworkSettings?.IPAddress || "unknown";
+
+                  return resolve({
+                    success: true,
+                    containerId,
+                    containerName,
+                    status,
+                    createdAt,
+                    image,
+                    systemId,
+                    platform,
+                    networkMode,
+                    ports: JSON.stringify(ports),
+                    ipAddress,
+                  });
+                } catch (parseError) {
+                  logger.warn(
+                    `Error parsing inspect data: ${parseError.message}`,
+                  );
+                  // Return basic info if parsing fails
+                  return resolve({
+                    success: true,
+                    containerId,
+                    containerName,
+                    status,
+                    createdAt,
+                    image,
+                  });
+                }
+              },
+            );
+          },
+        );
+      });
+    } catch (error) {
+      logger.error(`Failed to get container details: ${error.message}`);
+      return { success: false, message: error.message };
+    }
+  }
 }
 
 module.exports = new MongoDBService();

@@ -284,6 +284,23 @@ class CommandHandler {
       case "list_services":
         return await this.handleListServicesJob(job, adapter, msg, channel);
 
+      // Container log streaming
+      case "stream_container_logs":
+        return await this.handleStreamContainerLogsJob(
+          job,
+          adapter,
+          msg,
+          channel,
+        );
+
+      case "stop_container_log_stream":
+        return await this.handleStopContainerLogStreamJob(
+          job,
+          adapter,
+          msg,
+          channel,
+        );
+
       // Database commands
       case "database_create":
       case "database_install":
@@ -806,9 +823,9 @@ class CommandHandler {
       // Use child_process to run docker ps command
       const { exec } = require("child_process");
 
-      // Execute docker ps with custom format to get container name, image, and status
+      // Update format to include container ID (added .ID at the beginning)
       const dockerCommand =
-        'docker ps --format "{{.Names}}|{{.Image}}|{{.Status}}"';
+        'docker ps --format "{{.ID}}|{{.Names}}|{{.Image}}|{{.Status}}"';
 
       exec(dockerCommand, async (error, stdout, stderr) => {
         if (error) {
@@ -834,14 +851,14 @@ class CommandHandler {
           logger.warn(`Docker command stderr: ${stderr}`);
         }
 
-        // Parse the output to create an array of container objects
+        // Parse the output to create an array of container objects with IDs
         const containers = stdout
           .trim()
           .split("\n")
           .filter((line) => line.trim() !== "")
           .map((line) => {
-            const [name, image, status] = line.split("|");
-            return { name, image, status };
+            const [id, name, image, status] = line.split("|");
+            return { id, name, image, status };
           });
 
         logger.info(`Found ${containers.length} running containers`);
@@ -1045,6 +1062,193 @@ class CommandHandler {
           timestamp: new Date().toISOString(),
         }),
       );
+
+      throw error;
+    }
+  }
+
+  /**
+   * Handle stream_container_logs command
+   * @param {Object} job The job object with container log streaming parameters
+   * @param {Object} adapter Queue adapter for responses
+   * @param {Object} msg Raw AMQP message
+   * @param {Object} channel AMQP channel
+   * @returns {Promise<Object>} Result of starting log stream
+   */
+  async handleStreamContainerLogsJob(job, adapter, msg, channel) {
+    try {
+      logger.info(
+        `Processing stream_container_logs request for container ${job.containerId || job.parameters?.containerId}`,
+      );
+
+      // Import the containerLogService
+      const containerLogService = require("../services/containerLogService");
+
+      // Extract parameters - support both flat structure and parameters object
+      const containerId = job.containerId || job.parameters?.containerId;
+      const streamId = job.streamId || job.parameters?.streamId;
+      const options = job.options || job.parameters?.options || {};
+
+      // Use correlationId from the message for routing log chunks
+      const correlationId = msg?.properties?.correlationId;
+
+      // Validate required parameters
+      if (!containerId) {
+        throw new Error("Missing required parameter: containerId");
+      }
+
+      if (!streamId) {
+        throw new Error("Missing required parameter: streamId");
+      }
+
+      if (!correlationId) {
+        throw new Error("Missing correlationId from message properties");
+      }
+
+      logger.info(
+        `Starting container log stream for ${containerId} with stream ID ${streamId}`,
+      );
+
+      // Start the log stream
+      const result = await containerLogService.startContainerLogStream({
+        containerId,
+        streamId,
+        correlationId,
+        options,
+      });
+
+      // Send response if this was an RPC request
+      if (msg && channel && msg.properties && msg.properties.replyTo) {
+        channel.sendToQueue(
+          msg.properties.replyTo,
+          Buffer.from(JSON.stringify(result)),
+          { correlationId: correlationId },
+        );
+
+        logger.info(
+          `Sent log stream start response to ${msg.properties.replyTo}`,
+        );
+      }
+
+      return result;
+    } catch (error) {
+      logger.error(`Failed to start container log stream: ${error.message}`);
+
+      // Send error response if this was an RPC request
+      if (
+        msg &&
+        channel &&
+        msg.properties &&
+        msg.properties.replyTo &&
+        msg.properties.correlationId
+      ) {
+        try {
+          channel.sendToQueue(
+            msg.properties.replyTo,
+            Buffer.from(
+              JSON.stringify({
+                success: false,
+                error: error.message,
+                timestamp: new Date().toISOString(),
+              }),
+            ),
+            { correlationId: msg.properties.correlationId },
+          );
+        } catch (rpcError) {
+          logger.error(
+            `Failed to send RPC error response: ${rpcError.message}`,
+          );
+        }
+      }
+
+      throw error;
+    }
+  }
+
+  /**
+   * Handle stop_container_log_stream command
+   * @param {Object} job The job object with stream ID to stop
+   * @param {Object} adapter Queue adapter for responses
+   * @param {Object} msg Raw AMQP message
+   * @param {Object} channel AMQP channel
+   * @returns {Promise<Object>} Result of stopping log stream
+   */
+  async handleStopContainerLogStreamJob(job, adapter, msg, channel) {
+    try {
+      // Extract parameters - support both flat structure and parameters object
+      const streamId = job.streamId || job.parameters?.streamId;
+      const reason =
+        job.reason || job.parameters?.reason || "Stream stopped by request";
+
+      // Use correlationId from the message for routing log chunks
+      const correlationId = msg?.properties?.correlationId;
+
+      // Validate required parameters
+      if (!streamId) {
+        throw new Error("Missing required parameter: streamId");
+      }
+
+      if (!correlationId) {
+        throw new Error("Missing correlationId from message properties");
+      }
+
+      logger.info(
+        `Processing stop_container_log_stream request for stream ID: ${streamId}`,
+      );
+
+      // Import the containerLogService
+      const containerLogService = require("../services/containerLogService");
+
+      // Stop the log stream
+      const result = await containerLogService.stopContainerLogStream(
+        streamId,
+        correlationId,
+        reason,
+      );
+
+      // Send response if this was an RPC request
+      if (msg && channel && msg.properties && msg.properties.replyTo) {
+        channel.sendToQueue(
+          msg.properties.replyTo,
+          Buffer.from(JSON.stringify(result)),
+          { correlationId: correlationId },
+        );
+
+        logger.info(
+          `Sent log stream stop response to ${msg.properties.replyTo}`,
+        );
+      }
+
+      return result;
+    } catch (error) {
+      logger.error(`Failed to stop container log stream: ${error.message}`);
+
+      // Send error response if this was an RPC request
+      if (
+        msg &&
+        channel &&
+        msg.properties &&
+        msg.properties.replyTo &&
+        msg.properties.correlationId
+      ) {
+        try {
+          channel.sendToQueue(
+            msg.properties.replyTo,
+            Buffer.from(
+              JSON.stringify({
+                success: false,
+                error: error.message,
+                timestamp: new Date().toISOString(),
+              }),
+            ),
+            { correlationId: msg.properties.correlationId },
+          );
+        } catch (rpcError) {
+          logger.error(
+            `Failed to send RPC error response: ${rpcError.message}`,
+          );
+        }
+      }
 
       throw error;
     }

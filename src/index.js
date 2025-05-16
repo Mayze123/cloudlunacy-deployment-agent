@@ -100,6 +100,17 @@ function setupGracefulShutdown(healthServer) {
       logger.info("Health check server shut down");
     }
 
+    // Shutdown container log streams if they exist
+    try {
+      const containerLogService = require("./services/containerLogService");
+      await containerLogService.shutdownAllStreams();
+      logger.info("Container log streams shut down");
+    } catch (error) {
+      logger.warn(
+        `Error shutting down container log streams: ${error.message}`,
+      );
+    }
+
     // Shutdown all core services
     await coreServices.shutdownServices();
 
