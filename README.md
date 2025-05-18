@@ -11,6 +11,10 @@ sha256sum -c install-agent.sh.sha256
 
 sudo bash install-agent.sh <AGENT_TOKEN> <SERVER_ID> [BACKEND_URL]
 
+# Install with Nixpacks support for optimized container builds
+
+INSTALL_NIXPACKS=true sudo bash install-agent.sh <AGENT_TOKEN> <SERVER_ID> [BACKEND_URL]
+
 # The agent is installed without any database.
 
 # To install databases, use the database management commands after installation.

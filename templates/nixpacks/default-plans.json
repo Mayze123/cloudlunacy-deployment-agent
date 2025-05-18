@@ -1,0 +1,87 @@
+{
+  "node": {
+    "name": "Node.js Default Configuration",
+    "providers": ["node"],
+    "phases": {
+      "setup": {
+        "cmds": ["npm ci --only=production"]
+      },
+      "build": {
+        "cmds": ["npm run build"]
+      }
+    },
+    "start": "npm start"
+  },
+  "react": {
+    "name": "React Application",
+    "providers": ["node"],
+    "phases": {
+      "setup": {
+        "cmds": ["npm ci"]
+      },
+      "build": {
+        "cmds": ["npm run build"]
+      },
+      "install": {
+        "cmds": ["npm install -g serve"]
+      }
+    },
+    "start": "serve -s build"
+  },
+  "nextjs": {
+    "name": "Next.js Application",
+    "providers": ["node"],
+    "phases": {
+      "setup": {
+        "cmds": ["npm ci"]
+      },
+      "build": {
+        "cmds": ["npm run build"]
+      }
+    },
+    "start": "npm start"
+  },
+  "express": {
+    "name": "Express.js Server",
+    "providers": ["node"],
+    "phases": {
+      "setup": {
+        "cmds": ["npm ci --only=production"]
+      }
+    },
+    "start": "node server.js"
+  },
+  "python": {
+    "name": "Python Application",
+    "providers": ["python"],
+    "phases": {
+      "setup": {
+        "cmds": ["pip install --no-cache-dir -r requirements.txt"]
+      }
+    },
+    "start": "python app.py"
+  },
+  "django": {
+    "name": "Django Application",
+    "providers": ["python"],
+    "phases": {
+      "setup": {
+        "cmds": [
+          "pip install --no-cache-dir -r requirements.txt",
+          "python manage.py collectstatic --noinput"
+        ]
+      }
+    },
+    "start": "gunicorn myproject.wsgi:application --bind 0.0.0.0:$PORT"
+  },
+  "ruby": {
+    "name": "Ruby Application",
+    "providers": ["ruby"],
+    "phases": {
+      "setup": {
+        "cmds": ["bundle install"]
+      }
+    },
+    "start": "ruby app.rb"
+  }
+}

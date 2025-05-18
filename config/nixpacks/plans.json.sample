@@ -1,0 +1,15 @@
+{
+  "node": {
+    "name": "Node.js Production Configuration",
+    "providers": ["node"],
+    "phases": {
+      "setup": {
+        "cmds": ["npm ci --only=production"]
+      },
+      "build": {
+        "cmds": ["npm run build"]
+      }
+    },
+    "start": "node index.js"
+  }
+}
