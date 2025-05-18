@@ -19,7 +19,7 @@ class DeployController {
    */
   getDeployer() {
     if (!this.deployer) {
-      this.deployer = new ZeroDowntimeDeployer();
+      this.deployer = ZeroDowntimeDeployer; // ZeroDowntimeDeployer is already an instance
     }
     return this.deployer;
   }
