@@ -37,17 +37,17 @@ class RepositoryController {
 
       if (payload.githubToken) {
         // Clone with GitHub token
-        gitCommand = `git clone https://${payload.githubToken}@github.com/${payload.repoOwner}/${payload.repoName}.git --depth 1 --branch ${payload.branch || "main"} ${tempDir}`;
+        gitCommand = `git clone https://${payload.githubToken}@github.com/${payload.repoOwner}/${payload.repoName}.git --depth 1 --branch ${payload.branch} ${tempDir}`;
       } else if (payload.sshKey) {
         // Clone with SSH key
         const sshKeyPath = path.join(os.tmpdir(), `github-ssh-${Date.now()}`);
         await fs.writeFile(sshKeyPath, payload.sshKey, { mode: 0o600 });
 
         // Use GIT_SSH_COMMAND to specify the identity file
-        gitCommand = `GIT_SSH_COMMAND="ssh -i ${sshKeyPath} -o StrictHostKeyChecking=no" git clone git@github.com:${payload.repoOwner}/${payload.repoName}.git --depth 1 --branch ${payload.branch || "main"} ${tempDir}`;
+        gitCommand = `GIT_SSH_COMMAND="ssh -i ${sshKeyPath} -o StrictHostKeyChecking=no" git clone git@github.com:${payload.repoOwner}/${payload.repoName}.git --depth 1 --branch ${payload.branch} ${tempDir}`;
       } else {
         // Clone public repository
-        gitCommand = `git clone https://github.com/${payload.repoOwner}/${payload.repoName}.git --depth 1 --branch ${payload.branch || "main"} ${tempDir}`;
+        gitCommand = `git clone https://github.com/${payload.repoOwner}/${payload.repoName}.git --depth 1 --branch ${payload.branch} ${tempDir}`;
       }
 
       // Execute git clone
@@ -63,7 +63,7 @@ class RepositoryController {
         success: true,
         repoOwner: payload.repoOwner,
         repoName: payload.repoName,
-        branch: payload.branch || "main",
+        branch: payload.branch,
         accessGranted,
         appType,
         requestId: payload.requestId,
@@ -78,7 +78,7 @@ class RepositoryController {
         success: false,
         repoOwner: payload.repoOwner,
         repoName: payload.repoName,
-        branch: payload.branch || "main",
+        branch: payload.branch,
         accessGranted: false,
         error: errorMessage,
         requestId: payload.requestId,

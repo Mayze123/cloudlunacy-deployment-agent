@@ -330,7 +330,7 @@ class ZeroDowntimeDeployer {
       jobId: Joi.string().optional(), // Optional jobId for API calls that need it
       appType: Joi.string().required(),
       repositoryUrl: Joi.string().required(),
-      branch: Joi.string().default("main"),
+      branch: Joi.string(),
       githubToken: Joi.string().required(),
       environment: Joi.string().default("production"),
       serviceName: Joi.string().required(),

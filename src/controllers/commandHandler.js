@@ -505,7 +505,7 @@ class CommandHandler {
             jobId: jobId, // Keep track of the original jobId too
             appType: job.parameters.appType || "nodejs",
             repositoryUrl: job.parameters.repositoryUrl,
-            branch: job.parameters.branch || "main",
+            branch: job.parameters.branch,
             githubToken: job.parameters.githubToken,
             environment: job.parameters.environment || "production",
             // Use serviceName directly or fall back to legacy appName field for backward compatibility
@@ -532,7 +532,7 @@ class CommandHandler {
         // Handle job in controller format (flat object)
         const deploymentParams = {
           repositoryUrl: job.repositoryUrl || job.repoUrl,
-          branch: job.branch || "main",
+          branch: job.branch,
           deploymentId: job.deploymentId || job.id || job.jobId,
           projectName: job.projectName || job.name,
           environmentName:
@@ -667,7 +667,7 @@ class CommandHandler {
           job.operation || (job.jobType === "repo_clone" ? "clone" : "pull"),
         repositoryUrl:
           job.parameters?.repositoryUrl || job.repositoryUrl || job.repoUrl,
-        branch: job.parameters?.branch || job.branch || "main",
+        branch: job.parameters?.branch || job.branch,
         targetPath: job.parameters?.targetPath || job.targetPath || job.path,
         credentials: job.parameters?.credentials || job.credentials || {},
       };
