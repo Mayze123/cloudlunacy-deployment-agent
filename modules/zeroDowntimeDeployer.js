@@ -3,6 +3,7 @@ const logger = require("../utils/logger");
 const fs = require("fs").promises;
 const path = require("path");
 const TemplateHandler = require("../utils/templateHandler");
+const NixpacksBuilder = require("../utils/nixpacksBuilder");
 const { ensureDeploymentPermissions } = require("../utils/permissionCheck");
 const apiClient = require("../utils/apiClient");
 const EnvironmentManager = require("../utils/environmentManager");
@@ -27,6 +28,11 @@ class ZeroDowntimeDeployer {
       process.env.TEMPLATES_DIR || "/opt/cloudlunacy/templates";
     this.deploymentLocks = new Set();
     this.STANDARD_CONTAINER_PORT = 8080;
+    this.useNixpacks = true;
+    // this.useNixpacks = process.env.USE_NIXPACKS === "true";
+    this.nixpacksConfigDir =
+      process.env.NIXPACKS_CONFIG_DIR ||
+      path.join(this.templatesDir, "nixpacks");
   }
 
   validatePrerequisites = async () => {
@@ -782,48 +788,144 @@ class ZeroDowntimeDeployer {
         }
       }
 
-      // Now generate deployment files with updated port if necessary
-      if (!this.templateHandler) {
-        this.templateHandler = new TemplateHandler(
-          this.templatesDir,
-          require("../deployConfig.json"),
+      // Define the image name
+      const imageName = `${serviceName}:latest`;
+
+      // Setup health check
+      const health = {
+        checkPath: "/health",
+        interval: "30s",
+        timeout: "5s",
+        retries: 3,
+        start_period: "40s",
+      };
+
+      if (this.useNixpacks) {
+        // Use Nixpacks to build the Docker image
+        logger.info(
+          `Using Nixpacks to build ${serviceName} (${payload.appType})`,
+        );
+
+        // Load environment variables from env file
+        const envContent = await fs.readFile(envFilePath, "utf-8");
+        const envVars = {};
+        envContent.split("\n").forEach((line) => {
+          if (line && !line.startsWith("#")) {
+            const [key, ...valueParts] = line.split("=");
+            if (key && valueParts.length) {
+              envVars[key.trim()] = valueParts.join("=").trim();
+            }
+          }
+        });
+
+        // Add PORT to environment variables
+        envVars["PORT"] = containerPort.toString();
+
+        // Check if there are additional ports defined in the payload
+        const additionalPorts = payload.additionalPorts || [];
+
+        // Create a custom build plan based on app type
+        const buildPlan = NixpacksBuilder.createBuildPlan({
+          appType: payload.appType,
+          containerPort,
+          healthCheck: health,
+          additionalPorts,
+        });
+
+        // Build the image with Nixpacks
+        await NixpacksBuilder.buildImage({
+          projectDir: deployDir,
+          imageName,
+          envVars,
+          buildPlan,
+        });
+
+        // Create a minimal docker-compose.yml file directly
+        let portsConfig = `      - "${hostPort}:${containerPort}"`;
+
+        // Add additional port mappings if specified
+        if (additionalPorts && additionalPorts.length > 0) {
+          additionalPorts.forEach((portConfig) => {
+            portsConfig += `\n      - "${portConfig.hostPort}:${portConfig.port}"`;
+          });
+        }
+
+        const dockerComposeContent = `
+version: '3.8'
+
+services:
+  ${serviceName}:
+    container_name: ${serviceName}
+    image: ${imageName}
+    restart: unless-stopped
+    ports:
+${portsConfig}
+    env_file:
+      - "${path.basename(envFilePath)}"
+    networks:
+      - traefik-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.${serviceName}.rule=Host(\`${domain}\`)"
+      - "traefik.http.routers.${serviceName}.entrypoints=web,websecure"
+      - "traefik.http.routers.${serviceName}.tls.certresolver=letsencrypt"
+      - "traefik.http.services.${serviceName}.loadbalancer.server.port=${containerPort}"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${containerPort}/health"]
+      interval: ${health.interval}
+      timeout: ${health.timeout}
+      retries: ${health.retries}
+      start_period: ${health.start_period}
+
+networks:
+  traefik-network:
+    external: true
+`;
+
+        await fs.writeFile(
+          path.join(deployDir, "docker-compose.yml"),
+          dockerComposeContent,
+        );
+      } else {
+        // Use the traditional template approach for backward compatibility
+        // Now generate deployment files with updated port if necessary
+        if (!this.templateHandler) {
+          this.templateHandler = new TemplateHandler(
+            this.templatesDir,
+            require("../deployConfig.json"),
+          );
+        }
+
+        const files = await this.templateHandler.generateDeploymentFiles({
+          appType: payload.appType,
+          appName: serviceName,
+          environment,
+          hostPort, // This may be a new port if we had to find an alternative
+          containerPort,
+          domain,
+          envFile: path.basename(envFilePath),
+          health,
+        });
+
+        // Write the files
+        await Promise.all([
+          fs.writeFile(path.join(deployDir, "Dockerfile"), files.dockerfile),
+          fs.writeFile(
+            path.join(deployDir, "docker-compose.yml"),
+            files.dockerCompose,
+          ),
+        ]);
+
+        // Build the container with docker-compose
+        logger.info(`Building container with project name ${projectName}...`);
+        await executeCommand(
+          "docker-compose",
+          ["-p", projectName, "build", "--no-cache"],
+          { cwd: deployDir },
         );
       }
 
-      const files = await this.templateHandler.generateDeploymentFiles({
-        appType: payload.appType,
-        appName: serviceName,
-        environment,
-        hostPort, // This may be a new port if we had to find an alternative
-        containerPort,
-        domain,
-        envFile: path.basename(envFilePath),
-        health: {
-          checkPath: "/health",
-          interval: "30s",
-          timeout: "5s",
-          retries: 3,
-          start_period: "40s",
-        },
-      });
-
-      // Write the files
-      await Promise.all([
-        fs.writeFile(path.join(deployDir, "Dockerfile"), files.dockerfile),
-        fs.writeFile(
-          path.join(deployDir, "docker-compose.yml"),
-          files.dockerCompose,
-        ),
-      ]);
-
-      // Build and start the container
-      logger.info(`Building container with project name ${projectName}...`);
-      await executeCommand(
-        "docker-compose",
-        ["-p", projectName, "build", "--no-cache"],
-        { cwd: deployDir },
-      );
-
+      // Start the container using docker-compose
       logger.info(`Starting container on port ${hostPort}...`);
       await executeCommand("docker-compose", ["-p", projectName, "up", "-d"], {
         cwd: deployDir,
