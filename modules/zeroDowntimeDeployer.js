@@ -327,6 +327,7 @@ class ZeroDowntimeDeployer {
   async deploy(payload, ws) {
     const payloadSchema = Joi.object({
       deploymentId: Joi.string().required(),
+      jobId: Joi.string().optional(), // Optional jobId for API calls that need it
       appType: Joi.string().required(),
       repositoryUrl: Joi.string().required(),
       branch: Joi.string().default("main"),
@@ -476,6 +477,7 @@ class ZeroDowntimeDeployer {
         deploymentId,
         envVarsToken,
       );
+
       const envFilePath = await envManager.writeEnvFile(envVars, environment);
 
       await this.cloneRepository(

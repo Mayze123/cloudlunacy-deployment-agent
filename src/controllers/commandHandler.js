@@ -493,11 +493,16 @@ class CommandHandler {
           timestamp: new Date().toISOString(),
         });
 
+        // Generate a proper deploymentId from the job ID
+        const jobId = job.id;
+        const deploymentId = job.parameters.deploymentId;
+
         const message = {
           type: "deploy_app",
-          requestId: job.id,
+          requestId: jobId,
           payload: {
-            deploymentId: job.id,
+            deploymentId: deploymentId, // Use the properly formatted deploymentId
+            jobId: jobId, // Keep track of the original jobId too
             appType: job.parameters.appType || "nodejs",
             repositoryUrl: job.parameters.repositoryUrl,
             branch: job.parameters.branch || "main",
