@@ -499,18 +499,13 @@ class CommandHandler {
           payload: {
             deploymentId: job.id,
             appType: job.parameters.appType || "nodejs",
-            appName: job.parameters.appName,
-            repositoryOwner: this.parseRepositoryOwner(
-              job.parameters.repositoryUrl,
-            ),
-            repositoryName: this.parseRepositoryName(
-              job.parameters.repositoryUrl,
-            ),
             repositoryUrl: job.parameters.repositoryUrl,
             branch: job.parameters.branch || "main",
             githubToken: job.parameters.githubToken,
             environment: job.parameters.environment || "production",
-            serviceName: job.parameters.appName,
+            // Use serviceName directly or fall back to legacy appName field for backward compatibility
+            serviceName: job.parameters.serviceName || job.parameters.appName,
+            // Domain is optional - will be generated from serviceName if not provided
             domain: job.parameters.domain,
             envVarsToken: job.parameters.envVarsToken,
           },

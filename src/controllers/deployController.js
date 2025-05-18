@@ -34,7 +34,7 @@ class DeployController {
 
     try {
       logger.info(
-        `Starting deployment process for ${payload.appName || "application"}`,
+        `Starting deployment process for ${payload.serviceName || "application"}`,
       );
 
       // Validate required fields
@@ -43,14 +43,8 @@ class DeployController {
       // Initialize deployer if not already done
       const deployer = this.getDeployer();
 
-      // Authentication method determination
-      if (payload.githubToken) {
-        logger.info("Deploying with GitHub App authentication");
-      } else if (payload.sshKey) {
-        logger.info("Deploying with SSH key authentication");
-      } else {
-        logger.info("Deploying with public repository (no authentication)");
-      }
+      // All deployments now use GitHub token authentication
+      logger.info("Deploying with GitHub App authentication");
 
       // Start deployment process
       await deployer.deploy(payload, ws);
@@ -79,10 +73,11 @@ class DeployController {
   validateDeployPayload(payload) {
     const requiredFields = [
       "deploymentId",
-      "appName",
-      "repoOwner",
-      "repoName",
-      "branch",
+      "serviceName",
+      "repositoryUrl",
+      "appType",
+      "githubToken",
+      "envVarsToken",
     ];
 
     const missingFields = requiredFields.filter((field) => !payload[field]);
@@ -93,10 +88,7 @@ class DeployController {
       );
     }
 
-    // Validate authentication method
-    if (!payload.githubToken && !payload.sshKey && payload.isPrivate) {
-      throw new Error("Authentication required for private repository");
-    }
+    // No need to check for sshKey or isPrivate - we're only supporting githubToken now
   }
 }
 

@@ -328,16 +328,21 @@ class ZeroDowntimeDeployer {
     const payloadSchema = Joi.object({
       deploymentId: Joi.string().required(),
       appType: Joi.string().required(),
-      appName: Joi.string().required(),
-      repositoryOwner: Joi.string().required(),
-      repositoryName: Joi.string().required(),
-      branch: Joi.string().required(),
+      repositoryUrl: Joi.string().required(),
+      branch: Joi.string().default("main"),
       githubToken: Joi.string().required(),
-      environment: Joi.string().required(),
+      environment: Joi.string().default("production"),
       serviceName: Joi.string().required(),
-      domain: Joi.string().required(),
+      domain: Joi.string().optional(), // Domain is optional - will be generated from serviceName
       envVarsToken: Joi.string().required(),
-      targetUrl: Joi.string().optional(),
+      additionalPorts: Joi.array()
+        .items(
+          Joi.object({
+            port: Joi.number().required(),
+            hostPort: Joi.number().optional(),
+          }),
+        )
+        .optional(),
     });
 
     const { error, value } = payloadSchema.validate(payload);
@@ -369,25 +374,45 @@ class ZeroDowntimeDeployer {
     const {
       deploymentId,
       appType,
-      appName,
-      repositoryOwner,
-      repositoryName,
+      repositoryUrl,
       branch,
       githubToken,
       environment,
       serviceName,
       domain,
       envVarsToken,
-      targetUrl,
+      additionalPorts,
     } = value;
+
+    // Extract repository owner and name from URL for git operations
+    const repoMatch = repositoryUrl.match(
+      /github\.com\/([^\/]+)\/([^\.\/]+)(\.git)?$/,
+    );
+
+    if (!repoMatch) {
+      throw new Error(
+        `Could not parse repository information from URL: ${repositoryUrl}`,
+      );
+    }
+
+    const repositoryOwner = repoMatch[1];
+    const repositoryName = repoMatch[2];
+
+    logger.info(
+      `Extracted repository info from URL: ${repositoryOwner}/${repositoryName}`,
+    );
+
     logger.info("Deploying with payload:", value);
 
     const LOCAL_IP = execSync("hostname -I | awk '{print $1}'")
       .toString()
       .trim();
 
-    // Application-specific domain only
-    let finalDomain = `${serviceName}.${process.env.APP_DOMAIN}`;
+    // Use provided domain or generate from service name if not provided
+    let finalDomain = domain || `${serviceName}.${process.env.APP_DOMAIN}`;
+    logger.info(
+      `Using domain: ${finalDomain} ${domain ? "(provided in payload)" : "(generated from service name)"}`,
+    );
 
     // Initialize port manager and allocate a host port for this service
     await portManager.initialize();
@@ -430,7 +455,7 @@ class ZeroDowntimeDeployer {
     }
     this.deploymentLocks.add(serviceLockKey);
 
-    const projectName = `${deploymentId}-${appName}`
+    const projectName = `${deploymentId}-${serviceName}`
       .toLowerCase()
       .replace(/[^a-z0-9-]/g, "-");
     const deployDir = path.join(this.deployBaseDir, deploymentId);
@@ -459,6 +484,7 @@ class ZeroDowntimeDeployer {
         repositoryName,
         branch,
         githubToken,
+        repositoryUrl,
       );
 
       oldContainer = await this.getCurrentContainer(serviceName);
@@ -476,7 +502,8 @@ class ZeroDowntimeDeployer {
         environment,
         hostPort,
         containerPort,
-        payload: value,
+        appType: appType,
+        additionalPorts: additionalPorts || [],
         ws,
       });
 
@@ -576,8 +603,27 @@ class ZeroDowntimeDeployer {
     }
   }
 
-  async cloneRepository(deployDir, repoOwner, repoName, branch, githubToken) {
-    const repoUrl = `https://x-access-token:${githubToken}@github.com/${repoOwner}/${repoName}.git`;
+  async cloneRepository(
+    deployDir,
+    repoOwner,
+    repoName,
+    branch,
+    githubToken,
+    repositoryUrl,
+  ) {
+    // Use repositoryUrl and add authentication token if not already present
+    let repoUrl;
+
+    if (
+      !repositoryUrl.includes("x-access-token") &&
+      !repositoryUrl.includes("@github.com")
+    ) {
+      const urlParts = repositoryUrl.split("://");
+      repoUrl = `${urlParts[0]}://x-access-token:${githubToken}@${urlParts[1]}`;
+    } else {
+      repoUrl = repositoryUrl;
+    }
+
     const tempDir = path.join(
       path.dirname(deployDir),
       `${path.basename(deployDir)}_temp_${Date.now()}`,
@@ -694,7 +740,8 @@ class ZeroDowntimeDeployer {
     environment,
     hostPort,
     containerPort,
-    payload,
+    appType,
+    additionalPorts,
     ws,
   }) {
     try {
@@ -802,9 +849,7 @@ class ZeroDowntimeDeployer {
 
       if (this.useNixpacks) {
         // Use Nixpacks to build the Docker image
-        logger.info(
-          `Using Nixpacks to build ${serviceName} (${payload.appType})`,
-        );
+        logger.info(`Using Nixpacks to build ${serviceName} (${appType})`);
 
         // Load environment variables from env file
         const envContent = await fs.readFile(envFilePath, "utf-8");
@@ -821,12 +866,9 @@ class ZeroDowntimeDeployer {
         // Add PORT to environment variables
         envVars["PORT"] = containerPort.toString();
 
-        // Check if there are additional ports defined in the payload
-        const additionalPorts = payload.additionalPorts || [];
-
         // Create a custom build plan based on app type
         const buildPlan = NixpacksBuilder.createBuildPlan({
-          appType: payload.appType,
+          appType: appType,
           containerPort,
           healthCheck: health,
           additionalPorts,
@@ -897,7 +939,7 @@ networks:
         }
 
         const files = await this.templateHandler.generateDeploymentFiles({
-          appType: payload.appType,
+          appType: appType,
           appName: serviceName,
           environment,
           hostPort, // This may be a new port if we had to find an alternative
