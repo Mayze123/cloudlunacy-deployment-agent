@@ -9,12 +9,6 @@ log() { echo -e "\033[1;32m[INFO]\033[0m  $*"; }
 warn() { echo -e "\033[1;33m[WARN]\033[0m  $*"; }
 error() { echo -e "\033[1;31m[ERROR]\033[0m $*" >&2; }
 
-# 1) Bail if not requested
-if [ "${INSTALL_NIXPACKS:-false}" != "true" ]; then
-  log "Skipping Nixpacks installation (not requested)"
-  exit 0
-fi
-
 # 2) Already installed?
 if command -v nixpacks &> /dev/null; then
   log "Nixpacks already installed ($(nixpacks --version))"
