@@ -398,124 +398,52 @@ verify_installation() {
 # Fix Permissions
 # ------------------------------------------------------------------------------
 # ------------------------------------------------------------------------------
-# Install Nixpacks (Optional)
+# Install Nixpacks
 # ------------------------------------------------------------------------------
 install_nixpacks() {
-  if [ "${INSTALL_NIXPACKS:-false}" != "true" ]; then
-    log "Skipping Nixpacks installation (not requested)"
-    return 0
-  fi
-  log "Installing Nixpacks for containerized application builds..."
-
-  # 1. Try your standalone installer if present and executable
-  local installer="$BASE_DIR/scripts/install-nixpacks.sh"
-  if [ -x "$installer" ]; then
-    log "Using standalone Nixpacks installer script: $installer"
-    if "$installer"; then
-      log "Standalone installer succeeded"
-      return 0
-    else
-      log_warn "Standalone installer failed; falling back to other methods"
-    fi
-  fi
-
-  # 2. If it's already on PATH, we're done
-  if command -v nixpacks > /dev/null 2>&1; then
-    log "Nixpacks already installed: $(nixpacks --version)"
+  # Bail out early if already installed
+  if command -v nixpacks &> /dev/null; then
+    log "Nixpacks already installed ($(nixpacks --version))"
     return 0
   fi
 
-  # 3. Official install script via curl
-  if command -v curl > /dev/null 2>&1; then
-    log "Attempting installation via official installer script..."
-    local tmp
-    tmp="$(mktemp /tmp/nixpacks-install.XXXXXX)" || {
-      log_warn "Could not create temp file for installer"
-    }
-    if curl -fsSL https://nixpacks.com/install.sh -o "$tmp"; then
-      chmod +x "$tmp"
-      if [ "$(id -u)" -eq 0 ]; then
-        "$tmp"
-      else
-        sudo "$tmp" || "$tmp"
-      fi
-      rm -f "$tmp"
-      if command -v nixpacks > /dev/null 2>&1; then
-        log "Installed via official script: $(nixpacks --version)"
-        return 0
-      else
-        log_warn "Official script ran but nixpacks command not found"
-      fi
-    else
-      log_warn "Failed to download official installer script"
-      rm -f "$tmp"
+  # curl is required for the official installer
+  if ! command -v curl &> /dev/null; then
+    log_error "curl is required to install Nixpacks"
+    return 1
+  fi
+
+  # Run the official curl installer
+  log "Installing Nixpacks via official installer…"
+  if curl -fsSL https://nixpacks.com/install.sh | bash; then
+    if ! command -v nixpacks &> /dev/null; then
+      log_error "Installer ran but nixpacks not found on PATH"
+      return 1
     fi
+    log "✓ Nixpacks installed ($(nixpacks --version))"
   else
-    log_warn "curl not available; skipping official installer step"
+    log_error "Failed to download or run Nixpacks installer"
+    return 1
   fi
 
-  # 4. Homebrew fallback (Linuxbrew or macOS)
-  if command -v brew > /dev/null 2>&1; then
-    log "Attempting installation via Homebrew..."
-    if brew install nixpacks; then
-      log "Installed via Homebrew: $(nixpacks --version)"
-      return 0
-    else
-      log_warn "Homebrew install failed"
-    fi
-  fi
-
-  # 5. Docker-wrapper fallback
-  if command -v docker > /dev/null 2>&1; then
-    log "Setting up Docker-based Nixpacks wrapper..."
-    local dir wrapper
-    if [ "$(id -u)" -eq 0 ] || [ -w "/usr/local/bin" ]; then
-      dir="/usr/local/bin"
-    else
-      dir="$HOME/.local/bin"
-      mkdir -p "$dir"
-    fi
-    wrapper="$dir/nixpacks"
-    cat > "$wrapper" << 'EOF'
-#!/usr/bin/env bash
-set -e
-IMAGE="railwayapp/nixpacks:latest"
-docker pull "$IMAGE" >/dev/null 2>&1 || true
-exec docker run --rm -v "$(pwd)":/workspace -w /workspace "$IMAGE" "$@"
-EOF
-    chmod +x "$wrapper"
-    case ":$PATH:" in
-      *":$dir:"*) ;;
-      *)
-        export PATH="$dir:$PATH"
-        log "Added $dir to PATH for this session"
-        ;;
-    esac
-    if "$wrapper" --version > /dev/null 2>&1; then
-      log "Docker wrapper installed successfully"
-      # Persist PATH for non-root installs
-      if [ "$dir" = "$HOME/.local/bin" ]; then
-        for profile in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
-          if [ -f "$profile" ] && ! grep -q "export PATH=\"$dir" "$profile"; then
-            {
-              echo ""
-              echo "# Added by CloudLunacy for Nixpacks Docker wrapper"
-              echo "export PATH=\"$dir:\$PATH\""
-            } >> "$profile"
-            log "Appended PATH export to $profile"
-          fi
-        done
-      fi
-      return 0
-    else
-      log_warn "Docker wrapper failed to run nixpacks"
-    fi
+  # Update CloudLunacy .env to enable Nixpacks
+  local env_file="/opt/cloudlunacy/.env"
+  [ ! -f "$env_file" ] && env_file="$(pwd)/.env"
+  if [ -f "$env_file" ]; then
+    log "Updating $env_file to enable Nixpacks"
+    sed -i.bak -E \
+      -e 's/^USE_NIXPACKS=.*/USE_NIXPACKS=true/' \
+      -e 's/^NIXPACKS_SKIP_AUTO_INSTALL=.*/NIXPACKS_SKIP_AUTO_INSTALL=true/' \
+      "$env_file" \
+      || {
+        printf "\nUSE_NIXPACKS=true\nNIXPACKS_SKIP_AUTO_INSTALL=true\n" >> "$env_file"
+      }
+    log "Configuration updated"
   else
-    log_warn "docker not available; cannot set up Docker wrapper"
+    log_warn "No .env file found; please set USE_NIXPACKS=true manually"
   fi
 
-  log_warn "All installation methods failed; builds will fall back to Dockerfile"
-  return 1
+  return 0
 }
 
 fix_permissions() {
