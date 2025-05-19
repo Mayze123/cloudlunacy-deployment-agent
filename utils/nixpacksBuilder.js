@@ -7,6 +7,42 @@ const os = require("os");
 const logger = require("./logger");
 const nixpacksPlansManager = require("./nixpacksPlansManager");
 
+/**
+ * Helper to check if sudo is available without prompting for password
+ * @returns {Promise<boolean>} - True if sudo is available without a password
+ */
+async function checkSudoAvailability() {
+  try {
+    await executeCommand("sudo", ["-n", "true"], {
+      silent: true,
+      ignoreError: true,
+    });
+    return true;
+  } catch (error) {
+    // If the error message contains "sudo: a password is required", then sudo is available but needs a password
+    if (error.message && error.message.includes("password")) {
+      logger.info("Sudo is available but requires a password");
+      return true;
+    }
+    logger.debug("Sudo is not available");
+    return false;
+  }
+}
+
+/**
+ * Helper to check if a file exists asynchronously
+ * @param {string} filePath - Path to check
+ * @returns {Promise<boolean>} - True if file exists
+ */
+async function fileExists(filePath) {
+  try {
+    await fsPromises.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 class NixpacksBuilder {
   /**
    * Builds a Docker image using Nixpacks
@@ -474,11 +510,30 @@ CMD ["/bin/sh", "-c", "echo 'Add your build commands here'; tail -f /dev/null"]`
       // Make it executable
       await executeCommand("chmod", ["+x", tempScriptPath]);
 
-      // Run it
-      await executeCommand(tempScriptPath);
+      try {
+        // Try normal execution first (when we have correct permissions)
+        await executeCommand(tempScriptPath, [], { timeout: 60000 });
+      } catch (err) {
+        logger.warn(`Standard execution failed: ${err.message}`);
+
+        // Try with sudo if available
+        const hasSudo = await checkSudoAvailability();
+
+        if (hasSudo) {
+          logger.info(
+            "Attempting installation with elevated privileges (sudo)",
+          );
+          await executeCommand("sudo", [tempScriptPath], { timeout: 60000 });
+        } else {
+          throw new Error(
+            "Installation requires elevated privileges, but sudo is not available",
+          );
+        }
+      }
 
       return true;
     } catch (error) {
+      logger.error(`Curl installation failed: ${error.message}`);
       throw error;
     } finally {
       // Clean up
@@ -506,14 +561,58 @@ CMD ["/bin/sh", "-c", "echo 'Add your build commands here'; tail -f /dev/null"]`
   async setupDockerFallback() {
     logger.info("Setting up Docker-based fallback for Nixpacks...");
 
-    const nixpacksWrapperPath = path.join(os.homedir(), ".local", "bin");
-    const nixpacksWrapperFile = path.join(nixpacksWrapperPath, "nixpacks");
+    // Try multiple possible directory locations in order of preference
+    const possiblePaths = [
+      // User directories (no sudo required)
+      path.join(os.homedir(), ".local", "bin"),
+      path.join(os.homedir(), "bin"),
 
-    // Ensure directory exists
-    try {
-      await fsPromises.mkdir(nixpacksWrapperPath, { recursive: true });
-    } catch (err) {
-      if (err.code !== "EEXIST") throw err;
+      // System directories (may require sudo)
+      "/usr/local/bin",
+      "/usr/bin",
+    ];
+
+    let nixpacksWrapperPath = null;
+    let nixpacksWrapperFile = null;
+
+    // Try each possible location until we find one we can write to
+    for (const candidatePath of possiblePaths) {
+      try {
+        await fsPromises.mkdir(candidatePath, { recursive: true });
+        nixpacksWrapperPath = candidatePath;
+        nixpacksWrapperFile = path.join(candidatePath, "nixpacks");
+
+        // Test if we can write to this directory
+        const testFile = path.join(candidatePath, ".test-write-permission");
+        await fsPromises.writeFile(testFile, "");
+        await fsPromises.unlink(testFile);
+
+        logger.info(
+          `Using directory ${nixpacksWrapperPath} for the wrapper script`,
+        );
+        break;
+      } catch (err) {
+        logger.debug(`Cannot use directory ${candidatePath}: ${err.message}`);
+      }
+    }
+
+    // If we couldn't find any writable directory, try the first one with sudo
+    if (!nixpacksWrapperPath) {
+      nixpacksWrapperPath = possiblePaths[0];
+      nixpacksWrapperFile = path.join(nixpacksWrapperPath, "nixpacks");
+      logger.info(
+        `Fallback to creating wrapper at ${nixpacksWrapperPath} (may require sudo)`,
+      );
+
+      try {
+        await fsPromises.mkdir(nixpacksWrapperPath, { recursive: true });
+      } catch (err) {
+        if (err.code !== "EEXIST") {
+          logger.warn(
+            `Cannot create directory ${nixpacksWrapperPath}: ${err.message}`,
+          );
+        }
+      }
     }
 
     // Create the wrapper script
@@ -530,35 +629,71 @@ if ! docker image inspect $NIXPACKS_IMAGE >/dev/null 2>&1; then
 fi
 
 # Map the current directory and pass all arguments to the container
-exec docker run --rm -v "$(pwd):/workspace" -w "/workspace" $NIXPACKS_IMAGE $@
+exec docker run --rm -v "$(pwd):/workspace" -w "/workspace" $NIXPACKS_IMAGE "$@"
 `;
 
-    await fsPromises.writeFile(nixpacksWrapperFile, wrapperScript);
-    await fsPromises.chmod(nixpacksWrapperFile, "755"); // Make executable
+    try {
+      await fsPromises.writeFile(nixpacksWrapperFile, wrapperScript);
+      await fsPromises.chmod(nixpacksWrapperFile, "755"); // Make executable
+      logger.info(`Created Nixpacks Docker wrapper at ${nixpacksWrapperFile}`);
+    } catch (err) {
+      logger.warn(`Failed to write wrapper script: ${err.message}`);
+
+      // Create a temporary file that the user can move manually
+      const tmpWrapperFile = path.join(os.tmpdir(), "nixpacks");
+      await fsPromises.writeFile(tmpWrapperFile, wrapperScript);
+      await fsPromises.chmod(tmpWrapperFile, "755");
+
+      logger.warn(`Created temporary wrapper at ${tmpWrapperFile}`);
+      logger.warn(`Please move it to a directory in your PATH:`);
+      logger.warn(
+        `sudo mv ${tmpWrapperFile} /usr/local/bin/ && sudo chmod +x /usr/local/bin/nixpacks`,
+      );
+
+      // Try to use the temporary wrapper
+      nixpacksWrapperFile = tmpWrapperFile;
+    }
 
     // Add to PATH if not already in path
     const currentPath = process.env.PATH || "";
-    if (!currentPath.split(":").includes(nixpacksWrapperPath)) {
+    if (
+      nixpacksWrapperPath &&
+      !currentPath.split(":").includes(nixpacksWrapperPath)
+    ) {
       process.env.PATH = `${nixpacksWrapperPath}:${currentPath}`;
+      logger.info(`Added ${nixpacksWrapperPath} to PATH for current session`);
 
-      // Add to ~/.bashrc or ~/.profile for persistence
+      // Add to profile files for persistence
       try {
-        const profilePath = path.join(os.homedir(), ".profile");
+        const profileFiles = [
+          path.join(os.homedir(), ".profile"),
+          path.join(os.homedir(), ".bashrc"),
+          path.join(os.homedir(), ".zshrc"),
+        ];
+
         const profileContent = `
 # Added by CloudLunacy Deployment Agent for Nixpacks
 export PATH="${nixpacksWrapperPath}:$PATH"
 `;
 
-        await fsPromises.appendFile(profilePath, profileContent);
-        logger.info(`Added ${nixpacksWrapperPath} to PATH in ${profilePath}`);
+        for (const profilePath of profileFiles) {
+          if (await fileExists(profilePath)) {
+            // Check if entry already exists
+            const content = await fsPromises.readFile(profilePath, "utf8");
+            if (!content.includes(`${nixpacksWrapperPath}:$PATH`)) {
+              await fsPromises.appendFile(profilePath, profileContent);
+              logger.info(
+                `Added ${nixpacksWrapperPath} to PATH in ${profilePath}`,
+              );
+            }
+          }
+        }
       } catch (err) {
         logger.warn(
           `Failed to update profile for persistent PATH: ${err.message}`,
         );
       }
     }
-
-    logger.info(`Created Nixpacks Docker wrapper at ${nixpacksWrapperFile}`);
 
     // Test the wrapper
     try {
