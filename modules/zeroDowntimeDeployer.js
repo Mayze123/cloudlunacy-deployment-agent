@@ -868,20 +868,11 @@ class ZeroDowntimeDeployer {
         // Add PORT to environment variables
         envVars["PORT"] = containerPort.toString();
 
-        // Create a custom build plan based on app type
-        const buildPlan = NixpacksBuilder.createBuildPlan({
-          appType: appType,
-          containerPort,
-          healthCheck: health,
-          additionalPorts,
-        });
-
-        // Build the image with Nixpacks
+        // Build the image with Nixpacks (defaults only)
         await NixpacksBuilder.buildImage({
           projectDir: deployDir,
           imageName,
           envVars,
-          buildPlan,
         });
 
         // Create a minimal docker-compose.yml file directly
