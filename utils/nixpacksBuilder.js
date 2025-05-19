@@ -111,7 +111,7 @@ class NixpacksBuilder {
           planPath,
           JSON.stringify(buildPlan, null, 2),
         );
-        args.push("--plan", planPath);
+        args.push("--json-plan", planPath);
         logger.info(`Using custom build plan at ${planPath}`);
       }
 
