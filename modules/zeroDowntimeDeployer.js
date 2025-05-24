@@ -11,6 +11,7 @@ const Joi = require("joi");
 const axios = require("axios");
 const { execSync } = require("child_process");
 const portManager = require("../utils/portManager");
+const queueService = require("../src/services/queueService");
 
 class ZeroDowntimeDeployer {
   constructor() {
@@ -68,7 +69,7 @@ class ZeroDowntimeDeployer {
     }
   }
 
-  async registerWithFrontServer(serviceName, targetUrl) {
+  async registerWithFrontServer(serviceName, targetUrl, jobId = null) {
     try {
       const frontApiUrl = process.env.FRONT_API_URL;
       const agentId = process.env.SERVER_ID;
@@ -78,10 +79,22 @@ class ZeroDowntimeDeployer {
         logger.warn(
           "Missing FRONT_API_URL, AGENT_JWT, or SERVER_ID - cannot register with front server",
         );
-        return {
+        const result = {
           success: false,
           message: "Missing required environment variables",
         };
+
+        // Notify backend via queue if jobId is provided
+        if (jobId) {
+          await this.notifyQueueOnRegistration(
+            jobId,
+            serviceName,
+            null,
+            result,
+          );
+        }
+
+        return result;
       }
 
       logger.info(`Registering ${serviceName} with Traefik front server...`);
@@ -110,16 +123,42 @@ class ZeroDowntimeDeployer {
         logger.info(
           `Service ${serviceName} registered successfully with domain: ${response.data.domain}`,
         );
-        return {
+
+        const result = {
           success: true,
           domain: response.data.domain,
           message: "Service registered successfully with Traefik",
         };
+
+        // Notify backend via queue if jobId is provided
+        if (jobId) {
+          await this.notifyQueueOnRegistration(
+            jobId,
+            serviceName,
+            response.data,
+            result,
+          );
+        }
+
+        return result;
       } else {
         const errorMessage =
           response.data.message || "Unknown error from front server";
         logger.warn(`Failed to register service: ${errorMessage}`);
-        return { success: false, message: errorMessage };
+
+        const result = { success: false, message: errorMessage };
+
+        // Notify backend via queue if jobId is provided
+        if (jobId) {
+          await this.notifyQueueOnRegistration(
+            jobId,
+            serviceName,
+            response.data,
+            result,
+          );
+        }
+
+        return result;
       }
     } catch (error) {
       logger.error(`Failed to register with front server: ${error.message}`);
@@ -130,7 +169,14 @@ class ZeroDowntimeDeployer {
         logger.error(`Response data: ${JSON.stringify(error.response.data)}`);
       }
 
-      return { success: false, message: `Error: ${error.message}` };
+      const result = { success: false, message: `Error: ${error.message}` };
+
+      // Notify backend via queue if jobId is provided
+      if (jobId) {
+        await this.notifyQueueOnRegistration(jobId, serviceName, null, result);
+      }
+
+      return result;
     }
   }
 
@@ -197,7 +243,12 @@ class ZeroDowntimeDeployer {
     }
   }
 
-  async switchTraffic(oldContainer, newContainer, baseServiceName) {
+  async switchTraffic(
+    oldContainer,
+    newContainer,
+    baseServiceName,
+    jobId = null,
+  ) {
     const LOCAL_IP = execSync("hostname -I | awk '{print $1}'")
       .toString()
       .trim();
@@ -256,7 +307,9 @@ class ZeroDowntimeDeployer {
       logger.info(
         `Registering new target URL: ${newTargetUrl} for base service name: ${baseServiceName}`,
       );
-      await this.registerWithFrontServer(baseServiceName, newTargetUrl);
+
+      // Use the jobId passed as parameter to maintain context from the original request
+      await this.registerWithFrontServer(baseServiceName, newTargetUrl, jobId);
 
       // 3. Wait briefly to ensure the configuration update propagates
       logger.info("Waiting for configuration to propagate...");
@@ -429,7 +482,12 @@ class ZeroDowntimeDeployer {
     );
 
     try {
-      await this.registerWithFrontServer(serviceName, resolvedTargetUrl);
+      // Pass the jobId to registerWithFrontServer so it can notify via queue
+      await this.registerWithFrontServer(
+        serviceName,
+        resolvedTargetUrl,
+        value.jobId,
+      );
       const isAccessible = await this.verifyServiceAccessibility(finalDomain);
       if (!isAccessible) {
         logger.warn(
@@ -513,7 +571,13 @@ class ZeroDowntimeDeployer {
       await this.performHealthCheck(newContainer);
 
       // Switch traffic from the old container (if any) to the new container.
-      await this.switchTraffic(oldContainer, newContainer, serviceName);
+      // Pass the jobId to maintain continuity with the front server registration
+      await this.switchTraffic(
+        oldContainer,
+        newContainer,
+        serviceName,
+        value.jobId,
+      );
 
       if (oldContainer && oldContainer.id !== newContainer.id) {
         logger.info(
@@ -1121,6 +1185,59 @@ networks:
       return true;
     } catch {
       return false;
+    }
+  }
+
+  /**
+   * Notify the queue service with the front server registration result
+   * @param {string} jobId - The ID of the job that initiated the registration
+   * @param {string} serviceName - The name of the service being registered
+   * @param {Object} responseData - The raw response data from the front server
+   * @param {Object} result - The processed result object
+   * @returns {Promise<void>}
+   */
+  async notifyQueueOnRegistration(jobId, serviceName, responseData, result) {
+    try {
+      // Check if queue service is available
+      if (!queueService || !queueService.initialized) {
+        await queueService.initialize();
+      }
+
+      logger.info(
+        `Notifying queue about registration result for job ${jobId} and service ${serviceName}`,
+      );
+
+      // Send a result message to the queue
+      await queueService.publishResult({
+        jobId: jobId,
+        status: result.success ? "SUCCESS" : "FAILED",
+        actionType: "app_deployment_result",
+        result: {
+          serviceName,
+          domain: result.domain || null,
+          success: result.success,
+          message: result.message,
+          timestamp: new Date().toISOString(),
+          // Include the raw response data if available
+          rawResponse: responseData ? JSON.stringify(responseData) : null,
+        },
+      });
+
+      // Also send a log message for better visibility
+      await queueService.publishLog({
+        jobId: jobId,
+        content: `Front server registration for ${serviceName}: ${result.message} ${result.domain ? `[Domain: ${result.domain}]` : ""}`,
+        timestamp: new Date().toISOString(),
+      });
+
+      logger.info(
+        `Queue notification for front server registration complete for job ${jobId}`,
+      );
+    } catch (error) {
+      logger.error(
+        `Failed to notify queue about registration result: ${error.message}`,
+      );
+      // We don't throw here to avoid affecting the main deployment flow
     }
   }
 }
