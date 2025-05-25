@@ -663,13 +663,15 @@ class ZeroDowntimeDeployer {
               serviceName: serviceName,
               timestamp: new Date().toISOString(),
               // Include container information for logging
-              containerDetails: newContainer ? {
-                containerId: newContainer.id,
-                containerName: newContainer.name,
-                hostPort: newContainer.hostPort,
-                containerPort: newContainer.containerPort,
-                status: "running"
-              } : null,
+              containerDetails: newContainer
+                ? {
+                    containerId: newContainer.id,
+                    containerName: newContainer.name,
+                    hostPort: newContainer.hostPort,
+                    containerPort: newContainer.containerPort,
+                    status: "running",
+                  }
+                : null,
             },
             value.projectId || null,
           );
@@ -711,13 +713,15 @@ class ZeroDowntimeDeployer {
               serviceName: serviceName,
               timestamp: new Date().toISOString(),
               // Include container information if a container was created before failure
-              containerDetails: newContainer ? {
-                containerId: newContainer.id,
-                containerName: newContainer.name,
-                hostPort: newContainer.hostPort,
-                containerPort: newContainer.containerPort,
-                status: "failed"
-              } : null,
+              containerDetails: newContainer
+                ? {
+                    containerId: newContainer.id,
+                    containerName: newContainer.name,
+                    hostPort: newContainer.hostPort,
+                    containerPort: newContainer.containerPort,
+                    status: "failed",
+                  }
+                : null,
             },
             value.projectId || null,
           );
