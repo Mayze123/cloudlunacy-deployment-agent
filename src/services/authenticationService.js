@@ -25,6 +25,7 @@ class AuthenticationService {
     this.isConnected = false;
     this.usingWebsocketFallback = false;
     this.commandConsumer = null;
+    this.websocketToken = null; // Store WebSocket token separately
   }
 
   /**
@@ -90,10 +91,18 @@ class AuthenticationService {
         }
 
         // Extract connection details from response based on updated backend API
-        const { wsUrl, rabbitmq } = response.data;
+        const { wsUrl, rabbitmq, agentToken } = response.data;
         logger.info(
           `🚀 ~ AuthenticationService ~ authenticateAndConnect ~ rabbitmq: ${rabbitmq}`,
         );
+
+        // Store the WebSocket token for future use
+        if (agentToken) {
+          this.websocketToken = agentToken;
+          logger.info("WebSocket authentication token received from backend");
+        } else {
+          logger.warn("No WebSocket token provided by backend");
+        }
 
         // Try RabbitMQ connection first if rabbitmq details were provided
         if (rabbitmq && rabbitmq.url) {
@@ -169,6 +178,7 @@ class AuthenticationService {
         // Fallback to WebSocket if RabbitMQ connection failed or URL not provided
         if (wsUrl) {
           logger.info(`WebSocket URL received from backend: ${wsUrl}`);
+          // Pass the WebSocket token to the WebSocket service
           websocketService.establishConnection(wsUrl);
           this.usingWebsocketFallback = true;
           this.isConnected = true;
@@ -332,90 +342,11 @@ class AuthenticationService {
   }
 
   /**
-   * Get or generate an encryption key for securing credentials
-   * @returns {Promise<string>} Encryption key
+   * Get the WebSocket authentication token
+   * @returns {string|null} The WebSocket token or null if not available
    */
-  async getEncryptionKey() {
-    // Use a combination of machine-specific information and our JWT for the key
-    // This means even if someone gets the file, they'd need both the agent's
-    // machine access and the JWT to decrypt it
-    try {
-      // In a real implementation, you'd use crypto.scrypt or a similar
-      // key derivation function with hardware-specific identifiers
-
-      // For simplicity in this example, we'll use the JWT as the basis
-      // but in production you should use proper cryptographic methods
-      const jwtToken = config.api.jwt || process.env.AGENT_JWT;
-      if (!jwtToken) {
-        throw new Error("No JWT available for encryption key generation");
-      }
-
-      // In real implementation, combine with hardware identifiers
-      // like MAC address, disk ID, etc.
-      return jwtToken;
-    } catch (error) {
-      logger.error(`Failed to generate encryption key: ${error.message}`);
-      throw error;
-    }
-  }
-
-  /**
-   * Encrypt data with a key
-   * @param {string} data - Data to encrypt
-   * @param {string} key - Encryption key
-   * @returns {string} Encrypted data
-   */
-  encryptData(data, key) {
-    try {
-      // In a real implementation, you would:
-      // 1. Use crypto.createCipheriv with a proper IV
-      // 2. Use AES-256-GCM or similar authenticated encryption
-      // 3. Store the IV with the ciphertext
-
-      // This is a placeholder for actual encryption
-      // DO NOT use this in production - implement proper encryption
-      const crypto = require("crypto");
-      const cipher = crypto.createCipher("aes-256-cbc", key);
-      let encrypted = cipher.update(data, "utf8", "hex");
-      encrypted += cipher.final("hex");
-      return encrypted;
-    } catch (error) {
-      logger.error(`Encryption failed: ${error.message}`);
-      throw error;
-    }
-  }
-
-  /**
-   * Decrypt data with a key
-   * @param {string} encryptedData - Encrypted data
-   * @param {string} key - Encryption key
-   * @returns {string} Decrypted data
-   */
-  decryptData(encryptedData, key) {
-    try {
-      // This is a placeholder for actual decryption
-      // DO NOT use this in production - implement proper decryption
-      const crypto = require("crypto");
-      const decipher = crypto.createDecipher("aes-256-cbc", key);
-      let decrypted = decipher.update(encryptedData, "hex", "utf8");
-      decrypted += decipher.final("utf8");
-      return decrypted;
-    } catch (error) {
-      logger.error(`Decryption failed: ${error.message}`);
-      throw error;
-    }
-  }
-
-  /**
-   * Placeholder for integration with a secrets manager
-   * @param {string} key - Secret key
-   * @param {string} value - Secret value
-   * @returns {Promise<void>}
-   */
-  async storeInSecretManager(key, value) {
-    // This would be replaced with actual integration code for your chosen
-    // secrets manager service (HashiCorp Vault, AWS Secrets Manager, etc.)
-    throw new Error("Secrets manager integration not implemented");
+  getWebSocketToken() {
+    return this.websocketToken || config.api.token; // Fallback to API token if WebSocket token not available
   }
 
   /**
@@ -459,43 +390,6 @@ class AuthenticationService {
       logger.info(`JWT token stored to ${tokenPath}`);
     } catch (error) {
       logger.warn(`Failed to store JWT: ${error.message}`);
-    }
-  }
-
-  /**
-   * Check if we're using the WebSocket fallback
-   * @returns {boolean} True if using WebSocket fallback
-   */
-  isUsingWebSocketFallback() {
-    return this.usingWebsocketFallback;
-  }
-
-  /**
-   * Check if we're connected to either RabbitMQ or WebSocket
-   * @returns {boolean} True if connected
-   */
-  checkConnection() {
-    return this.isConnected;
-  }
-
-  /**
-   * Shutdown the authentication service
-   * @returns {Promise<boolean>} Success status
-   */
-  async shutdown() {
-    try {
-      logger.info("Shutting down authentication service...");
-
-      this.initialized = false;
-      this.isConnected = false;
-
-      logger.info("Authentication service shut down successfully");
-      return true;
-    } catch (error) {
-      logger.error(
-        `Error shutting down authentication service: ${error.message}`,
-      );
-      return false;
     }
   }
 

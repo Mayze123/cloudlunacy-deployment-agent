@@ -122,9 +122,21 @@ class WebSocketService {
   establishConnection(wsUrl) {
     logger.info(`Attempting to establish WebSocket connection to: ${wsUrl}`);
 
+    // Get the correct WebSocket token from authentication service
+    let websocketToken = config.api.token; // Default fallback
+    try {
+      const authService = require("./authenticationService");
+      websocketToken = authService.getWebSocketToken();
+      logger.info("Using WebSocket token from authentication service");
+    } catch (error) {
+      logger.warn(
+        "Could not get WebSocket token from auth service, using API token as fallback",
+      );
+    }
+
     this.ws = new WebSocket(wsUrl, {
       headers: {
-        Authorization: `Bearer ${config.api.token}`,
+        Authorization: `Bearer ${websocketToken}`,
       },
     });
 
@@ -193,9 +205,12 @@ class WebSocketService {
 
     // Implement reconnect with exponential backoff
     if (this.retryCount < config.websocket.reconnectMaxRetries) {
-      logger.warn(
-        `Reconnecting in ${this.retryDelay / 1000} seconds... (Attempt ${this.retryCount + 1}/${config.websocket.reconnectMaxRetries})`,
-      );
+      // Only log every few attempts to reduce noise
+      if (this.retryCount === 0 || this.retryCount % 3 === 0) {
+        logger.warn(
+          `Reconnecting in ${this.retryDelay / 1000} seconds... (Attempt ${this.retryCount + 1}/${config.websocket.reconnectMaxRetries})`,
+        );
+      }
 
       setTimeout(() => {
         // If authService reference exists, use it directly
@@ -203,7 +218,9 @@ class WebSocketService {
           this.authService.authenticateAndConnect();
         } else {
           // Otherwise, dynamically require to avoid circular dependency
-          logger.info("No auth service reference set, loading dynamically");
+          if (this.retryCount === 0 || this.retryCount % 3 === 0) {
+            logger.info("No auth service reference set, loading dynamically");
+          }
           try {
             const authService = require("./authenticationService");
             authService.authenticateAndConnect();
