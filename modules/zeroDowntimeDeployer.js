@@ -522,11 +522,11 @@ class ZeroDowntimeDeployer {
     );
 
     try {
-      // Pass the jobId to registerWithFrontServer so it can notify via queue
+      // Register with front server but don't send job result yet (deployment not complete)
       await this.registerWithFrontServer(
         serviceName,
         resolvedTargetUrl,
-        value.jobId,
+        null, // Don't pass jobId here - we'll send result when deployment actually completes
       );
       const isAccessible = await this.verifyServiceAccessibility(finalDomain);
       if (!isAccessible) {
@@ -648,6 +648,32 @@ class ZeroDowntimeDeployer {
         message: "Deployment completed",
         domain: finalDomain,
       });
+
+      // Send job completion result to backend (deployment is actually complete now)
+      if (value.jobId) {
+        try {
+          await this.notifyQueueOnRegistration(
+            value.jobId,
+            serviceName,
+            null, // No front server response data at this point
+            {
+              success: true,
+              domain: finalDomain,
+              message: "Deployment completed successfully",
+              serviceName: serviceName,
+              timestamp: new Date().toISOString(),
+            },
+            value.projectId || null,
+          );
+          logger.info(
+            `Job completion notification sent for job ${value.jobId}`,
+          );
+        } catch (notifyError) {
+          logger.error(
+            `Failed to send job completion notification: ${notifyError.message}`,
+          );
+        }
+      }
     } catch (error) {
       logger.error(`Deployment ${deploymentId} failed:`, error);
       rollbackNeeded = true;
@@ -662,6 +688,30 @@ class ZeroDowntimeDeployer {
         status: "failed",
         message: error.message,
       });
+
+      // Send job failure result to backend
+      if (value.jobId) {
+        try {
+          await this.notifyQueueOnRegistration(
+            value.jobId,
+            serviceName,
+            null, // No front server response data for failures
+            {
+              success: false,
+              domain: null,
+              message: `Deployment failed: ${error.message}`,
+              serviceName: serviceName,
+              timestamp: new Date().toISOString(),
+            },
+            value.projectId || null,
+          );
+          logger.info(`Job failure notification sent for job ${value.jobId}`);
+        } catch (notifyError) {
+          logger.error(
+            `Failed to send job failure notification: ${notifyError.message}`,
+          );
+        }
+      }
     } finally {
       this.deploymentLocks.delete(serviceLockKey);
       if (!rollbackNeeded) await this.cleanup(deployDir, rollbackNeeded);
