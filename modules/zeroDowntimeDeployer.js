@@ -607,6 +607,17 @@ class ZeroDowntimeDeployer {
         ws,
       });
 
+      // Debug: Log the new container details
+      logger.info(`Container creation result: ${JSON.stringify(newContainer)}`);
+
+      if (!newContainer) {
+        logger.error("newContainer is null after buildAndStartContainer!");
+      } else {
+        logger.info(
+          `Created container with ID: ${newContainer.id}, hostPort: ${newContainer.hostPort}`,
+        );
+      }
+
       await envManager.verifyEnvironmentSetup(newContainer.name);
       await this.performHealthCheck(newContainer);
 
@@ -651,6 +662,11 @@ class ZeroDowntimeDeployer {
 
       // Send job completion result to backend (deployment is actually complete now)
       if (value.jobId) {
+        // Debug: Log container state before sending notification
+        logger.info(
+          `About to send job completion. newContainer state: ${JSON.stringify(newContainer)}`,
+        );
+
         try {
           await this.notifyQueueOnRegistration(
             value.jobId,
