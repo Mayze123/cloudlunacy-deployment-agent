@@ -69,7 +69,7 @@ class ZeroDowntimeDeployer {
     }
   }
 
-  async registerWithFrontServer(serviceName, targetUrl, jobId = null) {
+  async registerWithFrontServer(serviceName, targetUrl, jobId = null, projectId = null) {
     try {
       const frontApiUrl = process.env.FRONT_API_URL;
       const agentId = process.env.SERVER_ID;
@@ -91,6 +91,7 @@ class ZeroDowntimeDeployer {
             serviceName,
             null,
             result,
+            projectId
           );
         }
 
@@ -248,6 +249,7 @@ class ZeroDowntimeDeployer {
     newContainer,
     baseServiceName,
     jobId = null,
+    projectId = null,
   ) {
     const LOCAL_IP = execSync("hostname -I | awk '{print $1}'")
       .toString()
@@ -308,8 +310,8 @@ class ZeroDowntimeDeployer {
         `Registering new target URL: ${newTargetUrl} for base service name: ${baseServiceName}`,
       );
 
-      // Use the jobId passed as parameter to maintain context from the original request
-      await this.registerWithFrontServer(baseServiceName, newTargetUrl, jobId);
+      // Use the jobId and projectId passed as parameters to maintain context from the original request
+      await this.registerWithFrontServer(baseServiceName, newTargetUrl, jobId, projectId);
 
       // 3. Wait briefly to ensure the configuration update propagates
       logger.info("Waiting for configuration to propagate...");
@@ -381,6 +383,7 @@ class ZeroDowntimeDeployer {
     const payloadSchema = Joi.object({
       deploymentId: Joi.string().required(),
       jobId: Joi.string().optional(), // Optional jobId for API calls that need it
+      projectId: Joi.string().optional(), // Optional projectId to track which project this deployment belongs to
       appType: Joi.string().required(),
       repositoryUrl: Joi.string().required(),
       branch: Joi.string(),
@@ -1194,9 +1197,10 @@ networks:
    * @param {string} serviceName - The name of the service being registered
    * @param {Object} responseData - The raw response data from the front server
    * @param {Object} result - The processed result object
+   * @param {string} projectId - Optional ID of the project this deployment belongs to
    * @returns {Promise<void>}
    */
-  async notifyQueueOnRegistration(jobId, serviceName, responseData, result) {
+  async notifyQueueOnRegistration(jobId, serviceName, responseData, result, projectId = null) {
     try {
       // Check if queue service is available
       if (!queueService || !queueService.initialized) {
@@ -1218,6 +1222,8 @@ networks:
           success: result.success,
           message: result.message,
           timestamp: new Date().toISOString(),
+          // Include the project ID if available
+          projectId: projectId || null,
           // Include the raw response data if available
           rawResponse: responseData ? JSON.stringify(responseData) : null,
         },
