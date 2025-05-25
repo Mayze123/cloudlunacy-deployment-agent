@@ -69,7 +69,12 @@ class ZeroDowntimeDeployer {
     }
   }
 
-  async registerWithFrontServer(serviceName, targetUrl, jobId = null, projectId = null) {
+  async registerWithFrontServer(
+    serviceName,
+    targetUrl,
+    jobId = null,
+    projectId = null,
+  ) {
     try {
       const frontApiUrl = process.env.FRONT_API_URL;
       const agentId = process.env.SERVER_ID;
@@ -91,14 +96,18 @@ class ZeroDowntimeDeployer {
             serviceName,
             null,
             result,
-            projectId
+            projectId,
           );
         }
 
         return result;
       }
 
+      // Generate the expected domain format on the agent side
+      const expectedDomain = `${serviceName}.${process.env.APP_DOMAIN || "apps.cloudlunacy.uk"}`;
+
       logger.info(`Registering ${serviceName} with Traefik front server...`);
+      logger.info(`Expected domain: ${expectedDomain}`);
 
       // Use the Traefik API endpoint for HTTP routes only
       const response = await axios.post(
@@ -107,6 +116,7 @@ class ZeroDowntimeDeployer {
           agentId,
           subdomain: serviceName,
           targetUrl,
+          expectedDomain, // Pass the expected domain to the front server
           options: {
             useTls: true,
             check: true,
@@ -121,13 +131,16 @@ class ZeroDowntimeDeployer {
       );
 
       if (response.data && response.data.success) {
+        // Use the domain from response if available, otherwise use our expected domain
+        const finalDomain = response.data.domain || expectedDomain;
+
         logger.info(
-          `Service ${serviceName} registered successfully with domain: ${response.data.domain}`,
+          `Service ${serviceName} registered successfully with domain: ${finalDomain}`,
         );
 
         const result = {
           success: true,
-          domain: response.data.domain,
+          domain: finalDomain,
           message: "Service registered successfully with Traefik",
         };
 
@@ -147,7 +160,12 @@ class ZeroDowntimeDeployer {
           response.data.message || "Unknown error from front server";
         logger.warn(`Failed to register service: ${errorMessage}`);
 
-        const result = { success: false, message: errorMessage };
+        // Even if registration failed, we can still provide the expected domain
+        const result = {
+          success: false,
+          message: errorMessage,
+          domain: expectedDomain, // Include the expected domain even on failure
+        };
 
         // Notify backend via queue if jobId is provided
         if (jobId) {
@@ -170,7 +188,12 @@ class ZeroDowntimeDeployer {
         logger.error(`Response data: ${JSON.stringify(error.response.data)}`);
       }
 
-      const result = { success: false, message: `Error: ${error.message}` };
+      const expectedDomain = `${serviceName}.${process.env.APP_DOMAIN || "apps.cloudlunacy.uk"}`;
+      const result = {
+        success: false,
+        message: `Error: ${error.message}`,
+        domain: expectedDomain, // Provide the expected domain even on error
+      };
 
       // Notify backend via queue if jobId is provided
       if (jobId) {
@@ -311,7 +334,12 @@ class ZeroDowntimeDeployer {
       );
 
       // Use the jobId and projectId passed as parameters to maintain context from the original request
-      await this.registerWithFrontServer(baseServiceName, newTargetUrl, jobId, projectId);
+      await this.registerWithFrontServer(
+        baseServiceName,
+        newTargetUrl,
+        jobId,
+        projectId,
+      );
 
       // 3. Wait briefly to ensure the configuration update propagates
       logger.info("Waiting for configuration to propagate...");
@@ -465,8 +493,17 @@ class ZeroDowntimeDeployer {
       .toString()
       .trim();
 
-    // Use provided domain or generate from service name if not provided
-    let finalDomain = domain || `${serviceName}.${process.env.APP_DOMAIN}`;
+    // Use provided domain or generate from service name using the standard format
+    // Ensure all domains follow the {serviceName}.apps.cloudlunacy.uk format
+    let finalDomain;
+    if (domain && domain.includes(serviceName)) {
+      // If domain is provided and contains the service name, use it
+      finalDomain = domain;
+    } else {
+      // Generate the standard domain format
+      finalDomain = `${serviceName}.${process.env.APP_DOMAIN || "apps.cloudlunacy.uk"}`;
+    }
+
     logger.info(
       `Using domain: ${finalDomain} ${domain ? "(provided in payload)" : "(generated from service name)"}`,
     );
@@ -1200,7 +1237,13 @@ networks:
    * @param {string} projectId - Optional ID of the project this deployment belongs to
    * @returns {Promise<void>}
    */
-  async notifyQueueOnRegistration(jobId, serviceName, responseData, result, projectId = null) {
+  async notifyQueueOnRegistration(
+    jobId,
+    serviceName,
+    responseData,
+    result,
+    projectId = null,
+  ) {
     try {
       // Check if queue service is available
       if (!queueService || !queueService.initialized) {
