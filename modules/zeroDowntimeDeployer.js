@@ -333,11 +333,11 @@ class ZeroDowntimeDeployer {
         `Registering new target URL: ${newTargetUrl} for base service name: ${baseServiceName}`,
       );
 
-      // Use the jobId and projectId passed as parameters to maintain context from the original request
+      // Don't pass jobId here - we only want to send job completion notification once at the end
       await this.registerWithFrontServer(
         baseServiceName,
         newTargetUrl,
-        jobId,
+        null, // Don't send job notification during traffic switching
         projectId,
       );
 
