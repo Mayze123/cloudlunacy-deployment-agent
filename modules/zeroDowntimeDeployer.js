@@ -204,7 +204,7 @@ class ZeroDowntimeDeployer {
     }
   }
 
-  async verifyServiceAccessibility(domain, protocol = "http") {
+  async verifyServiceAccessibility(domain, protocol = "http", maxRetries = 3, retryDelay = 2000) {
     try {
       const frontApiUrl = process.env.FRONT_API_URL;
       const jwt = process.env.AGENT_JWT;
@@ -223,42 +223,68 @@ class ZeroDowntimeDeployer {
       const baseServiceName = domain.split(".")[0];
       logger.info(`Base service name: ${baseServiceName}`);
 
-      try {
-        // Query the front server API to check if the service is configured
-        const response = await axios.get(`${frontApiUrl}/api/proxy/routes`, {
-          headers: {
-            Authorization: `Bearer ${jwt}`,
-            "Content-Type": "application/json",
-          },
-        });
+      // Retry mechanism to handle Traefik routing table update delays
+      for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+          logger.info(`Verification attempt ${attempt}/${maxRetries} for ${baseServiceName}`);
+          
+          // Query the front server API to check if the service is configured
+          const response = await axios.get(`${frontApiUrl}/api/proxy/routes`, {
+            headers: {
+              Authorization: `Bearer ${jwt}`,
+              "Content-Type": "application/json",
+            },
+          });
 
-        // Check if the subdomain is in the list
-        if (response.data && response.data.routes) {
-          const serviceFound = response.data.routes.some(
-            (route) => route.subdomain === baseServiceName,
-          );
-
-          if (serviceFound) {
-            logger.info(
-              `Service ${baseServiceName} is accessible through Traefik`,
+          // Check if the subdomain is in the list
+          if (response.data && response.data.routes) {
+            const serviceFound = response.data.routes.some(
+              (route) => route.subdomain === baseServiceName,
             );
-            return true;
+
+            if (serviceFound) {
+              logger.info(
+                `Service ${baseServiceName} is accessible through Traefik (verified on attempt ${attempt})`,
+              );
+              return true;
+            } else {
+              logger.warn(
+                `Service ${baseServiceName} not found in Traefik routes (attempt ${attempt}/${maxRetries})`,
+              );
+              
+              // If this isn't the last attempt, wait before retrying
+              if (attempt < maxRetries) {
+                logger.info(`Waiting ${retryDelay}ms before retry...`);
+                await new Promise(resolve => setTimeout(resolve, retryDelay));
+              }
+            }
           } else {
-            logger.warn(
-              `Service ${baseServiceName} is not configured in Traefik`,
-            );
-            return false;
+            logger.warn(`Invalid response from Traefik routes API (attempt ${attempt}/${maxRetries})`);
+            
+            // If this isn't the last attempt, wait before retrying
+            if (attempt < maxRetries) {
+              logger.info(`Waiting ${retryDelay}ms before retry...`);
+              await new Promise(resolve => setTimeout(resolve, retryDelay));
+            }
           }
-        } else {
-          logger.warn("Invalid response from Traefik routes API");
-          return false;
+        } catch (apiError) {
+          logger.error(
+            `Error checking Traefik configuration (attempt ${attempt}/${maxRetries}): ${apiError.message}`,
+          );
+          
+          // If this isn't the last attempt, wait before retrying
+          if (attempt < maxRetries) {
+            logger.info(`Waiting ${retryDelay}ms before retry...`);
+            await new Promise(resolve => setTimeout(resolve, retryDelay));
+          }
         }
-      } catch (apiError) {
-        logger.error(
-          `Error checking Traefik configuration: ${apiError.message}`,
-        );
-        return false;
       }
+
+      // All retries exhausted
+      logger.warn(
+        `Service ${baseServiceName} verification failed after ${maxRetries} attempts - service may still be accessible`,
+      );
+      return false;
     } catch (error) {
       logger.error(
         `Service accessibility verification failed: ${error.message}`,
