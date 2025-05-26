@@ -1355,6 +1355,8 @@ networks:
           projectId: projectId || null,
           // Include the raw response data if available
           rawResponse: responseData ? JSON.stringify(responseData) : null,
+          // Include container details if available
+          containerDetails: result.containerDetails || null,
         },
       });
 
