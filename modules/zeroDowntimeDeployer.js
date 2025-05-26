@@ -873,23 +873,68 @@ class ZeroDowntimeDeployer {
 
   async getCurrentContainer(serviceName) {
     try {
-      const { stdout } = await executeCommand("docker", [
-        "ps",
-        "-q",
-        "--filter",
-        `name=${serviceName}`,
-      ]);
-      const containerId = stdout.trim();
-      if (!containerId) return null;
-      const { stdout: containerInfo } = await executeCommand("docker", [
-        "inspect",
-        containerId,
-        "--format",
-        "{{.Name}} {{.Id}} {{.State.Status}}",
-      ]);
-      const [name, id, status] = containerInfo.trim().split(" ");
-      return { name: name.replace("/", ""), id, status };
+      // Search for containers with blue/green suffixes and base name
+      const patterns = [
+        `${serviceName}-blue`,
+        `${serviceName}-green`,
+        serviceName // fallback to base name
+      ];
+
+      const foundContainers = [];
+
+      for (const pattern of patterns) {
+        const { stdout } = await executeCommand("docker", [
+          "ps",
+          "-q",
+          "--filter",
+          `name=^${pattern}$`, // Use exact name matching
+        ]);
+        
+        if (stdout.trim()) {
+          const containerIds = stdout.trim().split('\n').filter(Boolean);
+          
+          for (const containerId of containerIds) {
+            try {
+              const { stdout: containerInfo } = await executeCommand("docker", [
+                "inspect",
+                containerId,
+                "--format",
+                "{{.Name}} {{.Id}} {{.State.Status}} {{.Created}}",
+              ]);
+              const [name, id, status, created] = containerInfo.trim().split(" ");
+              foundContainers.push({ 
+                name: name.replace("/", ""), 
+                id, 
+                status, 
+                created: new Date(created),
+                pattern 
+              });
+              logger.info(`Found container: ${name} (${id}) - Status: ${status}, Created: ${created}`);
+            } catch (inspectError) {
+              logger.warn(`Error inspecting container ${containerId}: ${inspectError.message}`);
+            }
+          }
+        }
+      }
+      
+      if (foundContainers.length === 0) {
+        logger.info(`No existing containers found for service ${serviceName}`);
+        return null;
+      }
+
+      // Sort by creation time to get the oldest (currently running) container
+      foundContainers.sort((a, b) => a.created - b.created);
+      const oldestContainer = foundContainers[0];
+      
+      logger.info(`Selected oldest container as current: ${oldestContainer.name} (${oldestContainer.id})`);
+      return { 
+        name: oldestContainer.name, 
+        id: oldestContainer.id, 
+        status: oldestContainer.status 
+      };
+      
     } catch (error) {
+      logger.warn(`Error getting current container for ${serviceName}: ${error.message}`);
       return null;
     }
   }
