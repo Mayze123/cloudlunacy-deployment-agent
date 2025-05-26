@@ -760,13 +760,54 @@ class ZeroDowntimeDeployer {
         `Gracefully removing old container ${container.name} (${container.id})`,
       );
 
-      // Remove ONLY the specified container, not the entire project
-      await executeCommand("docker", ["stop", container.id]);
+      // First check if the container still exists
+      try {
+        await executeCommand("docker", ["inspect", container.id]);
+        logger.info(
+          `Container ${container.id} exists, proceeding with removal`,
+        );
+      } catch (inspectError) {
+        logger.info(
+          `Container ${container.id} no longer exists, skipping removal`,
+        );
+        return true; // Consider this successful since the container is already gone
+      }
+
+      // Check if container is still running
+      try {
+        const { stdout: containerState } = await executeCommand("docker", [
+          "inspect",
+          "--format",
+          "{{.State.Status}}",
+          container.id,
+        ]);
+
+        if (containerState.trim() === "running") {
+          logger.info(`Stopping running container ${container.id}`);
+          await executeCommand("docker", ["stop", container.id]);
+        } else {
+          logger.info(
+            `Container ${container.id} is already stopped (${containerState.trim()})`,
+          );
+        }
+      } catch (stateError) {
+        logger.warn(`Could not check container state: ${stateError.message}`);
+      }
+
+      // Remove the container
       await executeCommand("docker", ["rm", container.id]);
 
       logger.info(`Successfully removed old container ${container.name}`);
       return true;
     } catch (error) {
+      // Check if the error is because container doesn't exist
+      if (error.message.includes("No such container")) {
+        logger.info(
+          `Container ${container.name} (${container.id}) was already removed`,
+        );
+        return true; // Consider this successful
+      }
+
       logger.warn(
         `Failed to remove container ${container.name}: ${error.message}`,
       );
@@ -877,7 +918,7 @@ class ZeroDowntimeDeployer {
       const patterns = [
         `${serviceName}-blue`,
         `${serviceName}-green`,
-        serviceName // fallback to base name
+        serviceName, // fallback to base name
       ];
 
       const foundContainers = [];
@@ -889,10 +930,10 @@ class ZeroDowntimeDeployer {
           "--filter",
           `name=^${pattern}$`, // Use exact name matching
         ]);
-        
+
         if (stdout.trim()) {
-          const containerIds = stdout.trim().split('\n').filter(Boolean);
-          
+          const containerIds = stdout.trim().split("\n").filter(Boolean);
+
           for (const containerId of containerIds) {
             try {
               const { stdout: containerInfo } = await executeCommand("docker", [
@@ -901,22 +942,28 @@ class ZeroDowntimeDeployer {
                 "--format",
                 "{{.Name}} {{.Id}} {{.State.Status}} {{.Created}}",
               ]);
-              const [name, id, status, created] = containerInfo.trim().split(" ");
-              foundContainers.push({ 
-                name: name.replace("/", ""), 
-                id, 
-                status, 
+              const [name, id, status, created] = containerInfo
+                .trim()
+                .split(" ");
+              foundContainers.push({
+                name: name.replace("/", ""),
+                id,
+                status,
                 created: new Date(created),
-                pattern 
+                pattern,
               });
-              logger.info(`Found container: ${name} (${id}) - Status: ${status}, Created: ${created}`);
+              logger.info(
+                `Found container: ${name} (${id}) - Status: ${status}, Created: ${created}`,
+              );
             } catch (inspectError) {
-              logger.warn(`Error inspecting container ${containerId}: ${inspectError.message}`);
+              logger.warn(
+                `Error inspecting container ${containerId}: ${inspectError.message}`,
+              );
             }
           }
         }
       }
-      
+
       if (foundContainers.length === 0) {
         logger.info(`No existing containers found for service ${serviceName}`);
         return null;
@@ -925,16 +972,19 @@ class ZeroDowntimeDeployer {
       // Sort by creation time to get the oldest (currently running) container
       foundContainers.sort((a, b) => a.created - b.created);
       const oldestContainer = foundContainers[0];
-      
-      logger.info(`Selected oldest container as current: ${oldestContainer.name} (${oldestContainer.id})`);
-      return { 
-        name: oldestContainer.name, 
-        id: oldestContainer.id, 
-        status: oldestContainer.status 
+
+      logger.info(
+        `Selected oldest container as current: ${oldestContainer.name} (${oldestContainer.id})`,
+      );
+      return {
+        name: oldestContainer.name,
+        id: oldestContainer.id,
+        status: oldestContainer.status,
       };
-      
     } catch (error) {
-      logger.warn(`Error getting current container for ${serviceName}: ${error.message}`);
+      logger.warn(
+        `Error getting current container for ${serviceName}: ${error.message}`,
+      );
       return null;
     }
   }
@@ -982,44 +1032,59 @@ class ZeroDowntimeDeployer {
     ws,
   }) {
     try {
-      // First, aggressively clean up any containers using our service name
+      // Only clean up stopped/failed containers, but preserve running containers
+      // for graceful blue-green deployment
       logger.info(
-        `Cleaning up any existing containers with name ${serviceName}`,
+        `Cleaning up stopped/failed containers with name ${serviceName}`,
       );
 
       try {
-        // Find ALL containers (including stopped ones) with this service name
+        // Find stopped/failed containers with this service name
         const { stdout: containerList } = await executeCommand("docker", [
           "ps",
           "-a",
           "--format",
-          "{{.ID}}",
+          "{{.ID}} {{.Status}}",
           "--filter",
           `name=${serviceName}`,
         ]);
 
-        const containerIds = containerList.trim().split("\n").filter(Boolean);
+        if (containerList.trim()) {
+          const containers = containerList.trim().split("\n").filter(Boolean);
+          const stoppedContainers = [];
 
-        if (containerIds.length > 0) {
-          logger.info(
-            `Found ${containerIds.length} containers to clean up: ${containerIds.join(", ")}`,
-          );
+          for (const containerLine of containers) {
+            const [id, ...statusParts] = containerLine.split(" ");
+            const status = statusParts.join(" ");
 
-          // Force stop and remove each container
-          for (const id of containerIds) {
-            try {
-              await executeCommand("docker", ["stop", "-t", "0", id]); // Force immediate stop
-              await executeCommand("docker", ["rm", "-f", id]); // Force removal
-            } catch (cleanupError) {
-              logger.warn(
-                `Error during container cleanup: ${cleanupError.message}`,
+            // Only remove containers that are not running (stopped, exited, failed, etc.)
+            if (!status.includes("Up")) {
+              stoppedContainers.push(id);
+            } else {
+              logger.info(
+                `Preserving running container ${id} for graceful deployment`,
               );
             }
           }
 
-          // Add a delay to ensure Docker networking fully releases the port
-          logger.info("Waiting for port resources to be fully released...");
-          await new Promise((resolve) => setTimeout(resolve, 3000));
+          if (stoppedContainers.length > 0) {
+            logger.info(
+              `Found ${stoppedContainers.length} stopped containers to clean up: ${stoppedContainers.join(", ")}`,
+            );
+
+            // Force stop and remove only stopped containers
+            for (const id of stoppedContainers) {
+              try {
+                await executeCommand("docker", ["rm", "-f", id]); // Force removal of stopped containers
+              } catch (cleanupError) {
+                logger.warn(
+                  `Error during stopped container cleanup: ${cleanupError.message}`,
+                );
+              }
+            }
+          } else {
+            logger.info("No stopped containers found to clean up.");
+          }
         } else {
           logger.info("No existing containers found with this service name.");
         }
