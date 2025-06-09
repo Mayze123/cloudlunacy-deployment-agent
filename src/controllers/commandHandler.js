@@ -11,6 +11,8 @@ const databaseController = require("./databaseController");
 const repositoryController = require("./repositoryController");
 const messageHandler = require("./messageHandler");
 const queueService = require("../services/queueService");
+const { ALL_JOB_TYPES, normalizeActionType } = require("../constants/jobTypes");
+const ResponseFormatter = require("../utils/responseFormatter");
 
 class CommandHandler {
   constructor() {
@@ -42,11 +44,14 @@ class CommandHandler {
    */
   async processJob(job, msg = null, channel = null) {
     try {
+      // Normalize the job object using standardized formatter
+      const normalizedJob = ResponseFormatter.normalizeJob(job);
+      
       // Log job details for debugging
       logger.info(
-        `Received command: ${job.actionType || job.jobType || job.type || job.command || "unknown"}`,
+        `Received command: ${normalizedJob.actionType} (ID: ${normalizedJob.id})`
       );
-      logger.debug(`Job details: ${JSON.stringify(job)}`);
+      logger.debug(`Job details: ${JSON.stringify(normalizedJob)}`);
 
       // Log RPC metadata if available
       if (msg && msg.properties) {
@@ -58,15 +63,12 @@ class CommandHandler {
         }
       }
 
-      // Extract key job information
-      const jobId = job.id || job.jobId;
+      // Normalize and determine job type
+      let jobType = normalizeActionType(normalizedJob.actionType);
 
-      // Determine job type through various methods
-      let jobType = this.determineJobType(job);
-
-      // Check for "list_services" special case
-      if (job.actionType === "list_services") {
-        jobType = "list_services";
+      // Handle special cases for list_services
+      if (normalizedJob.actionType === "list_services") {
+        jobType = ALL_JOB_TYPES.LIST_SERVICES;
       }
 
       if (!jobType) {
@@ -76,18 +78,23 @@ class CommandHandler {
       }
 
       // Create adapter and log start of processing
-      const adapter = this.createQueueAdapter(jobId);
+      const adapter = this.createQueueAdapter(normalizedJob.id);
 
-      await this.logJobStart(jobId, jobType);
+      await this.logJobStart(normalizedJob.id, jobType);
 
       // Process the job based on its determined type
       const result = await this.routeJobToHandler(
-        job,
+        normalizedJob,
         jobType,
         adapter,
         msg,
         channel,
       );
+
+      // Format the result using standardized formatter
+      const formattedResult = result.success === false 
+        ? ResponseFormatter.error(normalizedJob.id, jobType, result.error || result.message, result.result || result.data)
+        : ResponseFormatter.success(normalizedJob.id, jobType, result.result || result.data, result.message);
 
       // If this was an RPC request (has replyTo and correlationId) and it's not already
       // handled by the specific handler, send response here
@@ -97,29 +104,38 @@ class CommandHandler {
         msg.properties &&
         msg.properties.replyTo &&
         msg.properties.correlationId &&
-        jobType !== "list_services"
+        jobType !== ALL_JOB_TYPES.LIST_SERVICES
       ) {
         try {
+          const rpcResponse = ResponseFormatter.rpcResponse(
+            msg.properties.correlationId,
+            formattedResult
+          );
+          
           channel.sendToQueue(
             msg.properties.replyTo,
-            Buffer.from(JSON.stringify(result)),
+            Buffer.from(JSON.stringify(rpcResponse)),
             { correlationId: msg.properties.correlationId },
           );
           logger.info(
-            `Sent RPC response to ${msg.properties.replyTo} with correlationId ${msg.properties.correlationId}`,
+            `Sent standardized RPC response to ${msg.properties.replyTo} with correlationId ${msg.properties.correlationId}`,
           );
         } catch (rpcError) {
           logger.error(`Failed to send RPC response: ${rpcError.message}`);
         }
       }
 
-      return result;
+      return formattedResult;
     } catch (error) {
       logger.error(`Error processing job: ${error.message}`);
 
+      // Create standardized error response
+      const jobId = job?.id || job?.jobId || 'unknown';
+      const jobType = job?.actionType || job?.jobType || 'unknown';
+      const errorResponse = ResponseFormatter.error(jobId, jobType, error);
+
       // Try to publish error if we have a job ID
-      if (job.id || job.jobId) {
-        const jobId = job.id || job.jobId;
+      if (jobId !== 'unknown') {
         await this.publishJobFailure(jobId, error);
       }
 
@@ -132,15 +148,15 @@ class CommandHandler {
         msg.properties.correlationId
       ) {
         try {
+          const rpcErrorResponse = ResponseFormatter.rpcResponse(
+            msg.properties.correlationId,
+            null,
+            error
+          );
+
           channel.sendToQueue(
             msg.properties.replyTo,
-            Buffer.from(
-              JSON.stringify({
-                success: false,
-                error: error.message,
-                timestamp: new Date().toISOString(),
-              }),
-            ),
+            Buffer.from(JSON.stringify(rpcErrorResponse)),
             { correlationId: msg.properties.correlationId },
           );
         } catch (rpcError) {
@@ -160,55 +176,59 @@ class CommandHandler {
   }
 
   /**
-   * Determine the type of job from various properties
+   * Determine the type of job from various properties (legacy method)
    * @param {Object} job The job object
    * @returns {string|null} The determined job type or null if undetermined
+   * @deprecated Use normalizeActionType from constants instead
    */
   determineJobType(job) {
     // Try direct type definitions first
     let jobType = job.jobType || job.type || job.command || job.actionType;
 
-    // If job type isn't explicitly defined, try to infer it
-    if (!jobType) {
-      if (job.operation) {
-        // Infer from operation field
-        if (
-          job.operation.startsWith("db_") ||
-          job.operation.includes("database")
-        ) {
-          jobType = "database_" + job.operation.replace("db_", "");
-        } else if (
-          job.operation.startsWith("repo_") ||
-          job.operation.includes("git")
-        ) {
-          jobType = "repo_" + job.operation.replace("repo_", "");
-        } else if (job.operation.includes("deploy")) {
-          jobType = "deployment";
-        }
-      } else if (job.databaseType || job.dbType) {
-        // Infer from database-related fields
-        jobType = "database_install";
-      } else if (job.repositoryUrl || job.repoUrl) {
-        // Infer from repository-related fields
-        jobType = job.branch ? "repo_clone" : "repo_pull";
-      } else if (job.parameters) {
-        // Infer from parameters structure
-        if (job.parameters.dbType) {
-          jobType = "database_install";
-        } else if (job.parameters.repositoryUrl) {
-          jobType = "deployment";
-        } else if (
-          job.parameters.dbName &&
-          job.parameters.username &&
-          job.parameters.password
-        ) {
-          // Likely a database credential update
-          jobType = "update_mongodb_credentials";
-        }
+    // Normalize using the standardized function
+    if (jobType) {
+      return normalizeActionType(jobType);
+    }
+
+    // Legacy inference logic for backwards compatibility
+    if (job.operation) {
+      // Infer from operation field
+      if (
+        job.operation.startsWith("db_") ||
+        job.operation.includes("database")
+      ) {
+        jobType = "database_" + job.operation.replace("db_", "");
+      } else if (
+        job.operation.startsWith("repo_") ||
+        job.operation.includes("git")
+      ) {
+        jobType = "repo_" + job.operation.replace("repo_", "");
+      } else if (job.operation.includes("deploy")) {
+        jobType = ALL_JOB_TYPES.DEPLOY_APPLICATION;
+      }
+    } else if (job.databaseType || job.dbType) {
+      // Infer from database-related fields
+      jobType = ALL_JOB_TYPES.INSTALL_DATABASE;
+    } else if (job.repositoryUrl || job.repoUrl) {
+      // Infer from repository-related fields
+      jobType = job.branch ? ALL_JOB_TYPES.CLONE_REPOSITORY : ALL_JOB_TYPES.UPDATE_REPOSITORY;
+    } else if (job.parameters) {
+      // Infer from parameters structure
+      if (job.parameters.dbType) {
+        jobType = ALL_JOB_TYPES.INSTALL_DATABASE;
+      } else if (job.parameters.repositoryUrl) {
+        jobType = ALL_JOB_TYPES.DEPLOY_APPLICATION;
+      } else if (
+        job.parameters.dbName &&
+        job.parameters.username &&
+        job.parameters.password
+      ) {
+        // Likely a database credential update
+        jobType = ALL_JOB_TYPES.UPDATE_DATABASE_CREDENTIALS;
       }
     }
 
-    return jobType ? jobType.toLowerCase() : null;
+    return jobType || null;
   }
 
   /**
@@ -274,18 +294,21 @@ class CommandHandler {
    */
   async routeJobToHandler(job, jobType, adapter, msg = null, channel = null) {
     switch (jobType) {
-      // Deployment commands
-      case "deploy":
-      case "deployment":
-      case "deploy_app":
+      // Deployment commands - standardized
+      case ALL_JOB_TYPES.DEPLOY_APPLICATION:
+      case "deploy": // Legacy
+      case "deployment": // Legacy
+      case "deploy_app": // Legacy
         return await this.handleDeploymentJob(job, adapter);
 
-      // List services command (RPC)
-      case "list_services":
+      // System management
+      case ALL_JOB_TYPES.LIST_SERVICES:
+      case "list_services": // Legacy
         return await this.handleListServicesJob(job, adapter, msg, channel);
 
       // Container log streaming
-      case "stream_container_logs":
+      case ALL_JOB_TYPES.STREAM_CONTAINER_LOGS:
+      case "stream_container_logs": // Legacy
         return await this.handleStreamContainerLogsJob(
           job,
           adapter,
@@ -293,7 +316,7 @@ class CommandHandler {
           channel,
         );
 
-      case "stop_container_log_stream":
+      case "stop_container_log_stream": // Legacy - map to stop container
         return await this.handleStopContainerLogStreamJob(
           job,
           adapter,
@@ -301,44 +324,53 @@ class CommandHandler {
           channel,
         );
 
-      // Database commands
-      case "database_create":
-      case "database_install":
-      case "database_setup":
-      case "install_database_system":
-      case "create_database":
+      // Database commands - standardized
+      case ALL_JOB_TYPES.INSTALL_DATABASE:
+      case ALL_JOB_TYPES.CREATE_DATABASE:
+      case ALL_JOB_TYPES.INSTALL_DATABASE_SYSTEM:
+      case "database_create": // Legacy
+      case "database_install": // Legacy
+      case "database_setup": // Legacy
+      case "install_database_system": // Legacy
+      case "create_database": // Legacy
         return await this.handleDatabaseJob(job, adapter, "install");
 
-      case "backup_database":
+      case ALL_JOB_TYPES.BACKUP_DATABASE:
+      case "backup_database": // Legacy
         return await this.handleDatabaseJob(job, adapter, "backup");
 
-      case "restore_database":
+      case ALL_JOB_TYPES.RESTORE_DATABASE:
+      case "restore_database": // Legacy
         return await this.handleDatabaseJob(job, adapter, "restore");
 
-      case "update_mongodb_credentials":
+      case ALL_JOB_TYPES.UPDATE_DATABASE_CREDENTIALS:
+      case ALL_JOB_TYPES.UPDATE_MONGODB_CREDENTIALS:
+      case "update_mongodb_credentials": // Legacy
         return await this.handleMongoCredentialsUpdateJob(job, adapter);
 
-      // Repository/Git commands
-      case "repo_clone":
-      case "repo_pull":
+      // Repository/Git commands - standardized
+      case ALL_JOB_TYPES.CLONE_REPOSITORY:
+      case ALL_JOB_TYPES.UPDATE_REPOSITORY:
+      case "repo_clone": // Legacy
+      case "repo_pull": // Legacy
         return await this.handleRepositoryJob(job, adapter);
 
       // Service management
-      case "service_installation":
-      case "install_service":
+      case "service_installation": // Legacy
+      case "install_service": // Legacy
         return await this.handleServiceInstallation(job, adapter);
 
-      case "service_restart":
-      case "restart_service":
+      case "service_restart": // Legacy
+      case "restart_service": // Legacy
         return await this.handleServiceRestart(job, adapter);
 
       // Firewall configuration
-      case "configure_firewall":
-      case "firewall_configure":
+      case "configure_firewall": // Legacy
+      case "firewall_configure": // Legacy
         return await this.handleFirewallConfiguration(job, adapter);
 
       // Direct message processing (for backward compatibility)
-      case "message":
+      case "message": // Legacy
         return await messageHandler.handleMessage(job.message, adapter);
 
       // Handle other command types
