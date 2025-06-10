@@ -109,6 +109,7 @@ class ZeroDowntimeDeployer {
 
       logger.info(`Registering ${serviceName} with Traefik front server...`);
       logger.info(`Expected domain: ${expectedDomain}`);
+      logger.info(`Target URL: ${targetUrl}`);
 
       // Use the Traefik API endpoint for HTTP routes only
       const response = await axios.post(
@@ -260,8 +261,12 @@ class ZeroDowntimeDeployer {
               );
               return true;
             } else {
+              // Enhanced debug logging - show available routes when verification fails
+              const availableRoutes = response.data.routes
+                .map((r) => r.subdomain)
+                .join(", ");
               logger.warn(
-                `Service ${baseServiceName} not found in Traefik routes (attempt ${attempt}/${maxRetries})`,
+                `Service ${baseServiceName} not found. Available routes: [${availableRoutes}] (attempt ${attempt}/${maxRetries})`,
               );
 
               // If this isn't the last attempt, wait before retrying
@@ -381,63 +386,29 @@ class ZeroDowntimeDeployer {
         projectId,
       );
 
-      // 3. Wait briefly to ensure the configuration update propagates
-      logger.info("Waiting for configuration to propagate...");
-      await new Promise((resolve) => setTimeout(resolve, 2000));
+      // 3. Wait longer to ensure Traefik configuration update propagates
+      logger.info(
+        "Waiting for Traefik configuration to reload and propagate...",
+      );
+      await new Promise((resolve) => setTimeout(resolve, 5000)); // Increased from 2000ms
 
-      // 4. Verify the traffic switch actually worked
+      // 4. Verify the traffic switch actually worked using the same method as verifyServiceAccessibility
       logger.info("Verifying new routing configuration...");
-      let switchSuccessful = false;
-      let retryCount = 0;
-      while (!switchSuccessful && retryCount < 3) {
-        try {
-          const frontApiUrl = process.env.FRONT_API_URL;
-          const token = process.env.AGENT_JWT;
-          if (frontApiUrl && token) {
-            const routeCheck = await axios.get(
-              `${frontApiUrl}/api/proxy/routes`,
-              {
-                headers: { Authorization: `Bearer ${token}` },
-                timeout: 5000,
-              },
-            );
-            const configStr = JSON.stringify(routeCheck.data);
-            if (configStr.includes(baseServiceName)) {
-              logger.info(
-                "Route verification successful: base service name found in configuration",
-              );
-              switchSuccessful = true;
-              break;
-            } else {
-              logger.warn(
-                "Route verification failed: base service name not found in configuration",
-              );
-              retryCount++;
-              await new Promise((resolve) => setTimeout(resolve, 2000));
-            }
-          } else {
-            logger.info(
-              "Missing front API URL or token, skipping route verification",
-            );
-            switchSuccessful = true;
-            break;
-          }
-        } catch (verifyErr) {
-          logger.warn(
-            `Route verification request failed: ${verifyErr.message}`,
-          );
-          retryCount++;
-          await new Promise((resolve) => setTimeout(resolve, 2000));
-        }
-      }
-      if (switchSuccessful) {
+      const verificationResult = await this.verifyServiceAccessibility(
+        `${baseServiceName}.${process.env.APP_DOMAIN || "apps.cloudlunacy.uk"}`,
+        "http",
+        3, // maxRetries
+        3000, // retryDelay - increased from 2000ms
+      );
+
+      if (verificationResult) {
         logger.info(
           `Traffic successfully switched to container ${newContainer.name} on port ${newContainer.hostPort}`,
         );
         return true;
       } else {
         logger.warn(
-          "Traffic switch may not have completed successfully, but will continue deployment",
+          "Traffic switch verification failed, but deployment will continue as service may still be accessible",
         );
         return false;
       }
@@ -556,36 +527,11 @@ class ZeroDowntimeDeployer {
       await portManager.allocatePort(serviceName);
     logger.info("🚀 ~ ZeroDowntimeDeployer ~ deploy ~ hostPort:", hostPort);
 
-    // Register the application with the front server
-    const resolvedTargetUrl = `http://${LOCAL_IP}:${hostPort}`;
+    // We'll register with Traefik only after the container is built and ready
+    // No early registration to avoid double-registration issues
     logger.info(
-      "🚀 ~ ZeroDowntimeDeployer ~ deploy ~ resolvedTargetUrl:",
-      resolvedTargetUrl,
+      `Port allocated: ${hostPort} (container port: ${containerPort}) - will register with Traefik after container is ready`,
     );
-
-    try {
-      // Register with front server but don't send job result yet (deployment not complete)
-      await this.registerWithFrontServer(
-        serviceName,
-        resolvedTargetUrl,
-        null, // Don't pass jobId here - we'll send result when deployment actually completes
-      );
-      const isAccessible = await this.verifyServiceAccessibility(finalDomain);
-      if (!isAccessible) {
-        logger.warn(
-          `Service at ${finalDomain} is not yet accessible, but deployment will continue`,
-        );
-      } else {
-        logger.info(
-          `Service at ${finalDomain} is accessible and properly routed`,
-        );
-      }
-    } catch (err) {
-      logger.error(
-        `Failed to register service with front server: ${err.message}`,
-      );
-      logger.warn("Continuing deployment despite front API error");
-    }
 
     const serviceLockKey = `${serviceName}-${environment}`;
     if (this.deploymentLocks.has(serviceLockKey)) {
@@ -710,17 +656,8 @@ class ZeroDowntimeDeployer {
         );
       }
 
-      if (newContainer) {
-        logger.info(`Verifying service accessibility at ${finalDomain}...`);
-        const isAccessible = await this.verifyServiceAccessibility(finalDomain);
-        if (isAccessible) {
-          logger.info(`Service at ${finalDomain} is confirmed accessible`);
-        } else {
-          logger.warn(
-            `Service deployed but may not be accessible at ${finalDomain}`,
-          );
-        }
-      }
+      // Note: Service accessibility verification is already done in switchTraffic()
+      logger.info(`Deployment completed successfully for ${finalDomain}`);
 
       this.sendSuccess(ws, {
         deploymentId,
