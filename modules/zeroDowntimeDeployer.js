@@ -12,6 +12,7 @@ const axios = require("axios");
 const { execSync } = require("child_process");
 const portManager = require("../utils/portManager");
 const queueService = require("../src/services/queueService");
+const RepositoryController = require("../src/controllers/repositoryController");
 
 class ZeroDowntimeDeployer {
   constructor() {
@@ -452,6 +453,7 @@ class ZeroDowntimeDeployer {
       jobId: Joi.string().optional(), // Optional jobId for API calls that need it
       projectId: Joi.string().optional(), // Optional projectId to track which project this deployment belongs to
       appType: Joi.string().required(),
+      autoDetectAppType: Joi.boolean().default(true), // Enable auto-detection of app type
       repositoryUrl: Joi.string().required(),
       branch: Joi.string(),
       githubToken: Joi.string().required(),
@@ -498,6 +500,7 @@ class ZeroDowntimeDeployer {
     const {
       deploymentId,
       appType,
+      autoDetectAppType,
       repositoryUrl,
       branch,
       githubToken,
@@ -626,6 +629,34 @@ class ZeroDowntimeDeployer {
         repositoryUrl,
       );
 
+      // Auto-detect app type if the flag is set
+      let detectedAppType = appType;
+      if (autoDetectAppType) {
+        logger.info(
+          "Auto-detecting application type from repository contents...",
+        );
+        try {
+          const repositoryController = new RepositoryController();
+          const actualAppType =
+            await repositoryController.detectAppType(deployDir);
+
+          if (actualAppType && actualAppType !== "unknown") {
+            logger.info(
+              `Auto-detected app type: ${actualAppType} (original: ${appType})`,
+            );
+            detectedAppType = actualAppType;
+          } else {
+            logger.warn(
+              `Could not auto-detect app type, using original: ${appType}`,
+            );
+          }
+        } catch (detectionError) {
+          logger.warn(
+            `App type auto-detection failed: ${detectionError.message}, using original: ${appType}`,
+          );
+        }
+      }
+
       oldContainer = await this.getCurrentContainer(serviceName);
       if (oldContainer) await this.backupCurrentState(oldContainer, backupDir);
 
@@ -641,7 +672,7 @@ class ZeroDowntimeDeployer {
         environment,
         hostPort,
         containerPort,
-        appType: appType,
+        appType: detectedAppType,
         additionalPorts: additionalPorts || [],
         ws,
       });
