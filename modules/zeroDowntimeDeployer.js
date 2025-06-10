@@ -12,7 +12,7 @@ const axios = require("axios");
 const { execSync } = require("child_process");
 const portManager = require("../utils/portManager");
 const queueService = require("../src/services/queueService");
-const RepositoryController = require("../src/controllers/repositoryController");
+const repositoryController = require("../src/controllers/repositoryController");
 
 class ZeroDowntimeDeployer {
   constructor() {
@@ -636,7 +636,6 @@ class ZeroDowntimeDeployer {
           "Auto-detecting application type from repository contents...",
         );
         try {
-          const repositoryController = new RepositoryController();
           const actualAppType =
             await repositoryController.detectAppType(deployDir);
 
@@ -1237,6 +1236,12 @@ class ZeroDowntimeDeployer {
 
         // Add PORT to environment variables
         envVars["PORT"] = containerPort.toString();
+
+        // For React apps, disable CI mode to prevent ESLint warnings from being treated as errors
+        if (appType === "react") {
+          envVars["CI"] = "false";
+          logger.info("Disabled CI mode for React app to allow ESLint warnings");
+        }
 
         // Build the image with Nixpacks (defaults only)
         await NixpacksBuilder.buildImage({
