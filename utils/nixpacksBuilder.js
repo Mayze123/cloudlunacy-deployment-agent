@@ -23,8 +23,13 @@ class NixpacksBuilder {
 
     await this.ensureNixpacksInstalled();
 
-    // Assemble CLI args
+    // Assemble CLI args with optimizations
     const args = ["build", projectDir, "--name", imageName];
+
+    // Add optimization flags for faster builds
+    args.push("--no-error-without-start");
+    args.push("--cache-key", `${imageName}-${Date.now()}`);
+
     Object.entries(envVars).forEach(([key, value]) => {
       if (value != null) args.push("--env", `${key}=${value}`);
       else logger.warn(`Skipping null/undefined env var: ${key}`);
@@ -45,6 +50,10 @@ class NixpacksBuilder {
     try {
       await executeCommand("nixpacks", ["--version"]);
       logger.info("Nixpacks installed");
+
+      // Set optimization environment variables for Nixpacks
+      process.env.NIXPACKS_NO_MUSL = "1"; // Use glibc for better compatibility
+      process.env.NIXPACKS_PLAN_CACHE = "1"; // Enable plan caching
     } catch {
       logger.warn("Nixpacks not found, installing via npm...");
       await executeCommand("npm", ["install", "-g", "nixpacks"]);

@@ -25,87 +25,79 @@
     "phases": {
       "setup": {
         "cmds": [
-          "npm ci --no-audit --no-fund --prefer-offline --cache /tmp/.npm"
+          "npm ci --no-audit --no-fund --prefer-offline"
         ]
       },
       "build": {
         "cmds": [
-          "GENERATE_SOURCEMAP=false DISABLE_ESLINT_PLUGIN=true CI=false npm run build"
+          "GENERATE_SOURCEMAP=false npm run build"
         ]
       },
       "install": {
-        "cmds": ["npm install -g serve@14.2.1 --no-audit --no-fund"]
+        "cmds": ["npm install -g serve@14.2.1"]
       }
     },
-    "start": "serve -s build -l 8080 --no-clipboard --no-compression",
+    "start": "serve -s build -l 8080",
     "variables": {
       "CI": "false",
       "GENERATE_SOURCEMAP": "false",
       "NODE_ENV": "production",
       "NPM_CONFIG_UPDATE_NOTIFIER": "false",
       "NPM_CONFIG_FUND": "false",
-      "NPM_CONFIG_AUDIT": "false",
       "DISABLE_ESLINT_PLUGIN": "true",
       "TSC_COMPILE_ON_ERROR": "true",
-      "ESLINT_NO_DEV_ERRORS": "true",
-      "FAST_REFRESH": "false",
-      "SKIP_PREFLIGHT_CHECK": "true"
+      "ESLINT_NO_DEV_ERRORS": "true"
     }
   },
   "nextjs": {
-    "name": "Next.js Application",
+    "name": "Next.js Application Optimized",
     "providers": ["node"],
     "phases": {
       "setup": {
-        "cmds": ["npm ci"]
+        "cmds": [
+          "npm ci --no-audit --no-fund --prefer-offline"
+        ]
       },
       "build": {
         "cmds": ["npm run build"]
       }
     },
-    "start": "npm start"
+    "start": "npm start",
+    "variables": {
+      "NODE_ENV": "production",
+      "NPM_CONFIG_UPDATE_NOTIFIER": "false",
+      "NPM_CONFIG_FUND": "false"
+    }
   },
   "express": {
-    "name": "Express.js Server",
+    "name": "Express.js Server Optimized",
     "providers": ["node"],
     "phases": {
       "setup": {
-        "cmds": ["npm ci --only=production"]
+        "cmds": [
+          "npm ci --only=production --no-audit --no-fund --prefer-offline"
+        ]
       }
     },
-    "start": "node server.js"
+    "start": "npm start",
+    "variables": {
+      "NODE_ENV": "production",
+      "NPM_CONFIG_UPDATE_NOTIFIER": "false",
+      "NPM_CONFIG_FUND": "false"
+    }
   },
   "python": {
-    "name": "Python Application",
+    "name": "Python Application Optimized",
     "providers": ["python"],
     "phases": {
       "setup": {
         "cmds": ["pip install --no-cache-dir -r requirements.txt"]
       }
     },
-    "start": "python app.py"
-  },
-  "django": {
-    "name": "Django Application",
-    "providers": ["python"],
-    "phases": {
-      "setup": {
-        "cmds": [
-          "pip install --no-cache-dir -r requirements.txt",
-          "python manage.py collectstatic --noinput"
-        ]
-      }
-    },
-    "start": "gunicorn myproject.wsgi:application --bind 0.0.0.0:$PORT"
-  },
-  "ruby": {
-    "name": "Ruby Application",
-    "providers": ["ruby"],
-    "phases": {
-      "setup": {
-        "cmds": ["bundle install"]
-      }
-    },
-    "start": "ruby app.rb"
+    "start": "python app.py",
+    "variables": {
+      "PYTHONUNBUFFERED": "1",
+      "PIP_NO_CACHE_DIR": "1"
+    }
   }
 }

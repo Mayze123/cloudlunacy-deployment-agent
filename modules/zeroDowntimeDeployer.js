@@ -17,12 +17,12 @@ const repositoryController = require("../src/controllers/repositoryController");
 class ZeroDowntimeDeployer {
   constructor() {
     this.healthCheckRetries =
-      parseInt(process.env.HEALTH_CHECK_RETRIES, 10) || 5;
+      parseInt(process.env.HEALTH_CHECK_RETRIES, 10) || 3; // Reduced from 5
     this.healthCheckInterval =
-      parseInt(process.env.HEALTH_CHECK_INTERVAL, 10) || 10000;
+      parseInt(process.env.HEALTH_CHECK_INTERVAL, 10) || 5000; // Reduced from 10000
     this.startupGracePeriod =
-      parseInt(process.env.STARTUP_GRACE_PERIOD, 10) || 30000;
-    this.rollbackTimeout = parseInt(process.env.ROLLBACK_TIMEOUT, 10) || 180000;
+      parseInt(process.env.STARTUP_GRACE_PERIOD, 10) || 20000; // Reduced from 30000
+    this.rollbackTimeout = parseInt(process.env.ROLLBACK_TIMEOUT, 10) || 120000; // Reduced from 180000
     this.templateHandler = null;
     this.deployBaseDir =
       process.env.DEPLOY_BASE_DIR || "/opt/cloudlunacy/deployments";
@@ -1209,13 +1209,13 @@ class ZeroDowntimeDeployer {
       // Define the image name
       const imageName = `${serviceName}:latest`;
 
-      // Setup health check
+      // Setup health check with optimized settings
       const health = {
         checkPath: "/health",
-        interval: "30s",
-        timeout: "5s",
-        retries: 3,
-        start_period: "40s",
+        interval: "20s", // Reduced from 30s
+        timeout: "10s", // Increased from 5s for React apps
+        retries: 2, // Reduced from 3
+        start_period: "30s", // Reduced from 40s
       };
 
       if (this.useNixpacks) {
@@ -1240,17 +1240,31 @@ class ZeroDowntimeDeployer {
         // For React apps, disable CI mode to prevent ESLint warnings from being treated as errors
         if (appType === "react") {
           envVars["CI"] = "false";
+          envVars["GENERATE_SOURCEMAP"] = "false";
+          envVars["DISABLE_ESLINT_PLUGIN"] = "true";
+          envVars["TSC_COMPILE_ON_ERROR"] = "true";
+          envVars["ESLINT_NO_DEV_ERRORS"] = "true";
+          envVars["NPM_CONFIG_UPDATE_NOTIFIER"] = "false";
+          envVars["NPM_CONFIG_FUND"] = "false";
+          envVars["NPM_CONFIG_AUDIT"] = "false";
           logger.info(
-            "Disabled CI mode for React app to allow ESLint warnings",
+            "Applied React build optimizations: disabled sourcemaps, ESLint warnings, and npm notifications",
           );
         }
 
-        // Build the image with Nixpacks (defaults only)
+        // Build the image with Nixpacks with optimizations
         await NixpacksBuilder.buildImage({
           projectDir: deployDir,
           imageName,
           envVars,
         });
+
+        // Enable Docker BuildKit for faster builds if available
+        const buildEnv = { ...process.env };
+        if (!buildEnv.DOCKER_BUILDKIT) {
+          buildEnv.DOCKER_BUILDKIT = "1";
+          buildEnv.COMPOSE_DOCKER_CLI_BUILD = "1";
+        }
 
         // Create a minimal docker-compose.yml file directly
         let portsConfig = `      - "${hostPort}:${containerPort}"`;
@@ -1328,19 +1342,31 @@ networks:
           ),
         ]);
 
-        // Build the container with docker-compose
+        // Build the container with docker-compose and optimizations
         logger.info(`Building container with project name ${projectName}...`);
         await executeCommand(
           "docker-compose",
-          ["-p", projectName, "build", "--no-cache"],
-          { cwd: deployDir },
+          ["-p", projectName, "build", "--no-cache", "--parallel"],
+          {
+            cwd: deployDir,
+            env: {
+              ...process.env,
+              DOCKER_BUILDKIT: "1",
+              COMPOSE_DOCKER_CLI_BUILD: "1",
+            },
+          },
         );
       }
 
-      // Start the container using docker-compose
+      // Start the container using docker-compose with optimizations
       logger.info(`Starting container on port ${hostPort}...`);
       await executeCommand("docker-compose", ["-p", projectName, "up", "-d"], {
         cwd: deployDir,
+        env: {
+          ...process.env,
+          DOCKER_BUILDKIT: "1",
+          COMPOSE_DOCKER_CLI_BUILD: "1",
+        },
       });
 
       // Get the new container ID
