@@ -46,10 +46,10 @@ class CommandHandler {
     try {
       // Normalize the job object using standardized formatter
       const normalizedJob = ResponseFormatter.normalizeJob(job);
-      
+
       // Log job details for debugging
       logger.info(
-        `Received command: ${normalizedJob.actionType} (ID: ${normalizedJob.id})`
+        `Received command: ${normalizedJob.actionType} (ID: ${normalizedJob.id})`,
       );
       logger.debug(`Job details: ${JSON.stringify(normalizedJob)}`);
 
@@ -92,9 +92,20 @@ class CommandHandler {
       );
 
       // Format the result using standardized formatter
-      const formattedResult = result.success === false 
-        ? ResponseFormatter.error(normalizedJob.id, jobType, result.error || result.message, result.result || result.data)
-        : ResponseFormatter.success(normalizedJob.id, jobType, result.result || result.data, result.message);
+      const formattedResult =
+        result.success === false
+          ? ResponseFormatter.error(
+              normalizedJob.id,
+              jobType,
+              result.error || result.message,
+              result.result || result.data,
+            )
+          : ResponseFormatter.success(
+              normalizedJob.id,
+              jobType,
+              result.result || result.data,
+              result.message,
+            );
 
       // If this was an RPC request (has replyTo and correlationId) and it's not already
       // handled by the specific handler, send response here
@@ -109,9 +120,9 @@ class CommandHandler {
         try {
           const rpcResponse = ResponseFormatter.rpcResponse(
             msg.properties.correlationId,
-            formattedResult
+            formattedResult,
           );
-          
+
           channel.sendToQueue(
             msg.properties.replyTo,
             Buffer.from(JSON.stringify(rpcResponse)),
@@ -130,12 +141,12 @@ class CommandHandler {
       logger.error(`Error processing job: ${error.message}`);
 
       // Create standardized error response
-      const jobId = job?.id || job?.jobId || 'unknown';
-      const jobType = job?.actionType || job?.jobType || 'unknown';
+      const jobId = job?.id || job?.jobId || "unknown";
+      const jobType = job?.actionType || job?.jobType || "unknown";
       const errorResponse = ResponseFormatter.error(jobId, jobType, error);
 
       // Try to publish error if we have a job ID
-      if (jobId !== 'unknown') {
+      if (jobId !== "unknown") {
         await this.publishJobFailure(jobId, error);
       }
 
@@ -151,7 +162,7 @@ class CommandHandler {
           const rpcErrorResponse = ResponseFormatter.rpcResponse(
             msg.properties.correlationId,
             null,
-            error
+            error,
           );
 
           channel.sendToQueue(
@@ -211,7 +222,9 @@ class CommandHandler {
       jobType = ALL_JOB_TYPES.INSTALL_DATABASE;
     } else if (job.repositoryUrl || job.repoUrl) {
       // Infer from repository-related fields
-      jobType = job.branch ? ALL_JOB_TYPES.CLONE_REPOSITORY : ALL_JOB_TYPES.UPDATE_REPOSITORY;
+      jobType = job.branch
+        ? ALL_JOB_TYPES.CLONE_REPOSITORY
+        : ALL_JOB_TYPES.UPDATE_REPOSITORY;
     } else if (job.parameters) {
       // Infer from parameters structure
       if (job.parameters.dbType) {
@@ -296,19 +309,14 @@ class CommandHandler {
     switch (jobType) {
       // Deployment commands - standardized
       case ALL_JOB_TYPES.DEPLOY_APPLICATION:
-      case "deploy": // Legacy
-      case "deployment": // Legacy
-      case "deploy_app": // Legacy
         return await this.handleDeploymentJob(job, adapter);
 
       // System management
       case ALL_JOB_TYPES.LIST_SERVICES:
-      case "list_services": // Legacy
         return await this.handleListServicesJob(job, adapter, msg, channel);
 
       // Container log streaming
       case ALL_JOB_TYPES.STREAM_CONTAINER_LOGS:
-      case "stream_container_logs": // Legacy
         return await this.handleStreamContainerLogsJob(
           job,
           adapter,
@@ -316,7 +324,7 @@ class CommandHandler {
           channel,
         );
 
-      case "stop_container_log_stream": // Legacy - map to stop container
+      case "stop_container_log_stream": // Special case - not in constants yet
         return await this.handleStopContainerLogStreamJob(
           job,
           adapter,
@@ -328,50 +336,22 @@ class CommandHandler {
       case ALL_JOB_TYPES.INSTALL_DATABASE:
       case ALL_JOB_TYPES.CREATE_DATABASE:
       case ALL_JOB_TYPES.INSTALL_DATABASE_SYSTEM:
-      case "database_create": // Legacy
-      case "database_install": // Legacy
-      case "database_setup": // Legacy
-      case "install_database_system": // Legacy
-      case "create_database": // Legacy
         return await this.handleDatabaseJob(job, adapter, "install");
 
       case ALL_JOB_TYPES.BACKUP_DATABASE:
-      case "backup_database": // Legacy
         return await this.handleDatabaseJob(job, adapter, "backup");
 
       case ALL_JOB_TYPES.RESTORE_DATABASE:
-      case "restore_database": // Legacy
         return await this.handleDatabaseJob(job, adapter, "restore");
 
       case ALL_JOB_TYPES.UPDATE_DATABASE_CREDENTIALS:
       case ALL_JOB_TYPES.UPDATE_MONGODB_CREDENTIALS:
-      case "update_mongodb_credentials": // Legacy
         return await this.handleMongoCredentialsUpdateJob(job, adapter);
 
       // Repository/Git commands - standardized
       case ALL_JOB_TYPES.CLONE_REPOSITORY:
       case ALL_JOB_TYPES.UPDATE_REPOSITORY:
-      case "repo_clone": // Legacy
-      case "repo_pull": // Legacy
         return await this.handleRepositoryJob(job, adapter);
-
-      // Service management
-      case "service_installation": // Legacy
-      case "install_service": // Legacy
-        return await this.handleServiceInstallation(job, adapter);
-
-      case "service_restart": // Legacy
-      case "restart_service": // Legacy
-        return await this.handleServiceRestart(job, adapter);
-
-      // Firewall configuration
-      case "configure_firewall": // Legacy
-      case "firewall_configure": // Legacy
-        return await this.handleFirewallConfiguration(job, adapter);
-
-      // Direct message processing (for backward compatibility)
-      case "message": // Legacy
-        return await messageHandler.handleMessage(job.message, adapter);
 
       // Handle other command types
       default:

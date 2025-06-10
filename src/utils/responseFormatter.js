@@ -5,7 +5,7 @@
  * Ensures consistent response structure across all job types
  */
 
-const { JOB_STATUS } = require('../constants/jobTypes');
+const { JOB_STATUS } = require("../constants/jobTypes");
 
 class ResponseFormatter {
   /**
@@ -16,7 +16,12 @@ class ResponseFormatter {
    * @param {string} message - Optional success message
    * @returns {Object} Formatted response
    */
-  static success(jobId, jobType, data = {}, message = 'Job completed successfully') {
+  static success(
+    jobId,
+    jobType,
+    data = {},
+    message = "Job completed successfully",
+  ) {
     return {
       jobId,
       actionType: jobType, // Use actionType for agent responses
@@ -27,7 +32,7 @@ class ResponseFormatter {
       result: data, // Use 'result' for backwards compatibility
       data,
       timestamp: new Date().toISOString(),
-      error: null
+      error: null,
     };
   }
 
@@ -56,8 +61,8 @@ class ResponseFormatter {
       error: {
         message: errorMessage,
         stack: errorStack,
-        type: error instanceof Error ? error.constructor.name : 'UnknownError'
-      }
+        type: error instanceof Error ? error.constructor.name : "UnknownError",
+      },
     };
   }
 
@@ -69,7 +74,12 @@ class ResponseFormatter {
    * @param {Object} data - Optional processing data
    * @returns {Object} Formatted response
    */
-  static processing(jobId, jobType, message = 'Job is being processed', data = {}) {
+  static processing(
+    jobId,
+    jobType,
+    message = "Job is being processed",
+    data = {},
+  ) {
     return {
       jobId,
       actionType: jobType, // Use actionType for agent responses
@@ -80,7 +90,7 @@ class ResponseFormatter {
       result: data, // Use 'result' for backwards compatibility
       data,
       timestamp: new Date().toISOString(),
-      error: null
+      error: null,
     };
   }
 
@@ -100,7 +110,7 @@ class ResponseFormatter {
       level,
       message,
       timestamp: new Date().toISOString(),
-      metadata
+      metadata,
     };
   }
 
@@ -110,20 +120,22 @@ class ResponseFormatter {
    * @returns {Object} Normalized job object
    */
   static normalizeJob(job) {
-    if (!job || typeof job !== 'object') {
-      throw new Error('Job must be a valid object');
+    if (!job || typeof job !== "object") {
+      throw new Error("Job must be a valid object");
     }
 
     // Extract job ID
     const jobId = job.id || job.jobId || job._id;
     if (!jobId) {
-      throw new Error('Job must have an ID (id, jobId, or _id)');
+      throw new Error("Job must have an ID (id, jobId, or _id)");
     }
 
     // Extract and normalize job type
     const jobType = job.actionType || job.jobType || job.type || job.command;
     if (!jobType) {
-      throw new Error('Job must have a type (actionType, jobType, type, or command)');
+      throw new Error(
+        "Job must have a type (actionType, jobType, type, or command)",
+      );
     }
 
     // Extract server/VPS ID
@@ -138,7 +150,7 @@ class ResponseFormatter {
       jobType: jobType,
       serverId: serverId,
       vpsId: serverId,
-      timestamp: job.timestamp || new Date().toISOString()
+      timestamp: job.timestamp || new Date().toISOString(),
     };
   }
 
@@ -156,7 +168,7 @@ class ResponseFormatter {
         success: false,
         error: error instanceof Error ? error.message : error,
         result: null,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
       };
     }
 
@@ -165,7 +177,7 @@ class ResponseFormatter {
       success: true,
       result,
       error: null,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
     };
   }
 }

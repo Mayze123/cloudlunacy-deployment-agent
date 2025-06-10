@@ -138,6 +138,10 @@ class ZeroDowntimeDeployer {
           `Service ${serviceName} registered successfully with domain: ${finalDomain}`,
         );
 
+        // Give Traefik a moment to reload its configuration after route registration
+        logger.info("Waiting for Traefik to reload configuration...");
+        await new Promise((resolve) => setTimeout(resolve, 3000)); // 3 second delay
+
         const result = {
           success: true,
           domain: finalDomain,
@@ -204,7 +208,12 @@ class ZeroDowntimeDeployer {
     }
   }
 
-  async verifyServiceAccessibility(domain, protocol = "http", maxRetries = 3, retryDelay = 2000) {
+  async verifyServiceAccessibility(
+    domain,
+    protocol = "http",
+    maxRetries = 3,
+    retryDelay = 2000,
+  ) {
     try {
       const frontApiUrl = process.env.FRONT_API_URL;
       const jwt = process.env.AGENT_JWT;
@@ -226,8 +235,10 @@ class ZeroDowntimeDeployer {
       // Retry mechanism to handle Traefik routing table update delays
       for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
-          logger.info(`Verification attempt ${attempt}/${maxRetries} for ${baseServiceName}`);
-          
+          logger.info(
+            `Verification attempt ${attempt}/${maxRetries} for ${baseServiceName}`,
+          );
+
           // Query the front server API to check if the service is configured
           const response = await axios.get(`${frontApiUrl}/api/proxy/routes`, {
             headers: {
@@ -251,31 +262,33 @@ class ZeroDowntimeDeployer {
               logger.warn(
                 `Service ${baseServiceName} not found in Traefik routes (attempt ${attempt}/${maxRetries})`,
               );
-              
+
               // If this isn't the last attempt, wait before retrying
               if (attempt < maxRetries) {
                 logger.info(`Waiting ${retryDelay}ms before retry...`);
-                await new Promise(resolve => setTimeout(resolve, retryDelay));
+                await new Promise((resolve) => setTimeout(resolve, retryDelay));
               }
             }
           } else {
-            logger.warn(`Invalid response from Traefik routes API (attempt ${attempt}/${maxRetries})`);
-            
+            logger.warn(
+              `Invalid response from Traefik routes API (attempt ${attempt}/${maxRetries})`,
+            );
+
             // If this isn't the last attempt, wait before retrying
             if (attempt < maxRetries) {
               logger.info(`Waiting ${retryDelay}ms before retry...`);
-              await new Promise(resolve => setTimeout(resolve, retryDelay));
+              await new Promise((resolve) => setTimeout(resolve, retryDelay));
             }
           }
         } catch (apiError) {
           logger.error(
             `Error checking Traefik configuration (attempt ${attempt}/${maxRetries}): ${apiError.message}`,
           );
-          
+
           // If this isn't the last attempt, wait before retrying
           if (attempt < maxRetries) {
             logger.info(`Waiting ${retryDelay}ms before retry...`);
-            await new Promise(resolve => setTimeout(resolve, retryDelay));
+            await new Promise((resolve) => setTimeout(resolve, retryDelay));
           }
         }
       }
