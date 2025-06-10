@@ -513,19 +513,20 @@ class CommandHandler {
           type: "deploy_app",
           requestId: jobId,
           payload: {
-            deploymentId: deploymentId, // Use the properly formatted deploymentId          jobId: jobId, // Keep track of the original jobId too
-          appType: job.parameters.appType || "nodejs",
-          repositoryUrl: job.parameters.repositoryUrl,
-          branch: job.parameters.branch,
-          githubToken: job.parameters.githubToken,
-          environment: job.parameters.environment || "production",
-          // Use serviceName directly or fall back to legacy appName field for backward compatibility
-          serviceName: job.parameters.serviceName || job.parameters.appName,
-          // Domain is optional - will be generated from serviceName if not provided
-          domain: job.parameters.domain,
-          envVarsToken: job.parameters.envVarsToken,
-          // Flag to enable auto-detection of app type if needed
-          autoDetectAppType: true,
+            deploymentId: deploymentId, // Use the properly formatted deploymentId
+            jobId: jobId, // Keep track of the original jobId too
+            appType: job.parameters.appType || "nodejs",
+            repositoryUrl: job.parameters.repositoryUrl,
+            branch: job.parameters.branch,
+            githubToken: job.parameters.githubToken,
+            environment: job.parameters.environment || "production",
+            // Use serviceName directly or fall back to legacy appName field for backward compatibility
+            serviceName: job.parameters.serviceName || job.parameters.appName,
+            // Domain is optional - will be generated from serviceName if not provided
+            domain: job.parameters.domain,
+            envVarsToken: job.parameters.envVarsToken,
+            // Flag to enable auto-detection of app type if needed
+            autoDetectAppType: true,
           },
         };
 

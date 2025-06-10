@@ -1240,7 +1240,9 @@ class ZeroDowntimeDeployer {
         // For React apps, disable CI mode to prevent ESLint warnings from being treated as errors
         if (appType === "react") {
           envVars["CI"] = "false";
-          logger.info("Disabled CI mode for React app to allow ESLint warnings");
+          logger.info(
+            "Disabled CI mode for React app to allow ESLint warnings",
+          );
         }
 
         // Build the image with Nixpacks (defaults only)
