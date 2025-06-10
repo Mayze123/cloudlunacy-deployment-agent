@@ -605,7 +605,27 @@ class ZeroDowntimeDeployer {
       oldContainer = await this.getCurrentContainer(serviceName);
       if (oldContainer) await this.backupCurrentState(oldContainer, backupDir);
 
-      const blueGreenLabel = oldContainer ? "green" : "blue";
+      // Blue-green deployment: alternate between blue and green
+      let blueGreenLabel;
+      if (oldContainer) {
+        // If existing container is blue, deploy green; if green, deploy blue
+        if (oldContainer.name.includes("-green")) {
+          blueGreenLabel = "blue";
+        } else if (oldContainer.name.includes("-blue")) {
+          blueGreenLabel = "green";
+        } else {
+          // If no blue/green suffix, start with green
+          blueGreenLabel = "green";
+        }
+        logger.info(
+          `Existing container: ${oldContainer.name}, deploying new: ${blueGreenLabel}`,
+        );
+      } else {
+        // No existing container, start with blue
+        blueGreenLabel = "blue";
+        logger.info("No existing container found, starting with blue");
+      }
+
       const newContainerName = `${serviceName}-${blueGreenLabel}`;
 
       newContainer = await this.buildAndStartContainer({
@@ -1297,14 +1317,58 @@ networks:
 
       // Start the container using docker-compose with optimizations
       logger.info(`Starting container on port ${hostPort}...`);
-      await executeCommand("docker-compose", ["-p", projectName, "up", "-d"], {
-        cwd: deployDir,
-        env: {
-          ...process.env,
-          DOCKER_BUILDKIT: "1",
-          COMPOSE_DOCKER_CLI_BUILD: "1",
-        },
-      });
+
+      try {
+        await executeCommand(
+          "docker-compose",
+          ["-p", projectName, "up", "-d"],
+          {
+            cwd: deployDir,
+            env: {
+              ...process.env,
+              DOCKER_BUILDKIT: "1",
+              COMPOSE_DOCKER_CLI_BUILD: "1",
+            },
+          },
+        );
+      } catch (composeError) {
+        // Handle container name conflicts
+        if (composeError.message.includes("is already in use by container")) {
+          logger.warn(
+            `Container name conflict detected for ${serviceName}. Attempting to resolve...`,
+          );
+
+          // Force remove any existing container with the same name
+          try {
+            await executeCommand("docker", ["rm", "-f", serviceName]);
+            logger.info(`Removed conflicting container: ${serviceName}`);
+          } catch (removeError) {
+            logger.warn(
+              `Could not remove conflicting container: ${removeError.message}`,
+            );
+          }
+
+          // Retry the docker-compose up
+          logger.info(
+            "Retrying container startup after conflict resolution...",
+          );
+          await executeCommand(
+            "docker-compose",
+            ["-p", projectName, "up", "-d"],
+            {
+              cwd: deployDir,
+              env: {
+                ...process.env,
+                DOCKER_BUILDKIT: "1",
+                COMPOSE_DOCKER_CLI_BUILD: "1",
+              },
+            },
+          );
+        } else {
+          // Re-throw if it's not a name conflict issue
+          throw composeError;
+        }
+      }
 
       // Get the new container ID
       const { stdout: newContainerId } = await executeCommand(
