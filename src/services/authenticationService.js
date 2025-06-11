@@ -11,6 +11,7 @@ const crypto = require("crypto");
 const logger = require("../../utils/logger");
 const config = require("../config");
 const websocketService = require("./websocketService");
+const enhancedWebSocketService = require("./enhancedWebSocketService");
 const queueService = require("./queueService");
 
 // Constants
@@ -104,7 +105,63 @@ class AuthenticationService {
           logger.warn("No WebSocket token provided by backend");
         }
 
-        // Try RabbitMQ connection first if rabbitmq details were provided
+        // Always establish WebSocket connection for heartbeats and metrics
+        if (wsUrl) {
+          logger.info(`WebSocket URL received from backend: ${wsUrl}`);
+
+          // Try enhanced WebSocket service first
+          try {
+            logger.info(
+              "Establishing enhanced WebSocket service for heartbeats and metrics",
+            );
+            await enhancedWebSocketService.initialize();
+            await enhancedWebSocketService.connect();
+
+            // Setup event handlers
+            enhancedWebSocketService.on("connected", () => {
+              logger.info("Enhanced WebSocket service connected successfully");
+              this.isConnected = true;
+            });
+
+            enhancedWebSocketService.on("registered", () => {
+              logger.info("Agent registered with enhanced WebSocket service");
+            });
+
+            enhancedWebSocketService.on("disconnected", () => {
+              logger.warn("Enhanced WebSocket service disconnected");
+              // Don't set isConnected to false here as RabbitMQ might still be working
+            });
+
+            enhancedWebSocketService.on("error", (error) => {
+              logger.error(
+                `Enhanced WebSocket service error: ${error.message}`,
+              );
+            });
+          } catch (enhancedError) {
+            logger.warn(
+              `Enhanced WebSocket service failed: ${enhancedError.message}`,
+            );
+            logger.info("Falling back to legacy WebSocket service");
+
+            try {
+              // Fallback to legacy WebSocket service
+              websocketService.establishConnection(wsUrl);
+              logger.info(
+                "Legacy WebSocket service established for heartbeats",
+              );
+            } catch (legacyError) {
+              logger.error(
+                `Legacy WebSocket service also failed: ${legacyError.message}`,
+              );
+            }
+          }
+        } else {
+          logger.warn(
+            "No WebSocket URL provided - heartbeats and metrics will not be sent",
+          );
+        }
+
+        // Try RabbitMQ connection for command processing if details were provided
         if (rabbitmq && rabbitmq.url) {
           logger.info("RabbitMQ connection details received from backend");
 
@@ -120,7 +177,9 @@ class AuthenticationService {
             const queueInitialized = await queueService.initialize();
 
             if (queueInitialized) {
-              logger.info("Successfully connected to RabbitMQ");
+              logger.info(
+                "Successfully connected to RabbitMQ for command processing",
+              );
 
               // Start consuming messages from the command queue
               logger.info("Setting up command queue consumer");
@@ -148,11 +207,10 @@ class AuthenticationService {
                       JSON.stringify(this.commandConsumer)),
                 );
 
-                // Start sending heartbeats
-                queueService.startHeartbeats();
-
-                this.isConnected = true;
-                return;
+                // Note: We don't start RabbitMQ heartbeats anymore as WebSocket handles all heartbeats
+                logger.info(
+                  "Using WebSocket for heartbeats instead of RabbitMQ",
+                );
               } else {
                 logger.error(
                   "Failed to set up command consumer - no consumer tag returned",
@@ -160,32 +218,31 @@ class AuthenticationService {
               }
             } else {
               logger.warn(
-                "Failed to initialize queue service, will try WebSocket fallback",
+                "Failed to initialize queue service for command processing",
               );
             }
           } catch (queueError) {
             logger.error(
               `Failed to connect to RabbitMQ: ${queueError.message}`,
             );
-            logger.info("Falling back to WebSocket communication");
+            logger.info(
+              "Will use WebSocket for command communication as fallback",
+            );
+            this.usingWebsocketFallback = true;
           }
         } else {
           logger.warn(
-            "No RabbitMQ connection details provided by server, using WebSocket fallback",
+            "No RabbitMQ connection details provided by server, using WebSocket for all communication",
           );
+          this.usingWebsocketFallback = true;
         }
 
-        // Fallback to WebSocket if RabbitMQ connection failed or URL not provided
-        if (wsUrl) {
-          logger.info(`WebSocket URL received from backend: ${wsUrl}`);
-          // Pass the WebSocket token to the WebSocket service
-          websocketService.establishConnection(wsUrl);
-          this.usingWebsocketFallback = true;
-          this.isConnected = true;
-        } else {
-          throw new Error(
-            "Neither RabbitMQ nor WebSocket URL provided by backend.",
+        // Ensure we're marked as connected if either WebSocket or RabbitMQ succeeded
+        if (!this.isConnected && wsUrl) {
+          logger.error(
+            "Failed to establish any connection to backend services",
           );
+          throw new Error("No communication channel established with backend");
         }
       } catch (error) {
         logger.warn(`Could not connect to backend service: ${error.message}`);
