@@ -53,6 +53,7 @@ const config = {
 
   // WebSocket configuration
   websocket: {
+    url: null, // Will be set by authentication service
     reconnectMaxRetries: 5,
     initialRetryDelay: 5000,
   },

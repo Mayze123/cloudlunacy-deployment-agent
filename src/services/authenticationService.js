@@ -109,6 +109,9 @@ class AuthenticationService {
         if (wsUrl) {
           logger.info(`WebSocket URL received from backend: ${wsUrl}`);
 
+          // Update config with WebSocket URL
+          config.websocket.url = wsUrl;
+
           // Try enhanced WebSocket service first
           try {
             logger.info(

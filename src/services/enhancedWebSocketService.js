@@ -113,7 +113,15 @@ class EnhancedWebSocketService extends EventEmitter {
     }
 
     try {
-      const wsUrl = `${config.websocket.url}/agent`;
+      // Check if WebSocket URL is available
+      if (!config.websocket.url) {
+        throw new Error(
+          "WebSocket URL not configured. Ensure authentication has completed first.",
+        );
+      }
+
+      // Use the WebSocket URL as provided by the backend (already includes the path)
+      const wsUrl = config.websocket.url;
       logger.info(`Connecting to WebSocket server: ${wsUrl}`);
 
       this.ws = new WebSocket(wsUrl, {
