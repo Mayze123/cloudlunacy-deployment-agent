@@ -112,7 +112,7 @@ class AuthenticationService {
           // Update config with WebSocket URL
           config.websocket.url = wsUrl;
 
-          // Try enhanced WebSocket service first
+          // Use enhanced WebSocket service only
           try {
             logger.info(
               "Establishing enhanced WebSocket service for heartbeats and metrics",
@@ -120,43 +120,37 @@ class AuthenticationService {
             await enhancedWebSocketService.initialize();
             await enhancedWebSocketService.connect();
 
-            // Setup event handlers
-            enhancedWebSocketService.on("connected", () => {
-              logger.info("Enhanced WebSocket service connected successfully");
-              this.isConnected = true;
-            });
+            // Setup event handlers only once to avoid duplicate logging
+            if (!enhancedWebSocketService.hasListeners) {
+              enhancedWebSocketService.on("connected", () => {
+                logger.info(
+                  "Enhanced WebSocket service connected successfully",
+                );
+                this.isConnected = true;
+              });
 
-            enhancedWebSocketService.on("registered", () => {
-              logger.info("Agent registered with enhanced WebSocket service");
-            });
+              enhancedWebSocketService.on("registered", () => {
+                logger.info("Agent registered with enhanced WebSocket service");
+              });
 
-            enhancedWebSocketService.on("disconnected", () => {
-              logger.warn("Enhanced WebSocket service disconnected");
-              // Don't set isConnected to false here as RabbitMQ might still be working
-            });
+              enhancedWebSocketService.on("disconnected", () => {
+                logger.warn("Enhanced WebSocket service disconnected");
+                // Don't set isConnected to false here as RabbitMQ might still be working
+              });
 
-            enhancedWebSocketService.on("error", (error) => {
-              logger.error(
-                `Enhanced WebSocket service error: ${error.message}`,
-              );
-            });
+              enhancedWebSocketService.on("error", (error) => {
+                logger.error(
+                  `Enhanced WebSocket service error: ${error.message}`,
+                );
+              });
+
+              // Mark that we've set up listeners
+              enhancedWebSocketService.hasListeners = true;
+            }
           } catch (enhancedError) {
-            logger.warn(
+            logger.error(
               `Enhanced WebSocket service failed: ${enhancedError.message}`,
             );
-            logger.info("Falling back to legacy WebSocket service");
-
-            try {
-              // Fallback to legacy WebSocket service
-              websocketService.establishConnection(wsUrl);
-              logger.info(
-                "Legacy WebSocket service established for heartbeats",
-              );
-            } catch (legacyError) {
-              logger.error(
-                `Legacy WebSocket service also failed: ${legacyError.message}`,
-              );
-            }
           }
         } else {
           logger.warn(
